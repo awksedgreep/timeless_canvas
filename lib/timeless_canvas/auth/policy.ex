@@ -2,7 +2,7 @@ defmodule TimelessCanvas.Auth.Policy do
   @moduledoc """
   Authorization policy for canvas operations.
 
-  Admin users (determined by ADMIN_EMAILS env var) bypass all checks.
+  Admin users have role "admin" on the user struct.
   Canvas owners have full control. Editors can view and edit.
   Viewers can only view.
   """
@@ -16,13 +16,8 @@ defmodule TimelessCanvas.Auth.Policy do
   defp repo, do: TimelessCanvas.repo()
 
   @impl true
-  def admin?(%{email: email}) do
-    case System.get_env("ADMIN_EMAILS") do
-      nil -> false
-      "" -> false
-      emails -> email in String.split(emails, ",", trim: true)
-    end
-  end
+  def admin?(%{role: "admin"}), do: true
+  def admin?(_), do: false
 
   @impl true
   def authorize(user, canvas_record, action) do

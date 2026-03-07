@@ -159,10 +159,10 @@ defmodule TimelessCanvas.Persistence.Ecto do
   end
 
   @impl true
-  def lookup_user_by_email(email) do
+  def lookup_user_by_username(username) do
     case TimelessCanvas.user_schema() do
       nil -> nil
-      schema -> repo().get_by(schema, email: email)
+      schema -> repo().get_by(schema, username: username)
     end
   end
 end

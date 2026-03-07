@@ -40,5 +40,5 @@ defmodule TimelessCanvas.Persistence do
 
   @callback list_access(canvas_id()) :: [map()]
 
-  @callback lookup_user_by_email(email :: String.t()) :: struct() | nil
+  @callback lookup_user_by_username(username :: String.t()) :: struct() | nil
 end
