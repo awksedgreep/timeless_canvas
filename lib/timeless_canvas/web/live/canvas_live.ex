@@ -1489,14 +1489,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
         host = source.meta["host"] || source.meta["service_name"]
         defaults = Element.defaults_for(type)
 
-        existing_below =
-          socket.assigns.canvas.elements
-          |> Map.values()
-          |> Enum.count(fn el ->
-            el.x == source.x and el.y > source.y + source.height
-          end)
-
-        y_offset = source.height + 20 + existing_below * 70
+        {place_x, place_y} =
+          find_open_position(
+            socket.assigns.canvas.elements,
+            source.x,
+            source.y + source.height + 20,
+            defaults.width,
+            defaults.height
+          )
 
         meta =
           case type do
@@ -1507,8 +1507,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
         {canvas, el} =
           Canvas.add_element(socket.assigns.canvas, %{
             type: type,
-            x: source.x,
-            y: source.y + y_offset,
+            x: place_x,
+            y: place_y,
             width: defaults.width,
             height: defaults.height,
             color: defaults.color,
@@ -1543,21 +1543,20 @@ defmodule TimelessCanvas.Web.CanvasLive do
         host_ref = source.meta["host"] || source.meta["service_name"]
         defaults = Element.defaults_for(:graph)
 
-        existing_below =
-          socket.assigns.canvas.elements
-          |> Map.values()
-          |> Enum.count(fn el ->
-            el.type == :graph and el.x == source.x and
-              el.y > source.y + source.height
-          end)
-
-        y_offset = source.height + 20 + existing_below * 70
+        {place_x, place_y} =
+          find_open_position(
+            socket.assigns.canvas.elements,
+            source.x,
+            source.y + source.height + 20,
+            defaults.width,
+            defaults.height
+          )
 
         {canvas, el} =
           Canvas.add_element(socket.assigns.canvas, %{
             type: :graph,
-            x: source.x,
-            y: source.y + y_offset,
+            x: place_x,
+            y: place_y,
             width: defaults.width,
             height: defaults.height,
             color: defaults.color,
@@ -2168,14 +2167,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
     span_ms = socket.assigns.timeline_span * 1000
     half_span = div(span_ms, 2)
 
-    {data_start_ms, data_end_ms} =
-      case socket.assigns.timeline_data_range do
-        {s, e} -> {DateTime.to_unix(s, :millisecond), DateTime.to_unix(e, :millisecond)}
-        _ -> {now_ms - 86_400_000, now_ms}
-      end
-
-    slider_min = data_start_ms + half_span
-    slider_max = max(data_end_ms - half_span, slider_min + 60_000)
+    # Slider covers 10x the current span
+    slider_range_ms = span_ms * 10
+    slider_min = now_ms - slider_range_ms + half_span
+    slider_max = now_ms - half_span
 
     window_end_ms =
       case socket.assigns.timeline_time do
@@ -2415,6 +2410,36 @@ defmodule TimelessCanvas.Web.CanvasLive do
      |> push_canvas(canvas)
      |> assign(mode: :select, place_kind: :host)
      |> schedule_autosave()}
+  end
+
+  defp find_open_position(elements, anchor_x, anchor_y, width, height, gap \\ 20) do
+    others = Map.values(elements)
+
+    # Try placing below the anchor, scanning downward
+    find_clear_y(others, anchor_x, anchor_y, width, height, gap)
+  end
+
+  defp find_clear_y(others, x, y, w, h, gap) do
+    if overlaps_any?(others, x, y, w, h) do
+      # Find the bottom edge of the overlapping element(s) and try below it
+      next_y =
+        others
+        |> Enum.filter(&boxes_overlap?(&1.x, &1.y, &1.width, &1.height, x, y, w, h))
+        |> Enum.map(&(&1.y + &1.height + gap))
+        |> Enum.max()
+
+      find_clear_y(others, x, next_y, w, h, gap)
+    else
+      {x, y}
+    end
+  end
+
+  defp overlaps_any?(others, x, y, w, h) do
+    Enum.any?(others, &boxes_overlap?(&1.x, &1.y, &1.width, &1.height, x, y, w, h))
+  end
+
+  defp boxes_overlap?(ax, ay, aw, ah, bx, by, bw, bh) do
+    ax < bx + bw and ax + aw > bx and ay < by + bh and ay + ah > by
   end
 
   defp fetch_series_for_selected(socket, element_id) do

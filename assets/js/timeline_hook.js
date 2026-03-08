@@ -5,6 +5,7 @@ const TimelineSlider = {
     this.thumbEl = this.el.querySelector(".timeline-bar__thumb");
     this.liveDot = this.el.querySelector(".timeline-bar__live-dot");
     this.densityEl = this.el.querySelector(".timeline-bar__density");
+    this.ticksEl = this.el.querySelector(".timeline-bar__ticks");
 
     this.readAttrs();
     this.render();
@@ -22,6 +23,11 @@ const TimelineSlider = {
     this.handleEvent("update-density", (data) => {
       this.renderDensity(data.buckets);
     });
+  },
+
+  updated() {
+    this.readAttrs();
+    this.render();
   },
 
   readAttrs() {
@@ -53,6 +59,50 @@ const TimelineSlider = {
     if (this.liveDot) {
       this.liveDot.classList.toggle("timeline-bar__live-dot--active", this.isLive);
     }
+
+    this.renderTicks();
+  },
+
+  renderTicks() {
+    if (!this.ticksEl) return;
+    const range = this.max - this.min;
+    if (range <= 0) return;
+
+    // ~10 ticks across the slider
+    const tickCount = 10;
+    const tickInterval = range / tickCount;
+
+    // Align ticks to round time boundaries
+    const alignedInterval = this.roundInterval(tickInterval);
+    const firstTick = Math.ceil(this.min / alignedInterval) * alignedInterval;
+
+    let html = "";
+    for (let t = firstTick; t <= this.max; t += alignedInterval) {
+      const pct = ((t - this.min) / range) * 100;
+      if (pct < 0 || pct > 100) continue;
+      const date = new Date(t);
+      const h = date.getHours().toString().padStart(2, "0");
+      const m = date.getMinutes().toString().padStart(2, "0");
+      const s = date.getSeconds().toString().padStart(2, "0");
+      // Show seconds only for sub-minute intervals
+      const label = alignedInterval < 60000 ? `${h}:${m}:${s}` : `${h}:${m}`;
+      html += `<div class="timeline-bar__tick" style="left:${pct}%"><span>${label}</span></div>`;
+    }
+    this.ticksEl.innerHTML = html;
+  },
+
+  roundInterval(ms) {
+    // Snap to nice human-readable intervals
+    const candidates = [
+      5000, 10000, 15000, 30000,       // seconds
+      60000, 120000, 300000, 600000,    // minutes
+      1800000, 3600000,                 // 30m, 1h
+      7200000, 14400000, 21600000       // 2h, 4h, 6h
+    ];
+    for (const c of candidates) {
+      if (ms <= c) return c;
+    }
+    return 21600000;
   },
 
   renderDensity(buckets) {

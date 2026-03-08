@@ -653,11 +653,13 @@ body:has(.canvas-container) {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 44px;
+  height: 52px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  padding-top: 8px;
   gap: 8px;
-  padding: 0 12px;
+  padding-left: 12px;
+  padding-right: 12px;
   background: var(--toolbar-bg);
   border-top: 1px solid var(--toolbar-border);
   backdrop-filter: blur(12px);
@@ -716,6 +718,7 @@ body:has(.canvas-container) {
   outline: none;
   user-select: none;
   -webkit-user-select: none;
+  overflow: visible;
 }
 
 .timeline-bar__track:focus-visible {
@@ -728,6 +731,42 @@ body:has(.canvas-container) {
   inset: 0;
   border-radius: 3px;
   pointer-events: none;
+}
+
+.timeline-bar__ticks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100%;
+  pointer-events: none;
+}
+
+.timeline-bar__tick {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 0;
+}
+
+.timeline-bar__tick::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 100%;
+  background: rgba(148, 163, 184, 0.2);
+}
+
+.timeline-bar__tick span {
+  position: absolute;
+  bottom: -13px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 8px;
+  color: rgba(148, 163, 184, 0.6);
+  white-space: nowrap;
 }
 
 .timeline-bar__window {

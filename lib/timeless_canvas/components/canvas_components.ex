@@ -23,7 +23,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     # When expanded, use larger dimensions
     {render_w, render_h} =
       if is_expanded do
-        {assigns.element.width * 4, assigns.element.height * 5}
+        {assigns.element.width * 2, assigns.element.height * 2}
       else
         {assigns.element.width, assigns.element.height}
       end
@@ -322,11 +322,15 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     # Compute points, ticks, and polyline for expanded view
     points = Enum.reverse(assigns.expanded_graph_data)
 
+    meta = assigns.element.meta || %{}
+
     {min_val, max_val, y_ticks, polyline_points, area_points, tooltip_data, current_val} =
       if points != [] do
         {min_p, max_p} = Enum.min_max_by(points, &elem(&1, 1))
-        raw_min = elem(min_p, 1)
-        raw_max = elem(max_p, 1)
+        data_min = elem(min_p, 1)
+        data_max = elem(max_p, 1)
+        raw_min = parse_graph_bound(meta["y_min"], data_min)
+        raw_max = parse_graph_bound(meta["y_max"], data_max)
         val_range = max(raw_max - raw_min, 0.001)
         padded_min = raw_min - val_range * 0.05
         padded_max = raw_max + val_range * 0.05
@@ -339,8 +343,9 @@ defmodule TimelessCanvas.Components.CanvasComponents do
           points
           |> Enum.with_index()
           |> Enum.map(fn {{_ts, val}, i} ->
+            clamped = max(min(val, raw_max), raw_min)
             x = plot_x + i / max(count - 1, 1) * plot_w
-            y = plot_y + (1 - (val - padded_min) / padded_range) * plot_h
+            y = plot_y + (1 - (clamped - padded_min) / padded_range) * plot_h
             {Float.round(x, 1), Float.round(y, 1)}
           end)
 
@@ -1111,16 +1116,13 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   def timeline_bar(assigns) do
     now_ms = System.system_time(:millisecond)
 
-    {data_start_ms, data_end_ms} =
-      case assigns.timeline_data_range do
-        {s, e} -> {DateTime.to_unix(s, :millisecond), DateTime.to_unix(e, :millisecond)}
-        _ -> {now_ms - 86_400_000, now_ms}
-      end
-
     span_ms = assigns.timeline_span * 1000
     half_span = div(span_ms, 2)
-    slider_min = data_start_ms + half_span
-    slider_max = max(data_end_ms - half_span, slider_min + 60_000)
+
+    # Slider covers 10x the current span, centered on now
+    slider_range_ms = span_ms * 10
+    slider_min = now_ms - slider_range_ms + half_span
+    slider_max = now_ms - half_span
 
     {window_end_ms, is_live} =
       case assigns.timeline_time do
@@ -1176,6 +1178,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         tabindex="0"
       >
         <div class="timeline-bar__density"></div>
+        <div class="timeline-bar__ticks"></div>
         <div class="timeline-bar__window"></div>
         <div class="timeline-bar__thumb"></div>
         <div class={"timeline-bar__live-dot#{if @is_live, do: " timeline-bar__live-dot--active", else: ""}"}></div>
@@ -1190,5 +1193,15 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     ms
     |> DateTime.from_unix!(:millisecond)
     |> Calendar.strftime("%H:%M:%S")
+  end
+
+  defp parse_graph_bound(nil, fallback), do: fallback
+  defp parse_graph_bound("", fallback), do: fallback
+
+  defp parse_graph_bound(str, fallback) when is_binary(str) do
+    case Float.parse(str) do
+      {f, _} -> f
+      :error -> fallback
+    end
   end
 end
