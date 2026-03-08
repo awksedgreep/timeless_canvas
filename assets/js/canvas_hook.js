@@ -421,7 +421,7 @@ const CanvasHook = {
 
   onWheel(e) {
     e.preventDefault();
-    const factor = e.deltaY > 0 ? 1.1 : 0.9;
+    const factor = e.deltaY > 0 ? 1.05 : 0.95;
     const svgPt = this.clientToSvg(e.clientX, e.clientY);
     const vb = this.getViewBox();
 
