@@ -62,6 +62,10 @@ defmodule TimelessCanvas.DataSource.Manager do
     GenServer.call(server, {:metric_metadata, metric_name}, 10_000)
   end
 
+  def list_label_values(label_key, server \\ __MODULE__) do
+    GenServer.call(server, {:list_label_values, label_key}, 10_000)
+  end
+
   def text_metric_at(element_id, metric_name, time, server \\ __MODULE__) do
     GenServer.call(server, {:text_metric_at, element_id, metric_name, time})
   end
@@ -166,6 +170,17 @@ defmodule TimelessCanvas.DataSource.Manager do
     result =
       if function_exported?(state.module, :list_hosts, 1) do
         state.module.list_hosts(state.ds_state)
+      else
+        []
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:list_label_values, label_key}, _from, state) do
+    result =
+      if function_exported?(state.module, :list_label_values, 2) do
+        state.module.list_label_values(state.ds_state, label_key)
       else
         []
       end

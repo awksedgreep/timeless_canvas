@@ -80,10 +80,14 @@ defmodule TimelessCanvas.DataSource do
               time :: DateTime.t()
             ) :: {:ok, String.t()} | :no_data
 
+  @callback list_label_values(state :: term(), label_key :: String.t()) ::
+              [String.t()]
+
   @optional_callbacks [
     event_density: 4,
     list_series_for_host: 2,
     list_hosts: 1,
+    list_label_values: 2,
     metric_metadata: 2,
     text_metric: 3,
     text_metric_at: 4

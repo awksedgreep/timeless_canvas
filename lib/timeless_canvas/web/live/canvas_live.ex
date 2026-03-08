@@ -102,7 +102,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
          stream_popover: nil,
          metric_units: %{},
          resolved_elements: resolved_elements,
-         variable_options: build_variable_options(canvas.variables)
+         variable_options: build_variable_options(canvas.variables),
+         show_add_variable: false
        )
        |> refresh_data_range()
        |> refresh_discovered_hosts()
@@ -326,7 +327,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         </button>
       </div>
 
-      <div :if={map_size(@canvas.variables) > 0} class="canvas-var-bar">
+      <div class="canvas-var-bar">
         <div :for={{name, definition} <- @canvas.variables} class="canvas-var-item">
           <span class="canvas-var-label">${name}</span>
           <select phx-change="var:change" name={name} class="canvas-var-select">
@@ -348,6 +349,24 @@ defmodule TimelessCanvas.Web.CanvasLive do
             &times;
           </button>
         </div>
+        <button
+          :if={@can_edit && !@show_add_variable}
+          phx-click="var:show_add"
+          class="canvas-var-add-btn"
+          title="Add label variable"
+        >
+          + Label
+        </button>
+        <form
+          :if={@show_add_variable}
+          phx-submit="var:add"
+          class="canvas-var-add-form"
+          autocomplete="off"
+        >
+          <input type="text" name="name" placeholder="label name (e.g. ifName)" class="canvas-var-input" autocomplete="off" required />
+          <button type="submit" class="canvas-var-add-btn">Add</button>
+          <button type="button" phx-click="var:cancel_add" class="canvas-var-remove">&times;</button>
+        </form>
       </div>
 
       <div :if={@show_share && @is_owner} class="canvas-share-overlay">
@@ -495,7 +514,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp properties_panel(%{selected: %Element{}} = assigns) do
-    assigns = assign(assigns, meta_fields: Element.meta_fields(assigns.selected.type))
+    base_fields = Element.meta_fields(assigns.selected.type)
+
+    # Add canvas variable names as meta fields so users can set $varName references
+    var_fields =
+      assigns.canvas.variables
+      |> Map.keys()
+      |> Enum.reject(fn name -> name in base_fields end)
+
+    assigns = assign(assigns, meta_fields: base_fields ++ var_fields)
 
     ~H"""
     <div class="properties-panel">
@@ -896,9 +923,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp build_variable_options(variables) do
     Map.new(variables, fn {name, definition} ->
       case definition["type"] do
-        "host" -> {name, StatusManager.list_hosts()}
-        "custom" -> {name, definition["options"] || []}
-        _ -> {name, []}
+        "host" ->
+          {name, StatusManager.list_hosts()}
+
+        "label" ->
+          label_key = definition["label_key"] || name
+          {name, StatusManager.list_label_values(label_key)}
+
+        "custom" ->
+          {name, definition["options"] || []}
+
+        _ ->
+          {name, []}
       end
     end)
   end
@@ -1617,6 +1653,38 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end)
   end
 
+  def handle_event("var:show_add", _params, socket) do
+    {:noreply, assign(socket, show_add_variable: true)}
+  end
+
+  def handle_event("var:cancel_add", _params, socket) do
+    {:noreply, assign(socket, show_add_variable: false)}
+  end
+
+  def handle_event("var:add", params, socket) do
+    require_edit(socket, fn ->
+      name = String.trim(params["name"] || "")
+
+      if name != "" do
+        canvas = socket.assigns.canvas
+        var_def = %{"type" => "label", "label_key" => name, "current" => ""}
+        variables = Map.put(canvas.variables, name, var_def)
+        canvas = %{canvas | variables: variables}
+
+        socket =
+          socket
+          |> push_canvas(canvas)
+          |> refresh_variable_options()
+          |> assign(show_add_variable: false)
+          |> schedule_autosave()
+
+        {:noreply, socket}
+      else
+        {:noreply, socket}
+      end
+    end)
+  end
+
   def handle_event("var:remove", %{"name" => name}, socket) do
     require_edit(socket, fn ->
       canvas = socket.assigns.canvas
@@ -1655,7 +1723,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
   def handle_event("property:update_meta", %{"element_id" => id} = params, socket) do
     require_edit(socket, fn ->
       old_meta = socket.assigns.canvas.elements[id].meta
-      meta_fields = Element.meta_fields(socket.assigns.canvas.elements[id].type)
+      base_fields = Element.meta_fields(socket.assigns.canvas.elements[id].type)
+      var_fields = Map.keys(socket.assigns.canvas.variables) |> Enum.reject(&(&1 in base_fields))
+      meta_fields = base_fields ++ var_fields
 
       new_meta =
         Enum.reduce(meta_fields, old_meta, fn field, meta ->
