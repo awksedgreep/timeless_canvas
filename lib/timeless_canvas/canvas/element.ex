@@ -13,6 +13,7 @@ defmodule TimelessCanvas.Canvas.Element do
     label: "",
     color: "#4a9eff",
     meta: %{},
+    pins: %{},
     status: :unknown,
     z_index: 0
   ]
@@ -27,6 +28,7 @@ defmodule TimelessCanvas.Canvas.Element do
           label: String.t(),
           color: String.t(),
           meta: map(),
+          pins: map(),
           status: :ok | :warning | :error | :unknown,
           z_index: integer()
         }
@@ -48,6 +50,13 @@ defmodule TimelessCanvas.Canvas.Element do
     text: %{width: 200.0, height: 40.0, color: "#e2e8f0"},
     text_series: %{width: 200.0, height: 60.0, color: "#14b8a6"}
   }
+
+  @pin_dimensions ~w(host ifname)a
+
+  @doc """
+  Pin dimensions for host and interface pinning.
+  """
+  def pin_dimensions, do: @pin_dimensions
 
   @doc """
   Create a new element with type defaults merged with caller attrs.

@@ -7,7 +7,7 @@ defmodule TimelessCanvas.Canvas.Serializer do
   alias TimelessCanvas.Canvas
   alias TimelessCanvas.Canvas.{Connection, Element, ViewBox}
 
-  @version 1
+  @version 2
 
   @doc """
   Encode a Canvas struct to a JSON-encodable map.
@@ -31,7 +31,7 @@ defmodule TimelessCanvas.Canvas.Serializer do
   Decode a map (from JSON) back to a Canvas struct.
   Returns `{:ok, canvas}` or `{:error, reason}`.
   """
-  def decode(%{"version" => 1} = data) do
+  def decode(%{"version" => version} = data) when version in [1, 2] do
     canvas = %Canvas{
       view_box: decode_view_box(data["view_box"]),
       elements: decode_elements(data["elements"] || %{}),
@@ -70,6 +70,7 @@ defmodule TimelessCanvas.Canvas.Serializer do
          "label" => el.label,
          "color" => el.color,
          "meta" => el.meta,
+         "pins" => el.pins,
          "z_index" => el.z_index
        }}
     end)
@@ -115,6 +116,7 @@ defmodule TimelessCanvas.Canvas.Serializer do
         label: data["label"] || "",
         color: data["color"] || "#4a9eff",
         meta: data["meta"] || %{},
+        pins: migrate_pins(data["pins"] || %{}, data["meta"] || %{}),
         status: :unknown,
         z_index: data["z_index"] || 0
       }
@@ -148,4 +150,29 @@ defmodule TimelessCanvas.Canvas.Serializer do
   end
 
   defp safe_atom(val, _default) when is_atom(val), do: val
+
+  defp derive_pin(val) do
+    cond do
+      is_nil(val) or val == "" ->
+        %{"mode" => "none", "value" => ""}
+
+      String.starts_with?(val, "$") ->
+        %{"mode" => "variable", "value" => val}
+
+      true ->
+        %{"mode" => "literal", "value" => val}
+    end
+  end
+
+  defp migrate_pins(pins, meta) do
+    dims = ~w(host ifname)
+
+    Enum.reduce(dims, pins, fn dim, acc_pins ->
+      if Map.has_key?(acc_pins, dim) do
+        acc_pins
+      else
+        Map.put(acc_pins, dim, derive_pin(meta[dim]))
+      end
+    end)
+  end
 end

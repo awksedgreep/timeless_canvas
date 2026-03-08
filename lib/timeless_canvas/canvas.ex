@@ -45,7 +45,10 @@ defmodule TimelessCanvas.Canvas do
     id = "el-#{canvas.next_id}"
 
     element =
-      Element.new(Map.put(attrs, :id, id))
+      attrs
+      |> Map.put(:id, id)
+      |> Map.put(:pins, Map.get(attrs, :pins, %{}))
+      |> Element.new()
       |> maybe_snap(canvas)
 
     canvas = %{
@@ -128,6 +131,7 @@ defmodule TimelessCanvas.Canvas do
         label: template.label,
         color: template.color,
         meta: template.meta,
+        pins: template.pins,
         z_index: template.z_index,
         status: :unknown
       }

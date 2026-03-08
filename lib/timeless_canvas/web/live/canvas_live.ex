@@ -2,7 +2,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
   use TimelessCanvas.Web, :live_view
 
   alias TimelessCanvas.Canvas
-  alias TimelessCanvas.Canvas.{ViewBox, History, Element, Connection, Serializer, VariableResolver}
+
+  alias TimelessCanvas.Canvas.{
+    ViewBox,
+    History,
+    Element,
+    Connection,
+    Serializer,
+    VariableResolver
+  }
+
   alias TimelessCanvas.DataSource.Manager, as: StatusManager
   alias TimelessCanvas.StreamManager
   alias TimelessCanvas.MetricFormatter
@@ -65,6 +74,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       breadcrumbs = persistence().breadcrumb_chain(canvas_id)
 
+      pin_hosts = StatusManager.list_hosts()
+      pin_ifnames = StatusManager.list_label_values("ifname") || []
+
+      place_pins = %{
+        "host" => %{"mode" => "none", "value" => List.first(pin_hosts) || ""},
+        "ifname" => %{"mode" => "none", "value" => ""}
+      }
+
       {:ok,
        assign(socket,
          history: history,
@@ -98,6 +115,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
          pre_expand_viewbox: nil,
          available_series: [],
          discovered_hosts: [],
+         pin_hosts: pin_hosts,
+         pin_ifnames: pin_ifnames,
+         place_pins: place_pins,
          host_filter: "",
          stream_popover: nil,
          metric_units: %{},
@@ -107,6 +127,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
        )
        |> refresh_data_range()
        |> refresh_discovered_hosts()
+       |> refresh_pin_ifnames()
        |> fetch_metric_units()
        |> fill_graph_data_at(DateTime.utc_now())
        |> fill_text_data_at(DateTime.utc_now())
@@ -1025,6 +1046,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       vb = socket.assigns.canvas.view_box
       aspect = vb.width / vb.height
+
       {fit_w, fit_h} =
         if content_w / content_h > aspect do
           {content_w, content_w / aspect}
@@ -2402,6 +2424,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
     hosts = StatusManager.list_hosts()
     first = List.first(hosts)
     assign(socket, discovered_hosts: hosts, place_host: first)
+  end
+
+  defp refresh_pin_ifnames(socket) do
+    pin_ifnames = StatusManager.list_label_values("ifname") || []
+    assign(socket, pin_ifnames: pin_ifnames)
   end
 
   defp place_host_element(socket, host, x, y) do
