@@ -2067,7 +2067,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp fill_graph_data_at(socket, time) do
     graph_elements =
-      socket.assigns.canvas.elements
+      socket.assigns.resolved_elements
       |> Enum.filter(fn {_id, el} -> el.type == :graph end)
 
     span = socket.assigns.timeline_span
@@ -2103,7 +2103,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp fill_text_data_at(socket, time) do
     text_elements =
-      socket.assigns.canvas.elements
+      socket.assigns.resolved_elements
       |> Enum.filter(fn {_id, el} -> el.type == :text_series end)
 
     text_data =
@@ -2120,7 +2120,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp fetch_expanded_data(socket, element_id) do
-    case Map.get(socket.assigns.canvas.elements, element_id) do
+    case Map.get(socket.assigns.resolved_elements, element_id) do
       %{type: :graph} = element ->
         metric_name = Map.get(element.meta, "metric_name", "default")
         span = socket.assigns.timeline_span
