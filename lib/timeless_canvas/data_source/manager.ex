@@ -9,9 +9,11 @@ defmodule TimelessCanvas.DataSource.Manager do
   """
 
   use GenServer
+  require Logger
 
   @default_module TimelessCanvas.DataSource.Stub
   @default_poll_interval 10_000
+  @debug_report_interval 30_000
 
   def status_topic, do: "timeless_canvas:status"
   def metric_topic, do: "timeless_canvas:metrics"
@@ -88,10 +90,20 @@ defmodule TimelessCanvas.DataSource.Manager do
           ds_state: ds_state,
           elements: %{},
           poll_interval: poll_interval,
-          last_statuses: %{}
+          last_statuses: %{},
+          debug: %{
+            register_calls: 0,
+            registered_elements: 0,
+            polls: 0,
+            poll_time_us: 0,
+            statuses_broadcast: 0,
+            metrics_broadcast: 0,
+            text_metrics_broadcast: 0
+          }
         }
 
         schedule_poll(poll_interval)
+        schedule_debug_report()
         {:ok, state}
 
       {:error, reason} ->
@@ -107,7 +119,12 @@ defmodule TimelessCanvas.DataSource.Manager do
         {ds, Map.put(elmap, element.id, element)}
       end)
 
-    {:reply, :ok, %{state | ds_state: ds_state, elements: element_map}}
+    debug =
+      state.debug
+      |> Map.update!(:register_calls, &(&1 + 1))
+      |> Map.put(:registered_elements, map_size(element_map))
+
+    {:reply, :ok, %{state | ds_state: ds_state, elements: element_map, debug: debug}}
   end
 
   @impl true
@@ -233,9 +250,40 @@ defmodule TimelessCanvas.DataSource.Manager do
 
   @impl true
   def handle_info(:poll, state) do
-    state = poll_all(state)
+    {poll_us, state} =
+      :timer.tc(fn ->
+        state
+        |> update_in([:debug, :polls], &(&1 + 1))
+        |> poll_all()
+      end)
+
+    state = update_in(state, [:debug, :poll_time_us], &(&1 + poll_us))
+
     schedule_poll(state.poll_interval)
     {:noreply, state}
+  end
+
+  def handle_info(:debug_report, state) do
+    Logger.info(
+      "[canvas-prof] manager polls=#{state.debug.polls} register_calls=#{state.debug.register_calls} " <>
+        "registered_elements=#{state.debug.registered_elements} status_broadcasts=#{state.debug.statuses_broadcast} " <>
+        "metric_broadcasts=#{state.debug.metrics_broadcast} text_metric_broadcasts=#{state.debug.text_metrics_broadcast} " <>
+        "poll_time_ms=#{Float.round(state.debug.poll_time_us / 1000, 1)}"
+    )
+
+    schedule_debug_report()
+
+    debug = %{
+      state.debug
+      | polls: 0,
+        register_calls: 0,
+        poll_time_us: 0,
+        statuses_broadcast: 0,
+        metrics_broadcast: 0,
+        text_metrics_broadcast: 0
+    }
+
+    {:noreply, %{state | debug: debug}}
   end
 
   def handle_info(message, state) do
@@ -258,21 +306,28 @@ defmodule TimelessCanvas.DataSource.Manager do
     Process.send_after(self(), :poll, interval)
   end
 
+  defp schedule_debug_report do
+    Process.send_after(self(), :debug_report, @debug_report_interval)
+  end
+
   defp poll_all(state) do
     pubsub = TimelessCanvas.pubsub()
 
     Enum.reduce(state.elements, state, fn {element_id, element}, acc ->
-      acc = maybe_broadcast_status(acc, element_id, state.module.status(state.ds_state, element))
+      acc = maybe_broadcast_status(acc, element_id, state.module.status(acc.ds_state, element))
 
-      if element.type == :graph do
-        poll_metric(state, element_id, element, pubsub)
-      end
+      acc =
+        if element.type == :graph do
+          poll_metric(acc, element_id, element, pubsub)
+        else
+          acc
+        end
 
       if element.type == :text_series do
-        poll_text_metric(state, element_id, element, pubsub)
+        poll_text_metric(acc, element_id, element, pubsub)
+      else
+        acc
       end
-
-      acc
     end)
   end
 
@@ -289,8 +344,10 @@ defmodule TimelessCanvas.DataSource.Manager do
           {:element_metric, element_id, metric_name, value, timestamp}
         )
 
+        put_in(state.debug.metrics_broadcast, state.debug.metrics_broadcast + 1)
+
       :no_data ->
-        :ok
+        state
     end
   end
 
@@ -308,9 +365,13 @@ defmodule TimelessCanvas.DataSource.Manager do
             {:element_text_metric, element_id, metric_name, value, timestamp}
           )
 
+          put_in(state.debug.text_metrics_broadcast, state.debug.text_metrics_broadcast + 1)
+
         :no_data ->
-          :ok
+          state
       end
+    else
+      state
     end
   end
 
@@ -322,7 +383,9 @@ defmodule TimelessCanvas.DataSource.Manager do
         {:element_status, element_id, status}
       )
 
-      %{state | last_statuses: Map.put(state.last_statuses, element_id, status)}
+      state
+      |> Map.update!(:last_statuses, &Map.put(&1, element_id, status))
+      |> update_in([:debug, :statuses_broadcast], &(&1 + 1))
     else
       state
     end

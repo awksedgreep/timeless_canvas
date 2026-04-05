@@ -85,20 +85,20 @@ defmodule TimelessCanvas.Canvas.Element do
 
   @meta_fields %{
     rect: ~w(image_url),
-    server: ~w(host ip os role),
-    service: ~w(service_name version port),
-    database: ~w(engine host port db_name),
-    load_balancer: ~w(host algorithm port),
-    queue: ~w(broker queue_name host),
-    cache: ~w(engine host port),
-    router: ~w(host ip os role),
-    network: ~w(host cidr vlan),
-    graph: ~w(host metric_name y_min y_max),
-    log_stream: ~w(level metadata_filter),
-    trace_stream: ~w(service name kind),
+    server: ~w(host ip os role os_icon),
+    service: ~w(service_name version port icon),
+    database: ~w(engine host port db_name icon),
+    load_balancer: ~w(host algorithm port icon),
+    queue: ~w(broker queue_name host icon),
+    cache: ~w(engine host port icon),
+    router: ~w(host ip os role os_icon),
+    network: ~w(host cidr vlan icon),
+    graph: ~w(host metric_name series_label_key series_label_value y_min y_max icon),
+    log_stream: ~w(host level metadata_filter),
+    trace_stream: ~w(host service name kind),
     canvas: ~w(canvas_id),
     text: ~w(font_size),
-    text_series: ~w(host metric_name)
+    text_series: ~w(host metric_name icon)
   }
 
   @doc """

@@ -42,11 +42,13 @@ const TimelineSlider = {
     const range = this.max - this.min;
     if (range <= 0) return;
 
-    const pct = ((this.value - this.min) / range) * 100;
     const winPct = Math.min(this.windowRatio * 100, 100);
     const halfWin = winPct / 2;
+    const minCenterPct = halfWin;
+    const maxCenterPct = 100 - halfWin;
+    const rawPct = ((this.value - this.min) / range) * 100;
+    const pct = Math.max(minCenterPct, Math.min(maxCenterPct, rawPct));
 
-    // Window rectangle: centered on thumb position
     const winLeft = Math.max(0, pct - halfWin);
     const winRight = Math.min(100, pct + halfWin);
     this.windowEl.style.left = winLeft + "%";
@@ -197,7 +199,12 @@ const TimelineSlider = {
   clientXToValue(clientX) {
     const rect = this.track.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    return this.min + pct * (this.max - this.min);
+    const range = this.max - this.min;
+    const halfWindow = (this.windowRatio * range) / 2;
+    const minCenter = this.min + halfWindow;
+    const maxCenter = this.max - halfWindow;
+    const unclamped = this.min + pct * range;
+    return Math.max(minCenter, Math.min(maxCenter, unclamped));
   },
 
   onKeyDown(e) {

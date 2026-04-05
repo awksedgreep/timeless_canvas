@@ -31,11 +31,10 @@ defmodule TimelessCanvas.Router do
 
     quote do
       live_session :timeless_canvas,
-        on_mount:
-          [{TimelessCanvas.Web.Hooks, :assign_config}] ++ unquote(on_mount_hooks),
+        on_mount: [{TimelessCanvas.Web.Hooks, :assign_config}] ++ unquote(on_mount_hooks),
         session: %{"tc_base_path" => unquote(path)} do
-        live unquote(path), TimelessCanvas.Web.CanvasListLive
-        live unquote(path) <> "/:id", TimelessCanvas.Web.CanvasLive
+        live(unquote(path), TimelessCanvas.Web.CanvasListLive)
+        live(unquote(path) <> "/:id", TimelessCanvas.Web.CanvasLive)
       end
     end
   end

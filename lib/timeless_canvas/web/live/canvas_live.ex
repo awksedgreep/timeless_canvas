@@ -13,8 +13,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
   }
 
   alias TimelessCanvas.DataSource.Manager, as: StatusManager
+  alias TimelessCanvas.IconCatalog
   alias TimelessCanvas.StreamManager
   alias TimelessCanvas.MetricFormatter
+  require Logger
 
   defp persistence, do: TimelessCanvas.persistence()
   defp auth, do: TimelessCanvas.auth()
@@ -67,7 +69,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       stream_data =
         if connected?(socket) and map_size(canvas.elements) > 0 do
           StatusManager.register_elements(Map.values(resolved_elements))
-          register_stream_elements(canvas.elements)
+          register_stream_elements(resolved_elements)
         else
           %{}
         end
@@ -82,56 +84,72 @@ defmodule TimelessCanvas.Web.CanvasLive do
         "ifname" => %{"mode" => "none", "value" => ""}
       }
 
+      socket =
+        assign(socket,
+          history: history,
+          canvas: canvas,
+          selected_ids: MapSet.new(),
+          mode: :select,
+          place_host: nil,
+          place_host_type: :server,
+          place_kind: :host,
+          connect_from: nil,
+          canvas_name: record.name,
+          canvas_id: canvas_id,
+          user_id: current_user.id,
+          can_edit: can_edit,
+          is_owner: is_owner,
+          show_share: false,
+          renaming: false,
+          page_title: record.name,
+          breadcrumbs: breadcrumbs,
+          timeline_mode: :live,
+          timeline_time: nil,
+          timeline_span: 300,
+          timeline_data_range: nil,
+          graph_data: %{},
+          text_data: %{},
+          stream_data: stream_data,
+          clipboard: [],
+          paste_offset: 20,
+          expanded_graph_id: nil,
+          expanded_graph_data: [],
+          pre_expand_viewbox: nil,
+          available_series: [],
+          discovered_hosts: [],
+          pin_hosts: pin_hosts,
+          pin_ifnames: pin_ifnames,
+          place_pins: place_pins,
+          host_filter: "",
+          stream_popover: nil,
+          metric_units: %{},
+          resolved_elements: resolved_elements,
+          variable_options: build_variable_options(canvas.variables),
+          show_add_variable: false,
+          debug_counts: %{
+            status_msgs: 0,
+            metric_msgs: 0,
+            text_metric_msgs: 0,
+            stream_entry_msgs: 0,
+            stream_span_msgs: 0
+          }
+        )
+        |> refresh_data_range()
+        |> maybe_seed_historical_timeline()
+        |> refresh_discovered_hosts()
+        |> refresh_pin_ifnames()
+        |> fetch_metric_units()
+
+      initial_time = socket.assigns.timeline_time || DateTime.utc_now()
+
       {:ok,
-       assign(socket,
-         history: history,
-         canvas: canvas,
-         selected_ids: MapSet.new(),
-         mode: :select,
-         place_host: nil,
-         place_host_type: :server,
-         place_kind: :host,
-         connect_from: nil,
-         canvas_name: record.name,
-         canvas_id: canvas_id,
-         user_id: current_user.id,
-         can_edit: can_edit,
-         is_owner: is_owner,
-         show_share: false,
-         renaming: false,
-         page_title: record.name,
-         breadcrumbs: breadcrumbs,
-         timeline_mode: :live,
-         timeline_time: nil,
-         timeline_span: 300,
-         timeline_data_range: nil,
-         graph_data: %{},
-         text_data: %{},
-         stream_data: stream_data,
-         clipboard: [],
-         paste_offset: 20,
-         expanded_graph_id: nil,
-         expanded_graph_data: [],
-         pre_expand_viewbox: nil,
-         available_series: [],
-         discovered_hosts: [],
-         pin_hosts: pin_hosts,
-         pin_ifnames: pin_ifnames,
-         place_pins: place_pins,
-         host_filter: "",
-         stream_popover: nil,
-         metric_units: %{},
-         resolved_elements: resolved_elements,
-         variable_options: build_variable_options(canvas.variables),
-         show_add_variable: false
-       )
-       |> refresh_data_range()
-       |> refresh_discovered_hosts()
-       |> refresh_pin_ifnames()
-       |> fetch_metric_units()
-       |> fill_graph_data_at(DateTime.utc_now())
-       |> fill_text_data_at(DateTime.utc_now())
-       |> push_density_update()}
+       socket
+       |> fill_graph_data_at(initial_time)
+       |> fill_text_data_at(initial_time)
+       |> fill_stream_data_at(initial_time)
+       |> push_density_update()
+       |> schedule_graph_refresh()
+       |> schedule_debug_report()}
     else
       _ ->
         {:ok,
@@ -144,10 +162,21 @@ defmodule TimelessCanvas.Web.CanvasLive do
   @max_graph_points 60
   @max_graph_points_expanded 300
   @max_stream_entries 50
+  @base_viewbox_width 1200.0
+  @min_zoom_percent 10
+  @max_zoom_percent 190
+  @debug_report_interval 30_000
+  @default_graph_refresh_interval 2_000
+  @profile_skip_stream_updates false
+  @profile_skip_metric_updates false
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, type_labels: @type_labels)
+    assigns =
+      assigns
+      |> assign(type_labels: @type_labels)
+      |> assign(profile_hide_properties_panel: false)
+      |> assign(profile_hide_canvas_scene: false)
 
     ~H"""
     <div class={"canvas-container#{if sole_selected_object(@selected_ids, @canvas) != nil, do: " canvas-container--panel-open", else: ""}"}>
@@ -315,6 +344,17 @@ defmodule TimelessCanvas.Web.CanvasLive do
           Fit
         </button>
         <button
+          id="canvas-copy-svg"
+          type="button"
+          phx-hook="CanvasDebugCopy"
+          data-target="#canvas-svg"
+          class="canvas-toolbar__btn"
+          disabled={map_size(@canvas.elements) == 0}
+          title="Copy the rendered canvas SVG to the clipboard"
+        >
+          Copy SVG
+        </button>
+        <button
           phx-click="send_to_back"
           class="canvas-toolbar__btn"
           disabled={!@can_edit || MapSet.size(@selected_ids) == 0}
@@ -433,9 +473,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
           class="canvas-grid"
         />
 
-        <.shortcut_legend view_box={@canvas.view_box} />
+        <.shortcut_legend :if={!@profile_hide_canvas_scene} view_box={@canvas.view_box} />
 
         <.canvas_connection
+          :if={!@profile_hide_canvas_scene}
           :for={{_id, conn} <- @canvas.connections}
           connection={conn}
           source={@canvas.elements[conn.source_id]}
@@ -444,6 +485,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         />
 
         <.canvas_element
+          :if={!@profile_hide_canvas_scene}
           :for={element <- sorted_elements(@resolved_elements, @expanded_graph_id)}
           :key={element.id}
           element={element}
@@ -457,13 +499,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
           text_value={text_value_for(element, @text_data)}
         />
 
-        <.stream_popover :if={@stream_popover} popover={@stream_popover} />
+        <.stream_popover :if={!@profile_hide_canvas_scene && @stream_popover} popover={@stream_popover} />
       </svg>
 
       <.properties_panel
+        :if={!@profile_hide_properties_panel}
         selected={sole_selected_object(@selected_ids, @canvas)}
         canvas={@canvas}
         available_series={@available_series}
+        discovered_hosts={@discovered_hosts}
       />
 
       <.timeline_bar
@@ -475,6 +519,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       <div class="canvas-zoom-indicator">
         <span>{zoom_percentage(@canvas.view_box)}%</span>
+        <button
+          :if={map_size(@canvas.elements) > 0}
+          phx-click="center_view"
+          class="canvas-zoom-indicator__reset"
+        >
+          Center
+        </button>
         <button
           :if={zoom_percentage(@canvas.view_box) != 100}
           phx-click="zoom_reset"
@@ -543,7 +594,34 @@ defmodule TimelessCanvas.Web.CanvasLive do
       |> Map.keys()
       |> Enum.reject(fn name -> name in base_fields end)
 
-    assigns = assign(assigns, meta_fields: base_fields ++ var_fields)
+    assigns =
+      assign(assigns,
+        meta_fields: base_fields ++ var_fields,
+        icon_select_options:
+          icon_options("icon", assigns.selected.meta["icon"], IconCatalog.icon_options()),
+        os_icon_options:
+          icon_options("os_icon", assigns.selected.meta["os_icon"], IconCatalog.os_options())
+      )
+
+    assigns =
+      if assigns.selected.type == :graph do
+        selected_metric = assigns.selected.meta["metric_name"] || ""
+        selected_labels = graph_query_labels_from_meta(assigns.selected.meta)
+
+        matching_series =
+          matching_graph_series(assigns.available_series, selected_metric, selected_labels)
+
+        assign(assigns,
+          graph_host_options:
+            select_options("host", assigns.selected.meta["host"], assigns.discovered_hosts),
+          graph_metric_options: graph_metric_options(assigns.available_series, selected_metric),
+          graph_series_options:
+            graph_series_options(assigns.available_series, selected_metric, selected_labels),
+          graph_matching_series: matching_series
+        )
+      else
+        assigns
+      end
 
     ~H"""
     <div class="properties-panel">
@@ -593,9 +671,77 @@ defmodule TimelessCanvas.Web.CanvasLive do
           <input type="hidden" name="element_id" value={@selected.id} />
           <div :for={field <- @meta_fields} class="properties-panel__field">
             <label>{field}</label>
-            <input type="text" name={field} value={@selected.meta[field] || ""} />
+            <select :if={field == "icon"} name={field}>
+              <option
+                :for={{value, label} <- @icon_select_options}
+                value={value}
+                selected={value == (@selected.meta[field] || "")}
+              >
+                {label}
+              </option>
+            </select>
+            <select :if={field == "os_icon"} name={field}>
+              <option
+                :for={{value, label} <- @os_icon_options}
+                value={value}
+                selected={value == (@selected.meta[field] || "")}
+              >
+                {label}
+              </option>
+            </select>
+            <select :if={@selected.type == :graph && field == "host"} name={field}>
+              <option
+                :for={{value, label} <- @graph_host_options}
+                value={value}
+                selected={value == (@selected.meta[field] || "")}
+              >
+                {label}
+              </option>
+            </select>
+            <select :if={@selected.type == :graph && field == "metric_name"} name={field}>
+              <option
+                :for={{value, label} <- @graph_metric_options}
+                value={value}
+                selected={value == (@selected.meta[field] || "")}
+              >
+                {label}
+              </option>
+            </select>
+            <input
+              :if={
+                field not in
+                  ["icon", "os_icon", "host", "metric_name", "series_label_key", "series_label_value"]
+              }
+              type="text"
+              name={field}
+              value={@selected.meta[field] || ""}
+            />
+          </div>
+          <div :if={@selected.type == :graph} class="properties-panel__field">
+            <label>Series</label>
+            <select name="graph_series">
+              <option
+                :for={{value, label, selected?} <- @graph_series_options}
+                value={value}
+                selected={selected?}
+              >
+                {label}
+              </option>
+            </select>
           </div>
         </form>
+        <div :if={@selected.type == :graph} class="properties-panel__field">
+          <label>Matching Series</label>
+          <div class="properties-panel__series-list">
+            <div
+              :for={{metric_name, labels} <- @graph_matching_series}
+              class="properties-panel__series-btn"
+            >
+              <strong>{metric_name}</strong>
+              <span>{format_series_labels(labels)}</span>
+            </div>
+          </div>
+        </div>
       </div>
       <div :if={(@selected.meta["host"] || "") != ""} class="properties-panel__section">
         <h4 class="properties-panel__subtitle">Add Elements</h4>
@@ -906,7 +1052,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp find_object(_id, _canvas), do: nil
 
   defp zoom_percentage(%ViewBox{width: width}) do
-    round(1200.0 / width * 100)
+    round(@base_viewbox_width / width * 100)
   end
 
   # --- Helpers ---
@@ -916,6 +1062,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
     assign(socket, history: history, canvas: history.present)
     |> resolve_and_assign()
+    |> register_elements()
   end
 
   defp update_canvas(socket, %Canvas{} = canvas) do
@@ -923,6 +1070,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
     assign(socket, history: history, canvas: canvas)
     |> resolve_and_assign()
+    |> register_elements()
   end
 
   defp register_elements(socket) do
@@ -939,6 +1087,56 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp refresh_variable_options(socket) do
     assign(socket, variable_options: build_variable_options(socket.assigns.canvas.variables))
+  end
+
+  defp schedule_debug_report(socket) do
+    if connected?(socket) do
+      Process.send_after(self(), :debug_report, @debug_report_interval)
+    end
+
+    socket
+  end
+
+  defp schedule_graph_refresh(socket) do
+    if connected?(socket) do
+      Process.send_after(self(), :graph_refresh, graph_refresh_interval())
+    end
+
+    socket
+  end
+
+  defp graph_refresh_interval do
+    TimelessCanvas.data_source_config()
+    |> Keyword.get(:poll_interval, @default_graph_refresh_interval)
+  end
+
+  defp bump_render_stat(key, delta) do
+    Process.put(key, (Process.get(key) || 0) + delta)
+  end
+
+  defp consume_render_stats do
+    %{
+      sorted_calls: consume_render_stat(:sorted_calls),
+      sorted_time_us: consume_render_stat(:sorted_time_us),
+      graph_point_calls: consume_render_stat(:graph_point_calls),
+      graph_point_time_us: consume_render_stat(:graph_point_time_us),
+      canvas_element_calls: consume_render_stat(:canvas_element_calls),
+      canvas_element_time_us: consume_render_stat(:canvas_element_time_us),
+      graph_body_calls: consume_render_stat(:graph_body_calls),
+      graph_body_time_us: consume_render_stat(:graph_body_time_us),
+      expanded_graph_body_calls: consume_render_stat(:expanded_graph_body_calls),
+      expanded_graph_body_time_us: consume_render_stat(:expanded_graph_body_time_us),
+      log_stream_body_calls: consume_render_stat(:log_stream_body_calls),
+      log_stream_body_time_us: consume_render_stat(:log_stream_body_time_us),
+      trace_stream_body_calls: consume_render_stat(:trace_stream_body_calls),
+      trace_stream_body_time_us: consume_render_stat(:trace_stream_body_time_us)
+    }
+  end
+
+  defp consume_render_stat(key) do
+    value = Process.get(key) || 0
+    Process.delete(key)
+    value
   end
 
   defp build_variable_options(variables) do
@@ -959,6 +1157,132 @@ defmodule TimelessCanvas.Web.CanvasLive do
       end
     end)
   end
+
+  defp select_options(_field, selected, values) do
+    current = selected || ""
+
+    values
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&to_string/1)
+    |> then(fn opts ->
+      opts =
+        if current != "" and current not in opts do
+          [current | opts]
+        else
+          opts
+        end
+
+      [{"", "Select..."} | Enum.map(opts, &{&1, &1})]
+    end)
+  end
+
+  defp graph_metric_options(series, selected_metric) do
+    values =
+      series
+      |> Enum.map(fn {metric_name, _labels} -> metric_name end)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    select_options("metric_name", selected_metric, values)
+  end
+
+  defp graph_series_options(series, metric_name, selected_labels) do
+    selected_value = selected_graph_series_value(series, metric_name, selected_labels)
+
+    options =
+      series
+      |> Enum.filter(fn {name, _labels} -> name == metric_name end)
+      |> Enum.map(fn {_name, labels} ->
+        encoded = encode_graph_series(labels)
+        {encoded, format_series_labels(labels), encoded == selected_value}
+      end)
+      |> Enum.uniq()
+      |> Enum.sort_by(fn {_value, label, _selected?} -> label end)
+
+    [{"", "Any series", selected_value in [nil, ""]} | options]
+  end
+
+  defp selected_graph_series_value(series, metric_name, selected_labels) do
+    Enum.find_value(series, fn
+      {^metric_name, labels} ->
+        if series_matches_labels?(labels, selected_labels),
+          do: encode_graph_series(labels),
+          else: nil
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp matching_graph_series(series, metric_name, selected_labels) do
+    Enum.filter(series, fn {name, labels} ->
+      name == metric_name and series_matches_labels?(labels, selected_labels)
+    end)
+  end
+
+  defp format_series_labels(labels) when is_map(labels) do
+    labels
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_join(", ", fn {key, value} -> "#{key}=#{value}" end)
+  end
+
+  defp format_series_labels(_), do: ""
+
+  defp series_matches_labels?(_labels, selected_labels) when selected_labels in [%{}, nil],
+    do: true
+
+  defp series_matches_labels?(labels, selected_labels)
+       when is_map(labels) and is_map(selected_labels) do
+    Enum.all?(selected_labels, fn {key, value} -> Map.get(labels, key) == value end)
+  end
+
+  defp series_matches_labels?(_labels, _selected_labels), do: false
+
+  defp encode_graph_series(labels) when is_map(labels) do
+    labels
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Map.new()
+    |> Jason.encode!()
+    |> Base.url_encode64(padding: false)
+  end
+
+  defp decode_graph_series(""), do: %{}
+
+  defp decode_graph_series(value) when is_binary(value) do
+    with {:ok, json} <- Base.url_decode64(value, padding: false),
+         {:ok, labels} <- Jason.decode(json),
+         true <- is_map(labels) do
+      labels
+    else
+      _ -> %{}
+    end
+  end
+
+  defp graph_query_labels_from_meta(meta) when is_map(meta) do
+    base_meta =
+      meta
+      |> Map.drop([
+        "metric_name",
+        "series_label_key",
+        "series_label_value",
+        "y_min",
+        "y_max",
+        "icon",
+        "os_icon"
+      ])
+      |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
+      |> Map.new()
+
+    case {meta["series_label_key"], meta["series_label_value"]} do
+      {key, value} when is_binary(key) and key != "" and is_binary(value) and value != "" ->
+        Map.put(base_meta, key, value)
+
+      _ ->
+        base_meta
+    end
+  end
+
+  defp graph_query_labels_from_meta(_meta), do: %{}
 
   defp schedule_autosave(socket) do
     if Map.get(socket.assigns, :autosave_ref) do
@@ -988,12 +1312,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
         %{"min_x" => min_x, "min_y" => min_y, "width" => width, "height" => height},
         socket
       ) do
-    vb = %ViewBox{
+    requested_vb = %ViewBox{
       min_x: min_x / 1,
       min_y: min_y / 1,
-      width: max(width / 1, 100.0),
-      height: max(height / 1, 100.0)
+      width: width / 1,
+      height: height / 1
     }
+
+    vb = clamp_view_box(requested_vb)
 
     canvas = %{socket.assigns.canvas | view_box: vb}
     {:noreply, update_canvas(socket, canvas)}
@@ -1001,16 +1327,42 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("zoom_reset", _params, socket) do
     vb = socket.assigns.canvas.view_box
-    target_w = 1200.0
+    target_w = @base_viewbox_width
     target_h = target_w * (vb.height / vb.width)
-    center_x = vb.min_x + vb.width / 2
-    center_y = vb.min_y + vb.height / 2
+    {center_x, center_y} = content_center(socket.assigns.canvas.elements, vb)
+
+    new_vb =
+      clamp_view_box(%ViewBox{
+        min_x: center_x - target_w / 2,
+        min_y: center_y - target_h / 2,
+        width: target_w,
+        height: target_h
+      })
+
+    canvas = %{socket.assigns.canvas | view_box: new_vb}
+
+    socket =
+      socket
+      |> update_canvas(canvas)
+      |> push_event("set-viewbox", %{
+        x: new_vb.min_x,
+        y: new_vb.min_y,
+        width: new_vb.width,
+        height: new_vb.height
+      })
+
+    {:noreply, socket}
+  end
+
+  def handle_event("center_view", _params, socket) do
+    vb = socket.assigns.canvas.view_box
+    {center_x, center_y} = content_center(socket.assigns.canvas.elements, vb)
 
     new_vb = %ViewBox{
-      min_x: center_x - target_w / 2,
-      min_y: center_y - target_h / 2,
-      width: target_w,
-      height: target_h
+      min_x: center_x - vb.width / 2,
+      min_y: center_y - vb.height / 2,
+      width: vb.width,
+      height: vb.height
     }
 
     canvas = %{socket.assigns.canvas | view_box: new_vb}
@@ -1619,7 +1971,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
             height: defaults.height,
             color: defaults.color,
             label: metric_name,
-            meta: %{"host" => host_ref, "metric_name" => metric_name}
+            meta: IconCatalog.graph_meta(source, host_ref, metric_name)
           })
 
         bindings = VariableResolver.bindings(canvas.variables)
@@ -1745,6 +2097,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   def handle_event("property:update_meta", %{"element_id" => id} = params, socket) do
     require_edit(socket, fn ->
       old_meta = socket.assigns.canvas.elements[id].meta
+      old_type = socket.assigns.canvas.elements[id].type
       base_fields = Element.meta_fields(socket.assigns.canvas.elements[id].type)
       var_fields = Map.keys(socket.assigns.canvas.variables) |> Enum.reject(&(&1 in base_fields))
       meta_fields = base_fields ++ var_fields
@@ -1757,33 +2110,84 @@ defmodule TimelessCanvas.Web.CanvasLive do
             val -> Map.put(meta, field, val)
           end
         end)
+        |> maybe_apply_graph_series(old_meta, params["graph_series"])
 
       canvas = Canvas.update_element(socket.assigns.canvas, id, %{meta: new_meta})
+      socket = push_canvas(socket, canvas) |> schedule_autosave()
+      time = socket.assigns.timeline_time || DateTime.utc_now()
 
-      el = canvas.elements[id]
+      case Map.get(socket.assigns.resolved_elements, id) do
+        %{type: :log_stream} = resolved ->
+          StreamManager.register_log_stream(id, build_log_opts(resolved.meta))
 
-      case el.type do
-        :log_stream ->
-          StreamManager.register_log_stream(id, build_log_opts(new_meta))
-
-        :trace_stream ->
-          StreamManager.register_trace_stream(id, build_trace_opts(new_meta))
+        %{type: :trace_stream} = resolved ->
+          StreamManager.register_trace_stream(id, build_trace_opts(resolved.meta))
 
         _ ->
           :ok
       end
 
-      socket = push_canvas(socket, canvas) |> schedule_autosave()
-
       socket =
-        if new_meta["host"] != old_meta["host"] do
-          fetch_series_for_selected(socket, id)
-        else
-          socket
-        end
+        socket
+        |> maybe_refresh_selected_series(id, old_meta, new_meta)
+        |> maybe_refresh_element_data(id, old_type, time)
 
       {:noreply, socket}
     end)
+  end
+
+  defp maybe_apply_graph_series(meta, _old_meta, nil), do: meta
+
+  defp maybe_apply_graph_series(meta, old_meta, graph_series_value) do
+    selected_labels = decode_graph_series(graph_series_value)
+
+    old_label_keys =
+      old_meta
+      |> graph_query_labels_from_meta()
+      |> Map.keys()
+
+    meta
+    |> Map.drop(old_label_keys)
+    |> Map.delete("series_label_key")
+    |> Map.delete("series_label_value")
+    |> Map.merge(selected_labels)
+  end
+
+  defp maybe_refresh_selected_series(socket, id, old_meta, new_meta) do
+    if new_meta["host"] != old_meta["host"] do
+      fetch_series_for_selected(socket, id)
+    else
+      socket
+    end
+  end
+
+  defp maybe_refresh_element_data(socket, _id, :graph, time) do
+    socket
+    |> fetch_metric_units()
+    |> fill_graph_data_at(time)
+  end
+
+  defp maybe_refresh_element_data(socket, _id, :text_series, time) do
+    socket
+    |> fetch_metric_units()
+    |> fill_text_data_at(time)
+  end
+
+  defp maybe_refresh_element_data(socket, _id, _type, _time), do: socket
+
+  defp icon_options(_field, nil, options), do: options
+  defp icon_options(_field, "", options), do: options
+
+  defp icon_options(_field, current, options) do
+    if Enum.any?(options, fn {value, _label} -> value == current end) do
+      options
+    else
+      [
+        {"", "Auto"},
+        {current, "Custom: #{current}"}
+        | Enum.reject(options, fn {value, _label} -> value == "" end)
+      ]
+    end
   end
 
   def handle_event("property:update_connection", %{"conn_id" => id} = params, socket) do
@@ -1848,7 +2252,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
      |> refresh_data_range()
      |> fill_graph_data_at(DateTime.utc_now())
      |> push_slider_update()
-     |> push_density_update()}
+     |> push_density_update()
+     |> schedule_graph_refresh()}
   end
 
   def handle_event("timeline:change", %{"time" => center_ms}, socket)
@@ -1874,8 +2279,32 @@ defmodule TimelessCanvas.Web.CanvasLive do
         :error -> 300
       end
 
-    socket = assign(socket, timeline_span: span)
-    time = socket.assigns.timeline_time || DateTime.utc_now()
+    {socket, time} =
+      case socket.assigns.timeline_time do
+        %DateTime{} = window_end ->
+          old_half_span_ms = div(socket.assigns.timeline_span * 1000, 2)
+          new_half_span_ms = div(span * 1000, 2)
+
+          window_center_ms =
+            DateTime.to_unix(window_end, :millisecond) - old_half_span_ms
+
+          adjusted_window_end =
+            DateTime.from_unix!(window_center_ms + new_half_span_ms, :millisecond)
+
+          statuses = StatusManager.statuses_at(adjusted_window_end)
+          canvas = apply_statuses(socket.assigns.canvas, statuses)
+
+          {
+            socket
+            |> update_canvas(canvas)
+            |> assign(timeline_span: span, timeline_time: adjusted_window_end),
+            adjusted_window_end
+          }
+
+        nil ->
+          updated_socket = assign(socket, timeline_span: span)
+          {updated_socket, DateTime.utc_now()}
+      end
 
     {:noreply,
      socket
@@ -1893,38 +2322,27 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   @impl true
   def handle_info({:element_status, element_id, status}, socket) do
+    socket = update(socket, :debug_counts, &Map.update!(&1, :status_msgs, fn n -> n + 1 end))
+
     if socket.assigns.timeline_mode == :live do
       canvas = Canvas.set_element_status(socket.assigns.canvas, element_id, status)
-      {:noreply, update_canvas(socket, canvas)}
+      history = %{socket.assigns.history | present: canvas}
+      {:noreply, assign(socket, history: history, canvas: canvas)}
     else
       {:noreply, socket}
     end
   end
 
   def handle_info({:element_metric, element_id, _metric_name, value, timestamp}, socket) do
-    if socket.assigns.timeline_mode == :live do
-      graph_data = socket.assigns.graph_data
-      points = Map.get(graph_data, element_id, [])
-      points = Enum.take([{timestamp, value} | points], @max_graph_points)
-      graph_data = Map.put(graph_data, element_id, points)
-      socket = assign(socket, graph_data: graph_data)
-
-      socket =
-        if socket.assigns.expanded_graph_id == element_id do
-          points = socket.assigns.expanded_graph_data
-          points = Enum.take([{timestamp, value} | points], @max_graph_points_expanded)
-          assign(socket, expanded_graph_data: points)
-        else
-          socket
-        end
-
-      {:noreply, socket}
-    else
-      {:noreply, socket}
-    end
+    socket = update(socket, :debug_counts, &Map.update!(&1, :metric_msgs, fn n -> n + 1 end))
+    _ = {element_id, value, timestamp}
+    {:noreply, socket}
   end
 
   def handle_info({:element_text_metric, element_id, _metric_name, value, timestamp}, socket) do
+    socket =
+      update(socket, :debug_counts, &Map.update!(&1, :text_metric_msgs, fn n -> n + 1 end))
+
     if socket.assigns.timeline_mode == :live do
       text_data = Map.put(socket.assigns.text_data, element_id, {timestamp, value})
       {:noreply, assign(socket, text_data: text_data)}
@@ -1934,26 +2352,39 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_info({:stream_entry, element_id, entry_map}, socket) do
-    if socket.assigns.timeline_mode == :live do
-      stream_data = socket.assigns.stream_data
-      entries = Map.get(stream_data, element_id, [])
-      entries = Enum.take([entry_map | entries], @max_stream_entries)
-      stream_data = Map.put(stream_data, element_id, entries)
-      {:noreply, assign(socket, stream_data: stream_data)}
-    else
+    socket =
+      update(socket, :debug_counts, &Map.update!(&1, :stream_entry_msgs, fn n -> n + 1 end))
+
+    if @profile_skip_stream_updates do
       {:noreply, socket}
+    else
+      if socket.assigns.timeline_mode == :live do
+        stream_data = socket.assigns.stream_data
+        entries = Map.get(stream_data, element_id, [])
+        entries = Enum.take([entry_map | entries], @max_stream_entries)
+        stream_data = Map.put(stream_data, element_id, entries)
+        {:noreply, assign(socket, stream_data: stream_data)}
+      else
+        {:noreply, socket}
+      end
     end
   end
 
   def handle_info({:stream_span, element_id, span_map}, socket) do
-    if socket.assigns.timeline_mode == :live do
-      stream_data = socket.assigns.stream_data
-      entries = Map.get(stream_data, element_id, [])
-      entries = Enum.take([span_map | entries], @max_stream_entries)
-      stream_data = Map.put(stream_data, element_id, entries)
-      {:noreply, assign(socket, stream_data: stream_data)}
-    else
+    socket = update(socket, :debug_counts, &Map.update!(&1, :stream_span_msgs, fn n -> n + 1 end))
+
+    if @profile_skip_stream_updates do
       {:noreply, socket}
+    else
+      if socket.assigns.timeline_mode == :live do
+        stream_data = socket.assigns.stream_data
+        entries = Map.get(stream_data, element_id, [])
+        entries = Enum.take([span_map | entries], @max_stream_entries)
+        stream_data = Map.put(stream_data, element_id, entries)
+        {:noreply, assign(socket, stream_data: stream_data)}
+      else
+        {:noreply, socket}
+      end
     end
   end
 
@@ -1964,6 +2395,47 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
 
     {:noreply, socket}
+  end
+
+  def handle_info(:graph_refresh, socket) do
+    socket =
+      if socket.assigns.timeline_mode == :live do
+        fill_graph_data_at(socket, DateTime.utc_now())
+      else
+        socket
+      end
+
+    {:noreply, schedule_graph_refresh(socket)}
+  end
+
+  def handle_info(:debug_report, socket) do
+    counts = socket.assigns.debug_counts
+    render_stats = consume_render_stats()
+
+    Logger.info(
+      "[canvas-prof] liveview canvas_id=#{socket.assigns.canvas_id} timeline_mode=#{socket.assigns.timeline_mode} " <>
+        "resolved_elements=#{map_size(socket.assigns.resolved_elements)} status_msgs=#{counts.status_msgs} " <>
+        "metric_msgs=#{counts.metric_msgs} text_metric_msgs=#{counts.text_metric_msgs} " <>
+        "stream_entry_msgs=#{counts.stream_entry_msgs} stream_span_msgs=#{counts.stream_span_msgs} " <>
+        "sorted_calls=#{render_stats.sorted_calls} sorted_time_ms=#{Float.round(render_stats.sorted_time_us / 1000, 1)} " <>
+        "graph_point_calls=#{render_stats.graph_point_calls} graph_point_time_ms=#{Float.round(render_stats.graph_point_time_us / 1000, 1)} " <>
+        "canvas_element_calls=#{render_stats.canvas_element_calls} canvas_element_time_ms=#{Float.round(render_stats.canvas_element_time_us / 1000, 1)} " <>
+        "graph_body_calls=#{render_stats.graph_body_calls} graph_body_time_ms=#{Float.round(render_stats.graph_body_time_us / 1000, 1)} " <>
+        "expanded_graph_body_calls=#{render_stats.expanded_graph_body_calls} expanded_graph_body_time_ms=#{Float.round(render_stats.expanded_graph_body_time_us / 1000, 1)} " <>
+        "log_stream_body_calls=#{render_stats.log_stream_body_calls} log_stream_body_time_ms=#{Float.round(render_stats.log_stream_body_time_us / 1000, 1)} " <>
+        "trace_stream_body_calls=#{render_stats.trace_stream_body_calls} trace_stream_body_time_ms=#{Float.round(render_stats.trace_stream_body_time_us / 1000, 1)}"
+    )
+
+    {:noreply,
+     socket
+     |> assign(:debug_counts, %{
+       status_msgs: 0,
+       metric_msgs: 0,
+       text_metric_msgs: 0,
+       stream_entry_msgs: 0,
+       stream_span_msgs: 0
+     })
+     |> schedule_debug_report()}
   end
 
   # --- Guards ---
@@ -1979,47 +2451,61 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # --- Private helpers ---
 
   defp sorted_elements(elements, expanded_id) do
-    elements
-    |> Map.values()
-    |> Enum.sort_by(&{if(&1.id == expanded_id, do: 1, else: 0), &1.z_index, &1.id})
+    {elapsed_us, result} =
+      :timer.tc(fn ->
+        elements
+        |> Map.values()
+        |> Enum.sort_by(&{if(&1.id == expanded_id, do: 1, else: 0), &1.z_index, &1.id})
+      end)
+
+    bump_render_stat(:sorted_calls, 1)
+    bump_render_stat(:sorted_time_us, elapsed_us)
+    result
   end
 
   defp graph_points_for(%{type: :graph} = element, graph_data) do
-    case Map.get(graph_data, element.id) do
-      nil ->
-        ""
+    {elapsed_us, result} =
+      :timer.tc(fn ->
+        case Map.get(graph_data, element.id) do
+          nil ->
+            ""
 
-      [] ->
-        ""
+          [] ->
+            ""
 
-      points ->
-        points = Enum.reverse(points)
-        count = length(points)
+          points ->
+            points = Enum.reverse(points)
+            {{first_ts, _}, {last_ts, _}} = {List.first(points), List.last(points)}
+            time_range = max(last_ts - first_ts, 1)
 
-        {data_min, data_max} =
-          Enum.min_max_by(points, &elem(&1, 1))
-          |> then(fn {min, max} -> {elem(min, 1), elem(max, 1)} end)
+            {_data_min, data_max} =
+              Enum.min_max_by(points, &elem(&1, 1))
+              |> then(fn {min, max} -> {elem(min, 1), elem(max, 1)} end)
 
-        meta = element.meta || %{}
-        min_val = parse_bound(meta["y_min"], data_min)
-        max_val = parse_bound(meta["y_max"], data_max)
-        val_range = max(max_val - min_val, 0.1)
-        padding = 14
+            meta = element.meta || %{}
+            min_val = graph_min_bound(meta, points)
+            max_val = parse_bound(meta["y_max"], data_max)
+            val_range = max(max_val - min_val, 0.1)
+            padding = 14
 
-        points
-        |> Enum.with_index()
-        |> Enum.map(fn {{_ts, val}, i} ->
-          x = element.x + i / max(count - 1, 1) * element.width
-          clamped = max(min(val, max_val), min_val)
+            points
+            |> Enum.map(fn {ts, val} ->
+              x = element.x + (ts - first_ts) / time_range * element.width
+              clamped = max(min(val, max_val), min_val)
 
-          y =
-            element.y + padding +
-              (1 - (clamped - min_val) / val_range) * (element.height - padding - 2)
+              y =
+                element.y + padding +
+                  (1 - (clamped - min_val) / val_range) * (element.height - padding - 2)
 
-          "#{Float.round(x, 1)},#{Float.round(y, 1)}"
-        end)
-        |> Enum.join(" ")
-    end
+              "#{Float.round(x, 1)},#{Float.round(y, 1)}"
+            end)
+            |> Enum.join(" ")
+        end
+      end)
+
+    bump_render_stat(:graph_point_calls, 1)
+    bump_render_stat(:graph_point_time_us, elapsed_us)
+    result
   end
 
   defp graph_points_for(_element, _graph_data), do: ""
@@ -2033,6 +2519,44 @@ defmodule TimelessCanvas.Web.CanvasLive do
       :error -> fallback
     end
   end
+
+  defp graph_min_bound(meta, points) do
+    {data_min, _data_max} =
+      Enum.min_max_by(points, &elem(&1, 1))
+      |> then(fn {min, max} -> {elem(min, 1), elem(max, 1)} end)
+
+    cond do
+      explicit_nonzero_bound?(meta["y_min"]) ->
+        parse_bound(meta["y_min"], data_min)
+
+      counter_series?(meta) ->
+        data_min
+
+      true ->
+        parse_bound(meta["y_min"], 0.0)
+    end
+  end
+
+  defp explicit_nonzero_bound?(nil), do: false
+  defp explicit_nonzero_bound?(""), do: false
+
+  defp explicit_nonzero_bound?(value) when is_binary(value) do
+    case Float.parse(value) do
+      {parsed, _} when parsed == 0.0 -> false
+      {_nonzero, _} -> true
+      :error -> false
+    end
+  end
+
+  defp counter_series?(meta) when is_map(meta) do
+    case Map.get(meta, "type") do
+      "counter32" -> true
+      "counter64" -> true
+      _ -> false
+    end
+  end
+
+  defp counter_series?(_meta), do: false
 
   defp graph_value_for(%{type: :graph} = element, graph_data, metric_units) do
     case Map.get(graph_data, element.id) do
@@ -2066,75 +2590,112 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp backfill_graph(socket, _el), do: socket
 
   defp fill_graph_data_at(socket, time) do
-    graph_elements =
-      socket.assigns.resolved_elements
-      |> Enum.filter(fn {_id, el} -> el.type == :graph end)
+    trace_canvas_span(
+      "canvas.fill_graph_data",
+      %{
+        "canvas.id" => socket.assigns.canvas_id,
+        "canvas.timeline_mode" => to_string(socket.assigns.timeline_mode),
+        "canvas.timeline_span_seconds" => socket.assigns.timeline_span,
+        "canvas.query_time_unix_ms" => DateTime.to_unix(time, :millisecond),
+        "canvas.graph_count" => count_elements(socket.assigns.resolved_elements, :graph),
+        "canvas.expanded_graph" => socket.assigns.expanded_graph_id || ""
+      },
+      fn ->
+        graph_elements =
+          socket.assigns.resolved_elements
+          |> Enum.filter(fn {_id, el} -> el.type == :graph end)
 
-    span = socket.assigns.timeline_span
-    from = DateTime.add(time, -span, :second)
+        span = socket.assigns.timeline_span
+        from = DateTime.add(time, -span, :second)
 
-    graph_data =
-      Enum.reduce(graph_elements, socket.assigns.graph_data, fn {id, element}, acc ->
-        metric_name = Map.get(element.meta, "metric_name", "default")
+        graph_data =
+          Enum.reduce(graph_elements, socket.assigns.graph_data, fn {id, element}, acc ->
+            metric_name = Map.get(element.meta, "metric_name", "default")
 
-        points =
-          case StatusManager.metric_range(id, metric_name, from, time) do
-            {:ok, pts} when pts != [] ->
-              downsample(pts, @max_graph_points)
+            points =
+              case StatusManager.metric_range(id, metric_name, from, time) do
+                {:ok, pts} when pts != [] ->
+                  downsample(pts, @max_graph_points)
 
-            _ ->
-              []
-          end
+                _ ->
+                  []
+              end
 
-        Map.put(acc, id, points)
-      end)
+            Map.put(acc, id, points)
+          end)
 
-    socket = assign(socket, graph_data: graph_data)
+        socket = assign(socket, graph_data: graph_data)
 
-    case socket.assigns.expanded_graph_id do
-      nil ->
-        socket
+        case socket.assigns.expanded_graph_id do
+          nil ->
+            socket
 
-      expanded_id ->
-        expanded_data = fetch_expanded_data(socket, expanded_id)
-        assign(socket, expanded_graph_data: expanded_data)
-    end
+          expanded_id ->
+            expanded_data = fetch_expanded_data(socket, expanded_id)
+            assign(socket, expanded_graph_data: expanded_data)
+        end
+      end
+    )
   end
 
   defp fill_text_data_at(socket, time) do
-    text_elements =
-      socket.assigns.resolved_elements
-      |> Enum.filter(fn {_id, el} -> el.type == :text_series end)
+    trace_canvas_span(
+      "canvas.fill_text_data",
+      %{
+        "canvas.id" => socket.assigns.canvas_id,
+        "canvas.timeline_mode" => to_string(socket.assigns.timeline_mode),
+        "canvas.timeline_span_seconds" => socket.assigns.timeline_span,
+        "canvas.query_time_unix_ms" => DateTime.to_unix(time, :millisecond),
+        "canvas.text_series_count" =>
+          count_elements(socket.assigns.resolved_elements, :text_series)
+      },
+      fn ->
+        text_elements =
+          socket.assigns.resolved_elements
+          |> Enum.filter(fn {_id, el} -> el.type == :text_series end)
 
-    text_data =
-      Enum.reduce(text_elements, socket.assigns.text_data, fn {id, element}, acc ->
-        metric_name = Map.get(element.meta, "metric_name", "default")
+        text_data =
+          Enum.reduce(text_elements, socket.assigns.text_data, fn {id, element}, acc ->
+            metric_name = Map.get(element.meta, "metric_name", "default")
 
-        case StatusManager.text_metric_at(id, metric_name, time) do
-          {:ok, value} -> Map.put(acc, id, {DateTime.to_unix(time, :millisecond), value})
-          :no_data -> acc
-        end
-      end)
+            case StatusManager.text_metric_at(id, metric_name, time) do
+              {:ok, value} -> Map.put(acc, id, {DateTime.to_unix(time, :millisecond), value})
+              :no_data -> acc
+            end
+          end)
 
-    assign(socket, text_data: text_data)
+        assign(socket, text_data: text_data)
+      end
+    )
   end
 
   defp fetch_expanded_data(socket, element_id) do
-    case Map.get(socket.assigns.resolved_elements, element_id) do
-      %{type: :graph} = element ->
-        metric_name = Map.get(element.meta, "metric_name", "default")
-        span = socket.assigns.timeline_span
-        time = socket.assigns.timeline_time || DateTime.utc_now()
-        from = DateTime.add(time, -span, :second)
+    trace_canvas_span(
+      "canvas.fetch_expanded_graph",
+      %{
+        "canvas.id" => socket.assigns.canvas_id,
+        "canvas.element_id" => element_id,
+        "canvas.timeline_mode" => to_string(socket.assigns.timeline_mode),
+        "canvas.timeline_span_seconds" => socket.assigns.timeline_span
+      },
+      fn ->
+        case Map.get(socket.assigns.resolved_elements, element_id) do
+          %{type: :graph} = element ->
+            metric_name = Map.get(element.meta, "metric_name", "default")
+            span = socket.assigns.timeline_span
+            time = socket.assigns.timeline_time || DateTime.utc_now()
+            from = DateTime.add(time, -span, :second)
 
-        case StatusManager.metric_range(element_id, metric_name, from, time) do
-          {:ok, pts} when pts != [] -> downsample(pts, @max_graph_points_expanded)
-          _ -> []
+            case StatusManager.metric_range(element_id, metric_name, from, time) do
+              {:ok, pts} when pts != [] -> downsample(pts, @max_graph_points_expanded)
+              _ -> []
+            end
+
+          _ ->
+            []
         end
-
-      _ ->
-        []
-    end
+      end
+    )
   end
 
   defp downsample(points, max_count) when length(points) <= max_count do
@@ -2151,21 +2712,88 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp fill_stream_data_at(socket, time) do
-    span = socket.assigns.timeline_span
-    from = DateTime.add(time, -span, :second)
-    backends = TimelessCanvas.stream_backends()
+    trace_canvas_span(
+      "canvas.fill_stream_data",
+      %{
+        "canvas.id" => socket.assigns.canvas_id,
+        "canvas.timeline_mode" => to_string(socket.assigns.timeline_mode),
+        "canvas.timeline_span_seconds" => socket.assigns.timeline_span,
+        "canvas.query_time_unix_ms" => DateTime.to_unix(time, :millisecond),
+        "canvas.log_stream_count" =>
+          count_elements(socket.assigns.resolved_elements, :log_stream),
+        "canvas.trace_stream_count" =>
+          count_elements(socket.assigns.resolved_elements, :trace_stream)
+      },
+      fn ->
+        span = socket.assigns.timeline_span
+        from = DateTime.add(time, -span, :second)
+        backends = TimelessCanvas.stream_backends()
 
-    stream_elements =
-      socket.assigns.canvas.elements
-      |> Enum.filter(fn {_id, el} -> el.type in [:log_stream, :trace_stream] end)
+        stream_elements =
+          socket.assigns.resolved_elements
+          |> Enum.filter(fn {_id, el} -> el.type in [:log_stream, :trace_stream] end)
 
-    stream_data =
-      Enum.reduce(stream_elements, socket.assigns.stream_data, fn {id, element}, acc ->
-        entries = query_stream_historical(element, from, time, backends)
-        Map.put(acc, id, entries)
-      end)
+        stream_data =
+          Enum.reduce(stream_elements, socket.assigns.stream_data, fn {id, element}, acc ->
+            entries = query_stream_historical(element, from, time, backends)
+            Map.put(acc, id, entries)
+          end)
 
-    assign(socket, stream_data: stream_data)
+        assign(socket, stream_data: stream_data)
+      end
+    )
+  end
+
+  defp count_elements(elements, type) do
+    Enum.count(elements, fn
+      {_id, %{type: ^type}} -> true
+      _ -> false
+    end)
+  end
+
+  defp trace_canvas_span(name, attributes, fun) when is_function(fun, 0) do
+    if otel_available?() do
+      tracer = apply(:opentelemetry, :get_application_tracer, [__MODULE__])
+
+      apply(:otel_tracer, :with_span, [
+        tracer,
+        name,
+        %{attributes: attributes},
+        fn _span_ctx ->
+          try do
+            fun.()
+          rescue
+            exception ->
+              maybe_record_exception(exception, __STACKTRACE__)
+              maybe_set_span_status(:error, Exception.message(exception))
+              reraise(exception, __STACKTRACE__)
+          catch
+            kind, reason ->
+              maybe_set_span_status(:error, Exception.format_banner(kind, reason))
+              :erlang.raise(kind, reason, __STACKTRACE__)
+          end
+        end
+      ])
+    else
+      fun.()
+    end
+  end
+
+  defp otel_available? do
+    Code.ensure_loaded?(:opentelemetry) and Code.ensure_loaded?(:otel_tracer) and
+      Code.ensure_loaded?(OpenTelemetry.Tracer)
+  end
+
+  defp maybe_record_exception(exception, stacktrace) do
+    if Code.ensure_loaded?(OpenTelemetry.Tracer) do
+      apply(OpenTelemetry.Tracer, :record_exception, [exception, stacktrace])
+    end
+  end
+
+  defp maybe_set_span_status(code, message) do
+    if Code.ensure_loaded?(OpenTelemetry.Tracer) do
+      apply(OpenTelemetry.Tracer, :set_status, [code, message])
+    end
   end
 
   defp query_stream_historical(%{type: :log_stream} = element, from, to, backends) do
@@ -2254,15 +2882,27 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  defp maybe_seed_historical_timeline(socket) do
+    now = DateTime.utc_now()
+    live_window_start = DateTime.add(now, -socket.assigns.timeline_span, :second)
+
+    case socket.assigns.timeline_data_range do
+      {_data_start, %DateTime{} = newest} ->
+        if DateTime.compare(newest, live_window_start) == :lt do
+          assign(socket, timeline_mode: :historical, timeline_time: newest)
+        else
+          socket
+        end
+
+      _ ->
+        socket
+    end
+  end
+
   defp push_slider_update(socket) do
     now_ms = System.system_time(:millisecond)
     span_ms = socket.assigns.timeline_span * 1000
     half_span = div(span_ms, 2)
-
-    # Slider covers 10x the current span
-    slider_range_ms = span_ms * 10
-    slider_min = now_ms - slider_range_ms + half_span
-    slider_max = now_ms - half_span
 
     window_end_ms =
       case socket.assigns.timeline_time do
@@ -2270,9 +2910,24 @@ defmodule TimelessCanvas.Web.CanvasLive do
         %DateTime{} = t -> DateTime.to_unix(t, :millisecond)
       end
 
-    value = min(window_end_ms - half_span, slider_max)
-    window_ratio = min(span_ms / max(slider_max - slider_min, 1), 1.0)
     is_live = socket.assigns.timeline_time == nil
+
+    {slider_min, slider_max} =
+      timeline_slider_bounds(
+        socket.assigns.timeline_data_range,
+        window_end_ms,
+        span_ms,
+        half_span,
+        is_live,
+        now_ms
+      )
+
+    value =
+      (window_end_ms - half_span)
+      |> max(slider_min + half_span)
+      |> min(slider_max - half_span)
+
+    window_ratio = min(span_ms / max(slider_max - slider_min, 1), 1.0)
 
     push_event(socket, "update-slider", %{
       min: slider_min,
@@ -2292,6 +2947,56 @@ defmodule TimelessCanvas.Web.CanvasLive do
       _ ->
         push_event(socket, "update-density", %{buckets: []})
     end
+  end
+
+  defp timeline_slider_bounds(
+         {data_start, data_end},
+         _window_end_ms,
+         _span_ms,
+         _half_span,
+         false,
+         _now_ms
+       )
+       when is_struct(data_start, DateTime) and is_struct(data_end, DateTime) do
+    data_start_ms = DateTime.to_unix(data_start, :millisecond)
+    data_end_ms = DateTime.to_unix(data_end, :millisecond)
+    slider_max = max(data_end_ms, data_start_ms + 1)
+
+    if slider_max > data_start_ms do
+      {data_start_ms, slider_max}
+    else
+      {data_start_ms, data_start_ms + 1}
+    end
+  end
+
+  defp timeline_slider_bounds(
+         _timeline_data_range,
+         _window_end_ms,
+         span_ms,
+         _half_span,
+         true,
+         now_ms
+       ) do
+    slider_range_ms = span_ms * 10
+    {now_ms - slider_range_ms, now_ms}
+  end
+
+  defp timeline_slider_bounds(
+         _timeline_data_range,
+         window_end_ms,
+         span_ms,
+         half_span,
+         false,
+         _now_ms
+       ) do
+    historical_window_bounds(window_end_ms, span_ms, half_span)
+  end
+
+  defp historical_window_bounds(window_end_ms, span_ms, half_span) do
+    window_center_ms = window_end_ms - half_span
+    slider_range_ms = span_ms * 10
+    half_range_ms = div(slider_range_ms, 2)
+    {window_center_ms - half_range_ms, window_center_ms + half_range_ms}
   end
 
   defp text_value_for(%{type: :text_series} = element, text_data) do
@@ -2334,6 +3039,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
     opts = []
 
     opts =
+      case Map.get(meta, "host") do
+        nil -> opts
+        "" -> opts
+        host -> Keyword.put(opts, :metadata, %{"host" => host})
+      end
+
+    opts =
       case Map.get(meta, "level") do
         nil -> opts
         "" -> opts
@@ -2358,12 +3070,33 @@ defmodule TimelessCanvas.Web.CanvasLive do
             end
           end)
 
-        if map_size(metadata) > 0, do: Keyword.put(opts, :metadata, metadata), else: opts
+        if map_size(metadata) > 0 do
+          merged =
+            opts
+            |> Keyword.get(:metadata, %{})
+            |> Map.merge(metadata)
+
+          Keyword.put(opts, :metadata, merged)
+        else
+          opts
+        end
     end
   end
 
   defp build_trace_opts(meta) do
     opts = []
+
+    opts =
+      case Map.get(meta, "host") do
+        nil ->
+          opts
+
+        "" ->
+          opts
+
+        host ->
+          Keyword.put(opts, :attributes, %{"host.name" => host})
+      end
 
     opts =
       case Map.get(meta, "service") do
@@ -2568,6 +3301,34 @@ defmodule TimelessCanvas.Web.CanvasLive do
       {f, _} -> Map.put(map, key, f)
       :error -> map
     end
+  end
+
+  defp clamp_view_box(%ViewBox{} = vb) do
+    zoomed_width =
+      @base_viewbox_width * 100.0 /
+        min(max(zoom_percentage(vb), @min_zoom_percent), @max_zoom_percent)
+
+    scale = zoomed_width / vb.width
+
+    %ViewBox{
+      min_x: vb.min_x,
+      min_y: vb.min_y,
+      width: zoomed_width,
+      height: vb.height * scale
+    }
+  end
+
+  defp content_center(elements, %ViewBox{} = vb) when map_size(elements) == 0 do
+    {vb.min_x + vb.width / 2, vb.min_y + vb.height / 2}
+  end
+
+  defp content_center(elements, _vb) do
+    list = Map.values(elements)
+    min_x = list |> Enum.map(& &1.x) |> Enum.min()
+    min_y = list |> Enum.map(& &1.y) |> Enum.min()
+    max_x = list |> Enum.map(&(&1.x + &1.width)) |> Enum.max()
+    max_y = list |> Enum.map(&(&1.y + &1.height)) |> Enum.max()
+    {(min_x + max_x) / 2, (min_y + max_y) / 2}
   end
 
   defp maybe_put_float(map, key, val) when is_number(val) do

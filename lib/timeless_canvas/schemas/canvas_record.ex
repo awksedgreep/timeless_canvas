@@ -5,17 +5,17 @@ defmodule TimelessCanvas.Schemas.CanvasRecord do
   @user_schema Application.compile_env(:timeless_canvas, :user_schema)
 
   schema "canvases" do
-    field :name, :string
-    field :data, :map
+    field(:name, :string)
+    field(:data, :map)
 
     if @user_schema do
-      belongs_to :user, @user_schema
+      belongs_to(:user, @user_schema)
     else
-      field :user_id, :integer
+      field(:user_id, :integer)
     end
 
-    belongs_to :parent, __MODULE__
-    has_many :children, __MODULE__, foreign_key: :parent_id
+    belongs_to(:parent, __MODULE__)
+    has_many(:children, __MODULE__, foreign_key: :parent_id)
 
     timestamps()
   end

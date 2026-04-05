@@ -1,7 +1,7 @@
 defmodule TimelessCanvas.MixProject do
   use Mix.Project
 
-  @version "0.4.1"
+  @version "0.4.2"
 
   def project do
     [
@@ -28,6 +28,8 @@ defmodule TimelessCanvas.MixProject do
 
   defp deps do
     [
+      {:floki, ">= 0.30.0"},
+      {:iconify_ex, "~> 0.7"},
       {:phoenix, "~> 1.8"},
       {:phoenix_ecto, "~> 4.5"},
       {:phoenix_live_view, "~> 1.1"},

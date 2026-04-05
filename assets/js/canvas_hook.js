@@ -9,6 +9,9 @@
  */
 const CanvasHook = {
   mounted() {
+    this.baseViewBoxWidth = 1200;
+    this.minZoomPercent = 10;
+    this.maxZoomPercent = 190;
     this.svg = this.el;
     this.dragging = null; // null | {type: "pan"|"element"|"handle"|"marquee", ...}
     this.startClient = null; // {x, y} in client pixels
@@ -68,12 +71,6 @@ const CanvasHook = {
     // Handle set-viewbox events from the server
     this.handleEvent("set-viewbox", ({ x, y, width, height }) => {
       this.setViewBox(x, y, width, height);
-      this.pushEvent("canvas:zoom", {
-        min_x: x,
-        min_y: y,
-        width: width,
-        height: height,
-      });
     });
   },
 
@@ -421,18 +418,16 @@ const CanvasHook = {
 
   onWheel(e) {
     e.preventDefault();
-    const factor = e.deltaY > 0 ? 1.05 : 0.95;
+    const factor = e.deltaY > 0 ? 1.025 : 0.975;
     const svgPt = this.clientToSvg(e.clientX, e.clientY);
     const vb = this.getViewBox();
 
-    const newWidth = vb.width * factor;
-    const newHeight = vb.height * factor;
+    const newWidth = this.clampZoomWidth(vb.width * factor);
+    const newHeight = vb.height * (newWidth / vb.width);
 
-    // Enforce limits
-    if (newWidth < 100 || newWidth > 50000) return;
-
-    const newMinX = svgPt.x - (svgPt.x - vb.minX) * factor;
-    const newMinY = svgPt.y - (svgPt.y - vb.minY) * factor;
+    const appliedFactor = newWidth / vb.width;
+    const newMinX = svgPt.x - (svgPt.x - vb.minX) * appliedFactor;
+    const newMinY = svgPt.y - (svgPt.y - vb.minY) * appliedFactor;
 
     this.setViewBox(newMinX, newMinY, newWidth, newHeight);
 
@@ -491,10 +486,10 @@ const CanvasHook = {
       this.pushEvent("element:nudge", { dx: amount, dy: 0 });
     } else if ((e.key === "+" || e.key === "=") && !ctrl) {
       e.preventDefault();
-      this.zoomByFactor(0.9);
+      this.zoomByFactor(0.95);
     } else if (e.key === "-" && !ctrl) {
       e.preventDefault();
-      this.zoomByFactor(1.1);
+      this.zoomByFactor(1.05);
     } else if (e.key === "z" && ctrl && e.shiftKey) {
       e.preventDefault();
       this.pushEvent("canvas:redo", {});
@@ -526,12 +521,12 @@ const CanvasHook = {
     const svgPt = this.clientToSvg(centerX, centerY);
     const vb = this.getViewBox();
 
-    const newWidth = vb.width * factor;
-    const newHeight = vb.height * factor;
-    if (newWidth < 100 || newWidth > 50000) return;
+    const newWidth = this.clampZoomWidth(vb.width * factor);
+    const newHeight = vb.height * (newWidth / vb.width);
 
-    const newMinX = svgPt.x - (svgPt.x - vb.minX) * factor;
-    const newMinY = svgPt.y - (svgPt.y - vb.minY) * factor;
+    const appliedFactor = newWidth / vb.width;
+    const newMinX = svgPt.x - (svgPt.x - vb.minX) * appliedFactor;
+    const newMinY = svgPt.y - (svgPt.y - vb.minY) * appliedFactor;
     this.setViewBox(newMinX, newMinY, newWidth, newHeight);
 
     this.pushEvent("canvas:zoom", {
@@ -540,6 +535,12 @@ const CanvasHook = {
       width: newWidth,
       height: newHeight,
     });
+  },
+
+  clampZoomWidth(width) {
+    const minWidth = (this.baseViewBoxWidth * 100) / this.maxZoomPercent;
+    const maxWidth = (this.baseViewBoxWidth * 100) / this.minZoomPercent;
+    return Math.min(Math.max(width, minWidth), maxWidth);
   },
 
   // --- Connect Mode Temp Line ---
