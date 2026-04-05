@@ -93,7 +93,7 @@ defmodule TimelessCanvas.Canvas.Element do
     cache: ~w(engine host port icon),
     router: ~w(host ip os role os_icon),
     network: ~w(host cidr vlan icon),
-    graph: ~w(host metric_name series_label_key series_label_value y_min y_max icon),
+    graph: ~w(host metric_name y_min y_max icon),
     log_stream: ~w(host level metadata_filter),
     trace_stream: ~w(host service name kind),
     canvas: ~w(canvas_id),

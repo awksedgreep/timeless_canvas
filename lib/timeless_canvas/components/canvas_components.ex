@@ -1340,7 +1340,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   attr(:timeline_mode, :atom, required: true)
   attr(:timeline_time, :any, default: nil)
-  attr(:timeline_span, :integer, default: 300)
+  attr(:timeline_span, :integer, default: 3600)
   attr(:timeline_data_range, :any, default: nil)
 
   @span_options [

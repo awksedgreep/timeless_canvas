@@ -105,7 +105,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           breadcrumbs: breadcrumbs,
           timeline_mode: :live,
           timeline_time: nil,
-          timeline_span: 300,
+          timeline_span: 3600,
           timeline_data_range: nil,
           graph_data: %{},
           text_data: %{},
@@ -597,6 +597,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
     assigns =
       assign(assigns,
         meta_fields: base_fields ++ var_fields,
+        display_meta_fields: display_meta_fields(base_fields ++ var_fields, assigns.selected.type),
         icon_select_options:
           icon_options("icon", assigns.selected.meta["icon"], IconCatalog.icon_options()),
         os_icon_options:
@@ -669,8 +670,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
         <h4 class="properties-panel__subtitle">Metadata</h4>
         <form phx-change="property:update_meta" phx-submit="property:update_meta">
           <input type="hidden" name="element_id" value={@selected.id} />
-          <div :for={field <- @meta_fields} class="properties-panel__field">
-            <label>{field}</label>
+          <div :for={field <- @display_meta_fields} class="properties-panel__field">
+            <label>{if field == "graph_series", do: "Series", else: field}</label>
             <select :if={field == "icon"} name={field}>
               <option
                 :for={{value, label} <- @icon_select_options}
@@ -707,19 +708,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
                 {label}
               </option>
             </select>
-            <input
-              :if={
-                field not in
-                  ["icon", "os_icon", "host", "metric_name", "series_label_key", "series_label_value"]
-              }
-              type="text"
-              name={field}
-              value={@selected.meta[field] || ""}
-            />
-          </div>
-          <div :if={@selected.type == :graph} class="properties-panel__field">
-            <label>Series</label>
-            <select name="graph_series">
+            <select :if={@selected.type == :graph && field == "graph_series"} name="graph_series">
               <option
                 :for={{value, label, selected?} <- @graph_series_options}
                 value={value}
@@ -728,6 +717,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
                 {label}
               </option>
             </select>
+            <input
+              :if={
+                field not in
+                  ["icon", "os_icon", "host", "metric_name", "graph_series"]
+              }
+              type="text"
+              name={field}
+              value={@selected.meta[field] || ""}
+            />
           </div>
         </form>
         <div :if={@selected.type == :graph} class="properties-panel__field">
@@ -1257,6 +1255,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
       _ -> %{}
     end
   end
+
+  defp display_meta_fields(fields, :graph) do
+    fields
+    |> List.insert_at(Enum.find_index(fields, &(&1 == "y_min")) || length(fields), "graph_series")
+    |> Enum.uniq()
+  end
+
+  defp display_meta_fields(fields, _type), do: fields
 
   defp graph_query_labels_from_meta(meta) when is_map(meta) do
     base_meta =
@@ -3121,13 +3127,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp auto_zoom_to_element(socket, element_id) do
     element = socket.assigns.canvas.elements[element_id]
-    exp_w = element.width * 4
-    exp_h = element.height * 5
+    exp_w = element.width * 2
+    exp_h = element.height * 2
     padding = 40
+    center_x = element.x + exp_w / 2
+    center_y = element.y + exp_h / 2
 
     push_event(socket, "set-viewbox", %{
-      x: element.x - padding,
-      y: element.y - padding,
+      x: center_x - exp_w / 2 - padding,
+      y: center_y - exp_h / 2 - padding,
       width: exp_w + padding * 2,
       height: exp_h + padding * 2
     })
