@@ -1505,26 +1505,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       %{type: :graph} ->
         if socket.assigns.expanded_graph_id == id do
-          socket =
-            case socket.assigns.pre_expand_viewbox do
-              %ViewBox{} = vb ->
-                push_event(socket, "set-viewbox", %{
-                  x: vb.min_x,
-                  y: vb.min_y,
-                  width: vb.width,
-                  height: vb.height
-                })
-
-              _ ->
-                socket
-            end
-
           {:noreply,
-           assign(socket,
-             expanded_graph_id: nil,
-             expanded_graph_data: [],
-             pre_expand_viewbox: nil
-           )}
+           assign(socket, expanded_graph_id: nil, expanded_graph_data: [], pre_expand_viewbox: nil)}
         else
           expanded_data = fetch_expanded_data(socket, id)
 
@@ -1535,7 +1517,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
               pre_expand_viewbox: socket.assigns.canvas.view_box
             )
 
-          {:noreply, auto_zoom_to_element(socket, id)}
+          {:noreply, socket}
         end
 
       _ ->
@@ -3123,22 +3105,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
       "" -> opts
       kind -> Keyword.put(opts, :kind, String.to_existing_atom(kind))
     end
-  end
-
-  defp auto_zoom_to_element(socket, element_id) do
-    element = socket.assigns.canvas.elements[element_id]
-    exp_w = element.width * 2
-    exp_h = element.height * 2
-    padding = 40
-    center_x = element.x + exp_w / 2
-    center_y = element.y + exp_h / 2
-
-    push_event(socket, "set-viewbox", %{
-      x: center_x - exp_w / 2 - padding,
-      y: center_y - exp_h / 2 - padding,
-      width: exp_w + padding * 2,
-      height: exp_h + padding * 2
-    })
   end
 
   defp fetch_metric_units(socket) do
