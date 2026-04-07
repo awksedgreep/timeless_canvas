@@ -418,7 +418,7 @@ const CanvasHook = {
 
   onWheel(e) {
     e.preventDefault();
-    const factor = e.deltaY > 0 ? 1.025 : 0.975;
+    const factor = e.deltaY > 0 ? 1.015 : 0.985;
     const svgPt = this.clientToSvg(e.clientX, e.clientY);
     const vb = this.getViewBox();
 
@@ -486,10 +486,10 @@ const CanvasHook = {
       this.pushEvent("element:nudge", { dx: amount, dy: 0 });
     } else if ((e.key === "+" || e.key === "=") && !ctrl) {
       e.preventDefault();
-      this.zoomByFactor(0.95);
+      this.zoomByFactor(0.97);
     } else if (e.key === "-" && !ctrl) {
       e.preventDefault();
-      this.zoomByFactor(1.05);
+      this.zoomByFactor(1.03);
     } else if (e.key === "z" && ctrl && e.shiftKey) {
       e.preventDefault();
       this.pushEvent("canvas:redo", {});
