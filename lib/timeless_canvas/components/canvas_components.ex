@@ -11,6 +11,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   attr(:element, Element, required: true)
   attr(:selected, :boolean, default: false)
   attr(:graph_points, :string, default: "")
+  attr(:graph_data_points, :list, default: [])
   attr(:graph_value, :string, default: nil)
   attr(:stream_entries, :list, default: [])
   attr(:expanded_graph_id, :string, default: nil)
@@ -47,6 +48,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
           <.element_body
             element={@element}
             graph_points={@graph_points}
+            graph_data_points={@graph_data_points}
             graph_value={@graph_value}
             stream_entries={@stream_entries}
             is_expanded={@is_expanded}
@@ -548,12 +550,38 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
         graph_title = if unit, do: "#{base_title} (#{unit})", else: base_title
         graph_icon = IconCatalog.graph_icon_name(assigns.element)
+        points = Enum.reverse(assigns.graph_data_points)
+        meta = assigns.element.meta || %{}
+
+        {plot_x, plot_y, plot_w, plot_h, min_val, max_val, val_range, y_ticks, x_ticks,
+         polyline_points} =
+          compact_graph_geometry(assigns.element, points, meta)
+
+        y_tick_labels =
+          Enum.map(y_ticks, fn tick ->
+            {tick, MetricFormatter.format(tick / 1.0, unit)}
+          end)
+
+        x_tick_labels =
+          Enum.map(x_ticks, fn {ts, frac} ->
+            {format_time(ts), frac}
+          end)
 
         assigns =
           assign(assigns,
             graph_title: graph_title,
             graph_icon: graph_icon,
-            graph_title_x: assigns.element.x + if(graph_icon, do: 32, else: 4)
+            graph_title_x: assigns.element.x + if(graph_icon, do: 32, else: 4),
+            plot_x: plot_x,
+            plot_y: plot_y,
+            plot_w: plot_w,
+            plot_h: plot_h,
+            min_val: min_val,
+            max_val: max_val,
+            val_range: val_range,
+            y_tick_labels: y_tick_labels,
+            x_tick_labels: x_tick_labels,
+            polyline_points: polyline_points
           )
 
         ~H"""
@@ -567,15 +595,51 @@ defmodule TimelessCanvas.Components.CanvasComponents do
           fill="#0f172a"
           class="canvas-element__body"
         />
+        <clipPath id={"graph-plot-clip-#{@element.id}"}>
+          <rect x={@plot_x} y={@plot_y} width={@plot_w} height={@plot_h} rx="2" />
+        </clipPath>
+        <line
+          :for={{tick, _label} <- @y_tick_labels}
+          x1={@plot_x}
+          y1={@plot_y + (1 - (tick - @min_val) / @val_range) * @plot_h}
+          x2={@plot_x + @plot_w}
+          y2={@plot_y + (1 - (tick - @min_val) / @val_range) * @plot_h}
+          stroke="#1e293b"
+          stroke-width="0.5"
+          stroke-dasharray="3 3"
+        />
+        <text
+          :for={{tick, label} <- @y_tick_labels}
+          x={@plot_x - 3}
+          y={compact_y_tick_label_y(tick, @plot_y, @plot_h, @min_val, @val_range)}
+          text-anchor="end"
+          fill="#64748b"
+          font-size="6"
+          font-family="monospace"
+        >
+          {label}
+        </text>
+        <text
+          :for={{label, frac} <- @x_tick_labels}
+          x={compact_x_tick_label_x(frac, @plot_x, @plot_w)}
+          y={@element.y + @element.height - 2}
+          text-anchor="middle"
+          fill="#64748b"
+          font-size="6"
+          font-family="monospace"
+        >
+          {label}
+        </text>
         <polyline
           :if={@graph_points != ""}
-          points={@graph_points}
+          points={@polyline_points}
           fill="none"
           stroke={@element.color}
           stroke-width="1.5"
           stroke-linejoin="round"
           stroke-linecap="round"
           class="canvas-graph__line"
+          clip-path={"url(#graph-plot-clip-#{@element.id})"}
         />
         <clipPath id={"graph-clip-#{@element.id}"}>
           <rect x={@element.x} y={@element.y} width={@element.width} height={@element.height} />
@@ -1330,6 +1394,76 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       ts_ms = round(first_ms + frac * span_ms)
       {DateTime.from_unix!(ts_ms, :millisecond), frac}
     end
+  end
+
+  defp compact_graph_geometry(element, [], _meta) do
+    plot_x = element.x + 28
+    plot_y = element.y + 20
+    plot_w = max(element.width - 32, 1)
+    plot_h = max(element.height - 34, 1)
+
+    {plot_x, plot_y, plot_w, plot_h, 0.0, 1.0, 1.0, [], [], ""}
+  end
+
+  defp compact_graph_geometry(element, points, meta) do
+    plot_x = element.x + 28
+    plot_y = element.y + 20
+    plot_w = max(element.width - 32, 1)
+    plot_h = max(element.height - 34, 1)
+
+    {min_p, max_p} = Enum.min_max_by(points, &elem(&1, 1))
+    data_min = elem(min_p, 1)
+    data_max = elem(max_p, 1)
+    min_val = graph_bound_min(meta, data_min)
+    max_val = parse_graph_bound(meta["y_max"], data_max)
+    val_range = max(max_val - min_val, 0.001)
+
+    polyline_points =
+      points
+      |> Enum.with_index()
+      |> Enum.map(fn {{_ts, val}, i} ->
+        x = plot_x + i / max(length(points) - 1, 1) * plot_w
+        clamped = max(min(val, max_val), min_val)
+        y = plot_y + (1 - (clamped - min_val) / val_range) * plot_h
+        "#{Float.round(x, 1)},#{Float.round(y, 1)}"
+      end)
+      |> Enum.join(" ")
+
+    y_ticks =
+      min_val
+      |> y_axis_ticks(max_val)
+      |> compact_tick_subset(3)
+
+    x_ticks =
+      points
+      |> List.first()
+      |> elem(0)
+      |> x_axis_ticks(elem(List.last(points), 0))
+      |> compact_tick_subset(3)
+
+    {plot_x, plot_y, plot_w, plot_h, min_val, max_val, val_range, y_ticks, x_ticks,
+     polyline_points}
+  end
+
+  defp compact_y_tick_label_y(tick, plot_y, plot_h, min_val, val_range) do
+    raw_y = plot_y + (1 - (tick - min_val) / val_range) * plot_h + 3
+    raw_y |> max(plot_y + 6) |> min(plot_y + plot_h - 1)
+  end
+
+  defp compact_x_tick_label_x(frac, plot_x, plot_w) do
+    raw_x = plot_x + frac * plot_w
+    raw_x |> max(plot_x + 12) |> min(plot_x + plot_w - 12)
+  end
+
+  defp compact_tick_subset(ticks, max_count) when length(ticks) <= max_count, do: ticks
+
+  defp compact_tick_subset(ticks, max_count) do
+    last_index = length(ticks) - 1
+
+    0..(max_count - 1)
+    |> Enum.map(fn idx -> round(idx * last_index / max(max_count - 1, 1)) end)
+    |> Enum.uniq()
+    |> Enum.map(&Enum.at(ticks, &1))
   end
 
   defp dash_for_style(:dashed), do: "8 4"

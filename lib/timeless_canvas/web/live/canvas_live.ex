@@ -490,6 +490,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           element={element}
           selected={element.id in @selected_ids}
           graph_points={graph_points_for(element, @graph_data)}
+          graph_data_points={graph_data_points_for(element, @graph_data)}
           graph_value={graph_value_for(element, @graph_data, @metric_units)}
           stream_entries={stream_entries_for(element, @stream_data)}
           expanded_graph_id={@expanded_graph_id}
@@ -2501,6 +2502,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp graph_points_for(_element, _graph_data), do: ""
+
+  defp graph_data_points_for(%{type: :graph} = element, graph_data) do
+    Map.get(graph_data, element.id, [])
+  end
+
+  defp graph_data_points_for(_element, _graph_data), do: []
 
   defp parse_bound(nil, fallback), do: fallback
   defp parse_bound("", fallback), do: fallback
