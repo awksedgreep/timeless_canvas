@@ -168,7 +168,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
   @debug_report_interval 30_000
   @default_graph_refresh_interval 2_000
   @profile_skip_stream_updates false
-  @profile_skip_metric_updates false
 
   @impl true
   def render(assigns) do
@@ -597,7 +596,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
     assigns =
       assign(assigns,
         meta_fields: base_fields ++ var_fields,
-        display_meta_fields: display_meta_fields(base_fields ++ var_fields, assigns.selected.type),
+        display_meta_fields:
+          display_meta_fields(base_fields ++ var_fields, assigns.selected.type),
         icon_select_options:
           icon_options("icon", assigns.selected.meta["icon"], IconCatalog.icon_options()),
         os_icon_options:
@@ -1506,7 +1506,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
       %{type: :graph} ->
         if socket.assigns.expanded_graph_id == id do
           {:noreply,
-           assign(socket, expanded_graph_id: nil, expanded_graph_data: [], pre_expand_viewbox: nil)}
+           assign(socket,
+             expanded_graph_id: nil,
+             expanded_graph_data: [],
+             pre_expand_viewbox: nil
+           )}
         else
           expanded_data = fetch_expanded_data(socket, id)
 

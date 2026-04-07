@@ -316,39 +316,12 @@ defmodule TimelessCanvas.DataSource.Manager do
     Enum.reduce(state.elements, state, fn {element_id, element}, acc ->
       acc = maybe_broadcast_status(acc, element_id, state.module.status(acc.ds_state, element))
 
-      acc =
-        if element.type == :graph do
-          poll_metric(acc, element_id, element, pubsub)
-        else
-          acc
-        end
-
       if element.type == :text_series do
         poll_text_metric(acc, element_id, element, pubsub)
       else
         acc
       end
     end)
-  end
-
-  defp poll_metric(state, element_id, element, pubsub) do
-    metric_name = Map.get(element.meta, "metric_name", "default")
-
-    case state.module.metric(state.ds_state, element, metric_name) do
-      {:ok, value} ->
-        timestamp = System.system_time(:millisecond)
-
-        Phoenix.PubSub.broadcast(
-          pubsub,
-          metric_topic(),
-          {:element_metric, element_id, metric_name, value, timestamp}
-        )
-
-        put_in(state.debug.metrics_broadcast, state.debug.metrics_broadcast + 1)
-
-      :no_data ->
-        state
-    end
   end
 
   defp poll_text_metric(state, element_id, element, pubsub) do
