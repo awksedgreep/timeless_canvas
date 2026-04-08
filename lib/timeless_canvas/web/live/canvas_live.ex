@@ -2178,60 +2178,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end)
   end
 
-  defp maybe_apply_graph_series(meta, _old_meta, nil), do: meta
-
-  defp maybe_apply_graph_series(meta, old_meta, graph_series_value) do
-    selected_labels = decode_graph_series(graph_series_value)
-
-    old_label_keys =
-      old_meta
-      |> graph_query_labels_from_meta()
-      |> Map.keys()
-
-    meta
-    |> Map.drop(old_label_keys)
-    |> Map.delete("series_label_key")
-    |> Map.delete("series_label_value")
-    |> Map.merge(selected_labels)
-  end
-
-  defp maybe_refresh_selected_series(socket, id, old_meta, new_meta) do
-    if new_meta["host"] != old_meta["host"] do
-      fetch_series_for_selected(socket, id)
-    else
-      socket
-    end
-  end
-
-  defp maybe_refresh_element_data(socket, _id, :graph, time) do
-    socket
-    |> fetch_metric_units()
-    |> fill_graph_data_at(time)
-  end
-
-  defp maybe_refresh_element_data(socket, _id, :text_series, time) do
-    socket
-    |> fetch_metric_units()
-    |> fill_text_data_at(time)
-  end
-
-  defp maybe_refresh_element_data(socket, _id, _type, _time), do: socket
-
-  defp icon_options(_field, nil, options), do: options
-  defp icon_options(_field, "", options), do: options
-
-  defp icon_options(_field, current, options) do
-    if Enum.any?(options, fn {value, _label} -> value == current end) do
-      options
-    else
-      [
-        {"", "Auto"},
-        {current, "Custom: #{current}"}
-        | Enum.reject(options, fn {value, _label} -> value == "" end)
-      ]
-    end
-  end
-
   def handle_event("property:update_connection", %{"conn_id" => id} = params, socket) do
     require_edit(socket, fn ->
       attrs =
@@ -2379,6 +2325,60 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("timeline:change", _params, socket) do
     {:noreply, socket}
+  end
+
+  defp maybe_apply_graph_series(meta, _old_meta, nil), do: meta
+
+  defp maybe_apply_graph_series(meta, old_meta, graph_series_value) do
+    selected_labels = decode_graph_series(graph_series_value)
+
+    old_label_keys =
+      old_meta
+      |> graph_query_labels_from_meta()
+      |> Map.keys()
+
+    meta
+    |> Map.drop(old_label_keys)
+    |> Map.delete("series_label_key")
+    |> Map.delete("series_label_value")
+    |> Map.merge(selected_labels)
+  end
+
+  defp maybe_refresh_selected_series(socket, id, old_meta, new_meta) do
+    if new_meta["host"] != old_meta["host"] do
+      fetch_series_for_selected(socket, id)
+    else
+      socket
+    end
+  end
+
+  defp maybe_refresh_element_data(socket, _id, :graph, time) do
+    socket
+    |> fetch_metric_units()
+    |> fill_graph_data_at(time)
+  end
+
+  defp maybe_refresh_element_data(socket, _id, :text_series, time) do
+    socket
+    |> fetch_metric_units()
+    |> fill_text_data_at(time)
+  end
+
+  defp maybe_refresh_element_data(socket, _id, _type, _time), do: socket
+
+  defp icon_options(_field, nil, options), do: options
+  defp icon_options(_field, "", options), do: options
+
+  defp icon_options(_field, current, options) do
+    if Enum.any?(options, fn {value, _label} -> value == current end) do
+      options
+    else
+      [
+        {"", "Auto"},
+        {current, "Custom: #{current}"}
+        | Enum.reject(options, fn {value, _label} -> value == "" end)
+      ]
+    end
   end
 
   # --- Info handlers ---
@@ -3433,6 +3433,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  defp maybe_put_float(map, key, val) when is_number(val) do
+    Map.put(map, key, val / 1.0)
+  end
+
   defp clamp_view_box(%ViewBox{} = vb) do
     zoomed_width =
       @base_viewbox_width * 100.0 /
@@ -3459,10 +3463,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     max_x = list |> Enum.map(&(&1.x + &1.width)) |> Enum.max()
     max_y = list |> Enum.map(&(&1.y + &1.height)) |> Enum.max()
     {(min_x + max_x) / 2, (min_y + max_y) / 2}
-  end
-
-  defp maybe_put_float(map, key, val) when is_number(val) do
-    Map.put(map, key, val / 1.0)
   end
 
   defp maybe_put_atom(map, _key, nil), do: map
