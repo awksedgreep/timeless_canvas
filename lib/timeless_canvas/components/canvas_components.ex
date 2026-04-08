@@ -1498,21 +1498,6 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   attr(:timeline_range, :any, default: 86_400)
   attr(:timeline_data_range, :any, default: nil)
 
-  @span_options [
-    {900, "15m"},
-    {3600, "1h"},
-    {21600, "6h"},
-    {43200, "12h"},
-    {86400, "24h"}
-  ]
-
-  @range_options [
-    {86_400, "24h"},
-    {604_800, "7d"},
-    {2_592_000, "30d"},
-    {:all, "All"}
-  ]
-
   def timeline_bar(assigns) do
     now_ms = System.system_time(:millisecond)
 
@@ -1546,8 +1531,6 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
     assigns =
       assign(assigns,
-        span_options: @span_options,
-        range_options: @range_options,
         slider_min: slider_min,
         slider_max: slider_max,
         slider_value: slider_value,
@@ -1559,43 +1542,9 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
     ~H"""
     <div class="timeline-bar">
-      <form phx-change="timeline:change" phx-submit="timeline:change">
-        <div class="timeline-bar__controls">
-          <label class="timeline-bar__label">
-            <span>Span</span>
-            <select
-              name="span"
-              class="timeline-bar__speed"
-            >
-              <option
-                :for={{secs, label} <- @span_options}
-                value={secs}
-                selected={@timeline_span == secs}
-              >
-                {label}
-              </option>
-            </select>
-          </label>
-
-          <label class="timeline-bar__label">
-            <span>Range</span>
-            <select
-              name="range"
-              class="timeline-bar__speed"
-            >
-              <option
-                :for={{value, label} <- @range_options}
-                value={value}
-                selected={@timeline_range == value}
-              >
-                {label}
-              </option>
-            </select>
-          </label>
-        </div>
-      </form>
-
-      <span class="timeline-bar__time" title="Earliest time in track">{@track_start}</span>
+      <span class="timeline-bar__time timeline-bar__time--start" title="Earliest time in track">
+        {@track_start}
+      </span>
 
       <div
         id="timeline-slider"
@@ -1618,7 +1567,9 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         <div class={"timeline-bar__live-dot#{if @is_live, do: " timeline-bar__live-dot--active", else: ""}"}></div>
       </div>
 
-      <span class="timeline-bar__time" title="Latest time in track">{@track_end}</span>
+      <span class="timeline-bar__time timeline-bar__time--end" title="Latest time in track">
+        {@track_end}
+      </span>
     </div>
     """
   end
@@ -1637,15 +1588,35 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   defp timeline_slider_bounds(
          {data_start, data_end},
          :all,
-         _window_end_ms,
+         window_end_ms,
          _span_ms,
          _half_span,
-         _is_live,
-         now_ms
+         true,
+         _now_ms
        )
        when is_struct(data_start, DateTime) and is_struct(data_end, DateTime) do
     data_start_ms = DateTime.to_unix(data_start, :millisecond)
-    data_end_ms = max(DateTime.to_unix(data_end, :millisecond), now_ms)
+    slider_max = max(window_end_ms, data_start_ms + 1)
+
+    if slider_max > data_start_ms do
+      {data_start_ms, slider_max}
+    else
+      {data_start_ms, data_start_ms + 1}
+    end
+  end
+
+  defp timeline_slider_bounds(
+         {data_start, data_end},
+         :all,
+         _window_end_ms,
+         _span_ms,
+         _half_span,
+         false,
+         _now_ms
+       )
+       when is_struct(data_start, DateTime) and is_struct(data_end, DateTime) do
+    data_start_ms = DateTime.to_unix(data_start, :millisecond)
+    data_end_ms = DateTime.to_unix(data_end, :millisecond)
     slider_max = max(data_end_ms, data_start_ms + 1)
 
     if slider_max > data_start_ms do
@@ -1680,6 +1651,25 @@ defmodule TimelessCanvas.Components.CanvasComponents do
        when is_integer(range_seconds) do
     slider_range_ms = max(range_seconds * 1000, span_ms)
     {now_ms - slider_range_ms, now_ms}
+  end
+
+  def timeline_span_options do
+    [
+      {900, "15m"},
+      {3600, "1h"},
+      {21600, "6h"},
+      {43200, "12h"},
+      {86400, "24h"}
+    ]
+  end
+
+  def timeline_range_options do
+    [
+      {86_400, "24h"},
+      {604_800, "7d"},
+      {2_592_000, "30d"},
+      {:all, "All"}
+    ]
   end
 
   defp parse_graph_bound(nil, fallback), do: fallback

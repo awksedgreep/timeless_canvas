@@ -535,6 +535,33 @@ defmodule TimelessCanvas.Web.CanvasLive do
         >
           100%
         </button>
+        <span class="canvas-zoom-indicator__sep"></span>
+        <form phx-change="timeline:change" phx-submit="timeline:change" class="canvas-zoom-indicator__timeline-form">
+          <label class="canvas-zoom-indicator__meta">
+            <span>Span</span>
+            <select name="span" class="timeline-bar__speed">
+              <option
+                :for={{secs, label} <- TimelessCanvas.Components.CanvasComponents.timeline_span_options()}
+                value={secs}
+                selected={@timeline_span == secs}
+              >
+                {label}
+              </option>
+            </select>
+          </label>
+          <label class="canvas-zoom-indicator__meta">
+            <span>Range</span>
+            <select name="range" class="timeline-bar__speed">
+              <option
+                :for={{value, label} <- TimelessCanvas.Components.CanvasComponents.timeline_range_options()}
+                value={value}
+                selected={@timeline_range == value}
+              >
+                {label}
+              </option>
+            </select>
+          </label>
+        </form>
       </div>
     </div>
     """
@@ -2996,15 +3023,35 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp timeline_slider_bounds(
          {data_start, data_end},
          :all,
-         _window_end_ms,
+         window_end_ms,
          _span_ms,
          _half_span,
-         _is_live,
-         now_ms
+         true,
+         _now_ms
        )
        when is_struct(data_start, DateTime) and is_struct(data_end, DateTime) do
     data_start_ms = DateTime.to_unix(data_start, :millisecond)
-    data_end_ms = max(DateTime.to_unix(data_end, :millisecond), now_ms)
+    slider_max = max(window_end_ms, data_start_ms + 1)
+
+    if slider_max > data_start_ms do
+      {data_start_ms, slider_max}
+    else
+      {data_start_ms, data_start_ms + 1}
+    end
+  end
+
+  defp timeline_slider_bounds(
+         {data_start, data_end},
+         :all,
+         _window_end_ms,
+         _span_ms,
+         _half_span,
+         false,
+         _now_ms
+       )
+       when is_struct(data_start, DateTime) and is_struct(data_end, DateTime) do
+    data_start_ms = DateTime.to_unix(data_start, :millisecond)
+    data_end_ms = DateTime.to_unix(data_end, :millisecond)
     slider_max = max(data_end_ms, data_start_ms + 1)
 
     if slider_max > data_start_ms do

@@ -90,11 +90,15 @@ const TimelineSlider = {
     const maxCenterPct = 100 - halfWin;
     const rawPct = ((this.value - min) / range) * 100;
     const pct = Math.max(minCenterPct, Math.min(maxCenterPct, rawPct));
+    const atRightEdge = Math.abs(pct - maxCenterPct) < 0.001;
+    const atLeftEdge = Math.abs(pct - minCenterPct) < 0.001;
 
     const winLeft = Math.max(0, pct - halfWin);
     const winRight = Math.min(100, pct + halfWin);
-    this.windowEl.style.left = winLeft + "%";
-    this.windowEl.style.width = (winRight - winLeft) + "%";
+    this.windowEl.style.left = atLeftEdge ? "0" : winLeft + "%";
+    this.windowEl.style.right = atRightEdge ? "0" : "";
+    this.windowEl.style.width =
+      atRightEdge || atLeftEdge ? "auto" : (winRight - winLeft) + "%";
 
     this.thumbEl.style.left = pct + "%";
     if (this.thumbHitEl) this.thumbHitEl.style.left = pct + "%";

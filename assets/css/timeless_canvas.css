@@ -498,6 +498,27 @@ body:has(.canvas-container) {
   z-index: 10;
 }
 
+.canvas-zoom-indicator__sep {
+  width: 1px;
+  height: 18px;
+  background: var(--toolbar-border);
+}
+
+.canvas-zoom-indicator__timeline-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.canvas-zoom-indicator__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 7px;
+  letter-spacing: 0;
+  color: var(--text-muted);
+}
+
 .canvas-zoom-indicator__reset {
   padding: 1px 6px;
   font-size: 10px;
@@ -651,37 +672,23 @@ body:has(.canvas-container) {
 .timeline-bar {
   position: fixed;
   bottom: 0;
-  left: 0;
-  right: 0;
+  left: 12px;
+  right: 12px;
   height: 52px;
   display: flex;
   align-items: flex-start;
   padding-top: 8px;
-  gap: 8px;
+  gap: 3px;
   padding-left: 12px;
   padding-right: 12px;
   background: var(--toolbar-bg);
   border-top: 1px solid var(--toolbar-border);
+  border-top-left-radius: 14px;
+  border-top-right-radius: 14px;
   backdrop-filter: blur(12px);
   z-index: 9999;
   pointer-events: auto;
   will-change: transform;
-}
-
-.timeline-bar__controls {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-}
-
-.timeline-bar__label {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 6px;
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--text-muted);
 }
 
 .timeline-bar__live-section,
@@ -728,6 +735,8 @@ body:has(.canvas-container) {
   position: relative;
   flex: 1;
   height: 18px;
+  margin-left: 18px;
+  margin-right: -28px;
   border-radius: 3px;
   background: var(--toolbar-border);
   cursor: pointer;
@@ -887,6 +896,14 @@ body:has(.canvas-container) {
   color: var(--text-muted);
   white-space: nowrap;
   min-width: 92px;
+  text-align: right;
+}
+
+.timeline-bar__time--start {
+  text-align: right;
+}
+
+.timeline-bar__time--end {
   text-align: right;
 }
 
