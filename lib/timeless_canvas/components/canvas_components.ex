@@ -1498,7 +1498,6 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   attr(:timeline_data_range, :any, default: nil)
 
   @span_options [
-    {300, "5m"},
     {900, "15m"},
     {3600, "1h"},
     {21600, "6h"},
@@ -1529,7 +1528,6 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       )
 
     window_center_ms = window_end_ms - half_span
-    window_start_ms = window_end_ms - span_ms
     window_ratio = span_ms / max(slider_max - slider_min, 1)
 
     slider_value =
@@ -1545,8 +1543,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         slider_value: slider_value,
         window_ratio: min(window_ratio, 1.0),
         is_live: is_live,
-        window_start: format_ts(window_start_ms),
-        window_end: format_ts(window_end_ms)
+        track_start: format_track_ts(slider_min),
+        track_end: format_track_ts(slider_max)
       )
 
     ~H"""
@@ -1566,7 +1564,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         </select>
       </form>
 
-      <span class="timeline-bar__time">{@window_start}</span>
+      <span class="timeline-bar__time" title="Earliest time in track">{@track_start}</span>
 
       <div
         id="timeline-slider"
@@ -1584,18 +1582,25 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         <div class="timeline-bar__ticks"></div>
         <div class="timeline-bar__window"></div>
         <div class="timeline-bar__thumb"></div>
+        <div class="timeline-bar__thumb-hit"></div>
+        <div class="timeline-bar__bubble" hidden></div>
         <div class={"timeline-bar__live-dot#{if @is_live, do: " timeline-bar__live-dot--active", else: ""}"}></div>
       </div>
 
-      <span class="timeline-bar__time">{@window_end}</span>
+      <span class="timeline-bar__time" title="Latest time in track">{@track_end}</span>
     </div>
     """
   end
 
-  defp format_ts(ms) do
-    ms
-    |> DateTime.from_unix!(:millisecond)
-    |> Calendar.strftime("%H:%M:%S")
+  defp format_track_ts(ms) do
+    dt = DateTime.from_unix!(ms, :millisecond)
+    today = Date.utc_today()
+
+    if Date.compare(DateTime.to_date(dt), today) == :eq do
+      Calendar.strftime(dt, "%H:%M")
+    else
+      Calendar.strftime(dt, "%b %-d %H:%M")
+    end
   end
 
   defp timeline_slider_bounds(
@@ -1603,12 +1608,12 @@ defmodule TimelessCanvas.Components.CanvasComponents do
          _window_end_ms,
          _span_ms,
          _half_span,
-         false,
-         _now_ms
+         _is_live,
+         now_ms
        )
        when is_struct(data_start, DateTime) and is_struct(data_end, DateTime) do
     data_start_ms = DateTime.to_unix(data_start, :millisecond)
-    data_end_ms = DateTime.to_unix(data_end, :millisecond)
+    data_end_ms = max(DateTime.to_unix(data_end, :millisecond), now_ms)
     slider_max = max(data_end_ms, data_start_ms + 1)
 
     if slider_max > data_start_ms do
@@ -1623,29 +1628,11 @@ defmodule TimelessCanvas.Components.CanvasComponents do
          _window_end_ms,
          span_ms,
          _half_span,
-         true,
+         _is_live,
          now_ms
        ) do
-    slider_range_ms = span_ms * 10
+    slider_range_ms = max(span_ms * 10, 86_400_000)
     {now_ms - slider_range_ms, now_ms}
-  end
-
-  defp timeline_slider_bounds(
-         _timeline_data_range,
-         window_end_ms,
-         span_ms,
-         half_span,
-         false,
-         _now_ms
-       ) do
-    historical_window_bounds(window_end_ms, span_ms, half_span)
-  end
-
-  defp historical_window_bounds(window_end_ms, span_ms, half_span) do
-    window_center_ms = window_end_ms - half_span
-    slider_range_ms = span_ms * 10
-    half_range_ms = div(slider_range_ms, 2)
-    {window_center_ms - half_range_ms, window_center_ms + half_range_ms}
   end
 
   defp parse_graph_bound(nil, fallback), do: fallback

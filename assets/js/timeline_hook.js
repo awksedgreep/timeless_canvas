@@ -3,15 +3,47 @@ const TimelineSlider = {
     this.track = this.el;
     this.windowEl = this.el.querySelector(".timeline-bar__window");
     this.thumbEl = this.el.querySelector(".timeline-bar__thumb");
+    this.thumbHitEl = this.el.querySelector(".timeline-bar__thumb-hit");
     this.liveDot = this.el.querySelector(".timeline-bar__live-dot");
     this.densityEl = this.el.querySelector(".timeline-bar__density");
     this.ticksEl = this.el.querySelector(".timeline-bar__ticks");
+
+    this.dragging = false;
+    this.pendingSliderData = null;
+    this.dragOffsetPx = 0;
+    this.bubbleEl = document.createElement("div");
+    this.bubbleEl.className = "timeline-bar__bubble";
+    this.bubbleEl.hidden = true;
+    Object.assign(this.bubbleEl.style, {
+      position: "fixed",
+      top: "0px",
+      left: "0px",
+      transform: "translate(-50%, -100%)",
+      padding: "4px 8px",
+      borderRadius: "6px",
+      background: "rgba(15, 23, 42, 0.96)",
+      border: "1px solid rgba(96, 165, 250, 0.45)",
+      boxShadow: "0 10px 24px rgba(2, 6, 23, 0.32)",
+      color: "#e2e8f0",
+      fontFamily: '"SF Mono", "Fira Code", "Cascadia Code", monospace',
+      fontSize: "11px",
+      lineHeight: "1",
+      whiteSpace: "nowrap",
+      pointerEvents: "none",
+      zIndex: "9999"
+    });
+    document.body.appendChild(this.bubbleEl);
 
     this.readAttrs();
     this.render();
     this.bindEvents();
 
     this.handleEvent("update-slider", (data) => {
+      if (this.dragging) {
+        this.pendingSliderData = data;
+        return;
+      }
+
       this.min = data.min;
       this.max = data.max;
       this.value = data.value;
@@ -26,8 +58,15 @@ const TimelineSlider = {
   },
 
   updated() {
+    if (this.dragging) return;
     this.readAttrs();
     this.render();
+  },
+
+  destroyed() {
+    if (this.bubbleEl && this.bubbleEl.parentNode) {
+      this.bubbleEl.parentNode.removeChild(this.bubbleEl);
+    }
   },
 
   readAttrs() {
@@ -39,14 +78,17 @@ const TimelineSlider = {
   },
 
   render() {
-    const range = this.max - this.min;
+    const min = this.dragging ? this.dragMin : this.min;
+    const max = this.dragging ? this.dragMax : this.max;
+    const windowRatio = this.dragging ? this.dragWindowRatio : this.windowRatio;
+    const range = max - min;
     if (range <= 0) return;
 
-    const winPct = Math.min(this.windowRatio * 100, 100);
+    const winPct = Math.min(windowRatio * 100, 100);
     const halfWin = winPct / 2;
     const minCenterPct = halfWin;
     const maxCenterPct = 100 - halfWin;
-    const rawPct = ((this.value - this.min) / range) * 100;
+    const rawPct = ((this.value - min) / range) * 100;
     const pct = Math.max(minCenterPct, Math.min(maxCenterPct, rawPct));
 
     const winLeft = Math.max(0, pct - halfWin);
@@ -54,20 +96,43 @@ const TimelineSlider = {
     this.windowEl.style.left = winLeft + "%";
     this.windowEl.style.width = (winRight - winLeft) + "%";
 
-    // Thumb: small line at center
     this.thumbEl.style.left = pct + "%";
+    if (this.thumbHitEl) this.thumbHitEl.style.left = pct + "%";
+    this.renderBubble(pct);
 
-    // Live dot state
     if (this.liveDot) {
       this.liveDot.classList.toggle("timeline-bar__live-dot--active", this.isLive);
     }
 
+    this.track.classList.toggle("timeline-bar__track--dragging", this.dragging);
+
     this.renderTicks();
+  },
+
+  renderBubble(pct) {
+    if (!this.bubbleEl) return;
+
+    if (!this.dragging) {
+      this.bubbleEl.hidden = true;
+      this.bubbleEl.textContent = "";
+      return;
+    }
+
+    const rect = this.track.getBoundingClientRect();
+    const bubbleX = rect.left + (pct / 100) * rect.width;
+    const bubbleY = rect.top - 14;
+
+    this.bubbleEl.hidden = false;
+    this.bubbleEl.style.left = `${bubbleX}px`;
+    this.bubbleEl.style.top = `${bubbleY}px`;
+    this.bubbleEl.textContent = this.formatBubbleTime(this.value);
   },
 
   renderTicks() {
     if (!this.ticksEl) return;
-    const range = this.max - this.min;
+    const min = this.dragging ? this.dragMin : this.min;
+    const max = this.dragging ? this.dragMax : this.max;
+    const range = max - min;
     if (range <= 0) return;
 
     // ~10 ticks across the slider
@@ -76,11 +141,11 @@ const TimelineSlider = {
 
     // Align ticks to round time boundaries
     const alignedInterval = this.roundInterval(tickInterval);
-    const firstTick = Math.ceil(this.min / alignedInterval) * alignedInterval;
+    const firstTick = Math.ceil(min / alignedInterval) * alignedInterval;
 
     let html = "";
-    for (let t = firstTick; t <= this.max; t += alignedInterval) {
-      const pct = ((t - this.min) / range) * 100;
+    for (let t = firstTick; t <= max; t += alignedInterval) {
+      const pct = ((t - min) / range) * 100;
       if (pct < 0 || pct > 100) continue;
       const date = new Date(t);
       const h = date.getHours().toString().padStart(2, "0");
@@ -123,7 +188,6 @@ const TimelineSlider = {
   },
 
   bindEvents() {
-    this.dragging = false;
     this._lastPush = 0;
 
     this.track.addEventListener("mousedown", (e) => this.onPointerDown(e));
@@ -146,6 +210,10 @@ const TimelineSlider = {
   onPointerDown(e) {
     e.preventDefault();
     this.track.focus();
+    this.dragMin = this.min;
+    this.dragMax = this.max;
+    this.dragWindowRatio = this.windowRatio;
+    this.dragOffsetPx = this.computeDragOffset(e.clientX);
     this.dragging = true;
     this.updateFromClientX(e.clientX);
     document.addEventListener("mousemove", this._onMouseMove);
@@ -155,6 +223,10 @@ const TimelineSlider = {
   onTouchStart(e) {
     e.preventDefault();
     this.track.focus();
+    this.dragMin = this.min;
+    this.dragMax = this.max;
+    this.dragWindowRatio = this.windowRatio;
+    this.dragOffsetPx = this.computeDragOffset(e.touches[0].clientX);
     this.dragging = true;
     this.updateFromClientX(e.touches[0].clientX);
     document.addEventListener("touchmove", this._onTouchMove, { passive: false });
@@ -175,6 +247,8 @@ const TimelineSlider = {
     document.removeEventListener("touchend", this._onTouchEnd);
 
     const centerMs = this.clientXToValue(clientX);
+    this.applyPendingSliderData();
+    this.render();
     // Snap to live if within 2% of right edge
     const range = this.max - this.min;
     if ((centerMs - this.max) / range > -0.02) {
@@ -198,13 +272,60 @@ const TimelineSlider = {
 
   clientXToValue(clientX) {
     const rect = this.track.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const range = this.max - this.min;
-    const halfWindow = (this.windowRatio * range) / 2;
-    const minCenter = this.min + halfWindow;
-    const maxCenter = this.max - halfWindow;
-    const unclamped = this.min + pct * range;
+    const adjustedX = clientX - this.dragOffsetPx;
+    const pct = Math.max(0, Math.min(1, (adjustedX - rect.left) / rect.width));
+    const min = this.dragging ? this.dragMin : this.min;
+    const max = this.dragging ? this.dragMax : this.max;
+    const windowRatio = this.dragging ? this.dragWindowRatio : this.windowRatio;
+    const range = max - min;
+    const halfWindow = (windowRatio * range) / 2;
+    const minCenter = min + halfWindow;
+    const maxCenter = max - halfWindow;
+    const unclamped = min + pct * range;
     return Math.max(minCenter, Math.min(maxCenter, unclamped));
+  },
+
+  computeDragOffset(clientX) {
+    const rect = this.track.getBoundingClientRect();
+    const range = this.max - this.min;
+    if (range <= 0) return 0;
+
+    const pct = ((this.value - this.min) / range) * 100;
+    const thumbCenterX = rect.left + (pct / 100) * rect.width;
+    const windowWidth = this.windowRatio * rect.width;
+    const windowLeft = thumbCenterX - windowWidth / 2;
+    const windowRight = thumbCenterX + windowWidth / 2;
+    const thumbHitHalf = 12;
+
+    if (
+      (clientX >= thumbCenterX - thumbHitHalf && clientX <= thumbCenterX + thumbHitHalf) ||
+      (clientX >= windowLeft && clientX <= windowRight)
+    ) {
+      return clientX - thumbCenterX;
+    }
+
+    return 0;
+  },
+
+  applyPendingSliderData() {
+    if (!this.pendingSliderData) return;
+
+    this.min = this.pendingSliderData.min;
+    this.max = this.pendingSliderData.max;
+    this.value = this.pendingSliderData.value;
+    this.windowRatio = this.pendingSliderData.windowRatio;
+    this.isLive = this.pendingSliderData.live;
+    this.pendingSliderData = null;
+  },
+
+  formatBubbleTime(value) {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit"
+    }).format(new Date(value));
   },
 
   onKeyDown(e) {

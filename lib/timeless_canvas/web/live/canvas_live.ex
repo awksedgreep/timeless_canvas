@@ -2974,12 +2974,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
          _window_end_ms,
          _span_ms,
          _half_span,
-         false,
-         _now_ms
+         _is_live,
+         now_ms
        )
        when is_struct(data_start, DateTime) and is_struct(data_end, DateTime) do
     data_start_ms = DateTime.to_unix(data_start, :millisecond)
-    data_end_ms = DateTime.to_unix(data_end, :millisecond)
+    data_end_ms = max(DateTime.to_unix(data_end, :millisecond), now_ms)
     slider_max = max(data_end_ms, data_start_ms + 1)
 
     if slider_max > data_start_ms do
@@ -2994,29 +2994,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
          _window_end_ms,
          span_ms,
          _half_span,
-         true,
+         _is_live,
          now_ms
        ) do
-    slider_range_ms = span_ms * 10
+    slider_range_ms = max(span_ms * 10, 86_400_000)
     {now_ms - slider_range_ms, now_ms}
-  end
-
-  defp timeline_slider_bounds(
-         _timeline_data_range,
-         window_end_ms,
-         span_ms,
-         half_span,
-         false,
-         _now_ms
-       ) do
-    historical_window_bounds(window_end_ms, span_ms, half_span)
-  end
-
-  defp historical_window_bounds(window_end_ms, span_ms, half_span) do
-    window_center_ms = window_end_ms - half_span
-    slider_range_ms = span_ms * 10
-    half_range_ms = div(slider_range_ms, 2)
-    {window_center_ms - half_range_ms, window_center_ms + half_range_ms}
   end
 
   defp text_value_for(%{type: :text_series} = element, text_data) do
