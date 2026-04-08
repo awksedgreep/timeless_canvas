@@ -573,7 +573,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         font-family="monospace"
       >
         <tspan fill="#cbd5e1">{elem(shortcut, 0)}</tspan>
-        <tspan dx={5 * @scale} fill="#64748b">{elem(shortcut, 1)}</tspan>
+        <tspan dx={5 * @scale} fill="#4ade80">{elem(shortcut, 1)}</tspan>
       </text>
     </g>
     """
@@ -606,6 +606,17 @@ defmodule TimelessCanvas.Web.CanvasLive do
       )
 
     assigns =
+      if "host" in base_fields do
+        assign(
+          assigns,
+          graph_host_options:
+            select_options("host", assigns.selected.meta["host"], assigns.discovered_hosts)
+        )
+      else
+        assigns
+      end
+
+    assigns =
       if assigns.selected.type == :graph do
         selected_metric = assigns.selected.meta["metric_name"] || ""
         selected_labels = graph_query_labels_from_meta(assigns.selected.meta)
@@ -614,8 +625,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
           matching_graph_series(assigns.available_series, selected_metric, selected_labels)
 
         assign(assigns,
-          graph_host_options:
-            select_options("host", assigns.selected.meta["host"], assigns.discovered_hosts),
           graph_metric_options: graph_metric_options(assigns.available_series, selected_metric),
           graph_series_options:
             graph_series_options(assigns.available_series, selected_metric, selected_labels),
@@ -691,7 +700,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
                 {label}
               </option>
             </select>
-            <select :if={@selected.type == :graph && field == "host"} name={field}>
+            <select :if={field == "host"} name={field}>
               <option
                 :for={{value, label} <- @graph_host_options}
                 value={value}
@@ -1075,7 +1084,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp register_elements(socket) do
     elements = Map.values(socket.assigns.resolved_elements)
     StatusManager.register_elements(elements)
-    socket
+
+    stream_data =
+      if connected?(socket) and map_size(socket.assigns.resolved_elements) > 0 do
+        register_stream_elements(socket.assigns.resolved_elements)
+      else
+        %{}
+      end
+
+    assign(socket, stream_data: Map.merge(socket.assigns.stream_data, stream_data))
   end
 
   defp resolve_and_assign(socket) do
@@ -1885,7 +1902,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
         socket
       ) do
     require_edit(socket, fn ->
-      source = socket.assigns.canvas.elements[source_id]
+      source =
+        Map.get(socket.assigns.resolved_elements, source_id) ||
+          Map.get(socket.assigns.canvas.elements, source_id)
 
       if source do
         type = String.to_existing_atom(type_str)
@@ -1903,8 +1922,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
         meta =
           case type do
-            :log_stream -> %{}
-            :trace_stream -> %{}
+            :log_stream -> if(host, do: %{"host" => host}, else: %{})
+            :trace_stream -> if(host, do: %{"host" => host}, else: %{})
           end
 
         {canvas, el} =
@@ -2004,13 +2023,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
         var_def = Map.put(canvas.variables[var_name], "current", new_value)
         variables = Map.put(canvas.variables, var_name, var_def)
         canvas = %{canvas | variables: variables}
+        time = socket.assigns.timeline_time || DateTime.utc_now()
 
         socket =
           socket
           |> push_canvas(canvas)
-          |> register_elements()
           |> fetch_metric_units()
-          |> fill_graph_data_at(socket.assigns.timeline_time || DateTime.utc_now())
+          |> fill_graph_data_at(time)
+          |> fill_stream_data_at(time)
           |> schedule_autosave()
 
         {:noreply, socket}
@@ -2842,6 +2862,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           {:ok, %{entries: spans}} ->
             Enum.map(spans, fn s ->
               %{
+                timestamp: Map.get(s, :start_time) || Map.get(s, :timestamp),
                 trace_id: s.trace_id,
                 span_id: s.span_id,
                 name: s.name,

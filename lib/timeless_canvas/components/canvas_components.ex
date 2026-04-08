@@ -296,7 +296,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             clip-path={"url(#trace-clip-#{@element.id})"}
             pointer-events="none"
           >
-            <tspan fill="#e2e8f0">{span.name}</tspan>
+            <tspan fill="#94a3b8">{format_stream_timestamp(Map.get(span, :timestamp))}</tspan>
+            <tspan dx="6" fill="#e2e8f0">{span.name}</tspan>
             <tspan dx="6" fill={duration_color(span.duration_ns)}>
               {format_duration(span.duration_ns)}
             </tspan>
@@ -1279,18 +1280,37 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   defp log_level_color(_), do: "#94a3b8"
 
   defp format_log_entry(entry) do
-    ts =
-      case entry.timestamp do
-        ts when is_integer(ts) ->
-          ts |> DateTime.from_unix!(:millisecond) |> Calendar.strftime("%H:%M:%S")
-
-        _ ->
-          "??:??:??"
-      end
-
+    ts = format_stream_timestamp(entry.timestamp)
     level = entry.level |> to_string() |> String.upcase() |> String.slice(0, 4)
     "#{ts} [#{level}] #{entry.message}"
   end
+
+  defp format_stream_timestamp(ts) when is_integer(ts) do
+    case normalize_stream_timestamp(ts) do
+      {:ok, dt} -> Calendar.strftime(dt, "%H:%M:%S")
+      :error -> "??:??:??"
+    end
+  end
+
+  defp format_stream_timestamp(_), do: "??:??:??"
+
+  defp normalize_stream_timestamp(ts) when ts > 10_000_000_000_000_000 do
+    DateTime.from_unix(ts, :nanosecond)
+  end
+
+  defp normalize_stream_timestamp(ts) when ts > 10_000_000_000_000 do
+    DateTime.from_unix(ts, :microsecond)
+  end
+
+  defp normalize_stream_timestamp(ts) when ts > 10_000_000_000 do
+    DateTime.from_unix(ts, :millisecond)
+  end
+
+  defp normalize_stream_timestamp(ts) when ts > 0 do
+    DateTime.from_unix(ts, :second)
+  end
+
+  defp normalize_stream_timestamp(_), do: :error
 
   defp duration_color(nil), do: "#94a3b8"
 

@@ -95,6 +95,7 @@ defmodule TimelessCanvas.StreamManager do
 
   def handle_info({:stream_trace_span, element_id, span}, state) do
     span_map = %{
+      timestamp: Map.get(span, :start_time) || Map.get(span, :timestamp),
       trace_id: span.trace_id,
       span_id: span.span_id,
       name: span.name,
