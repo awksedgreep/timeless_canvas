@@ -106,6 +106,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           timeline_mode: :live,
           timeline_time: nil,
           timeline_span: 3600,
+          timeline_range: 86_400,
           timeline_data_range: nil,
           graph_data: %{},
           text_data: %{},
@@ -514,6 +515,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         timeline_mode={@timeline_mode}
         timeline_time={@timeline_time}
         timeline_span={@timeline_span}
+        timeline_range={@timeline_range}
         timeline_data_range={@timeline_data_range}
       />
 
@@ -2289,7 +2291,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
     span =
       case Integer.parse(params["span"] || "") do
         {s, _} -> s
-        :error -> 300
+        :error -> 900
       end
 
     {socket, time} =
@@ -2325,6 +2327,27 @@ defmodule TimelessCanvas.Web.CanvasLive do
      |> fill_text_data_at(time)
      |> fill_stream_data_at(time)
      |> push_slider_update()}
+  end
+
+  def handle_event("timeline:change", %{"_target" => ["range"]} = params, socket) do
+    range = parse_timeline_range(params["range"])
+
+    {socket, refresh_time?} =
+      clamp_timeline_range(socket, range)
+
+    socket =
+      if refresh_time? do
+        time = socket.assigns.timeline_time || DateTime.utc_now()
+
+        socket
+        |> fill_graph_data_at(time)
+        |> fill_text_data_at(time)
+        |> fill_stream_data_at(time)
+      else
+        socket
+      end
+
+    {:noreply, push_slider_update(socket)}
   end
 
   def handle_event("timeline:change", _params, socket) do
@@ -2935,6 +2958,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
     {slider_min, slider_max} =
       timeline_slider_bounds(
         socket.assigns.timeline_data_range,
+        socket.assigns.timeline_range,
         window_end_ms,
         span_ms,
         half_span,
@@ -2971,6 +2995,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp timeline_slider_bounds(
          {data_start, data_end},
+         :all,
          _window_end_ms,
          _span_ms,
          _half_span,
@@ -2991,6 +3016,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp timeline_slider_bounds(
          _timeline_data_range,
+         :all,
          _window_end_ms,
          span_ms,
          _half_span,
@@ -2999,6 +3025,75 @@ defmodule TimelessCanvas.Web.CanvasLive do
        ) do
     slider_range_ms = max(span_ms * 10, 86_400_000)
     {now_ms - slider_range_ms, now_ms}
+  end
+
+  defp timeline_slider_bounds(
+         _timeline_data_range,
+         range_seconds,
+         _window_end_ms,
+         span_ms,
+         _half_span,
+         _is_live,
+         now_ms
+       )
+       when is_integer(range_seconds) do
+    slider_range_ms = max(range_seconds * 1000, span_ms)
+    {now_ms - slider_range_ms, now_ms}
+  end
+
+  defp parse_timeline_range("all"), do: :all
+
+  defp parse_timeline_range(value) do
+    case Integer.parse(to_string(value || "")) do
+      {seconds, _} when seconds > 0 -> seconds
+      _ -> 86_400
+    end
+  end
+
+  defp clamp_timeline_range(socket, range) do
+    socket = assign(socket, timeline_range: range)
+
+    case socket.assigns.timeline_time do
+      %DateTime{} = window_end ->
+        now_ms = System.system_time(:millisecond)
+        span_ms = socket.assigns.timeline_span * 1000
+        half_span = div(span_ms, 2)
+        window_end_ms = DateTime.to_unix(window_end, :millisecond)
+
+        {slider_min, slider_max} =
+          timeline_slider_bounds(
+            socket.assigns.timeline_data_range,
+            socket.assigns.timeline_range,
+            window_end_ms,
+            span_ms,
+            half_span,
+            false,
+            now_ms
+          )
+
+        clamped_window_end_ms =
+          window_end_ms
+          |> max(slider_min + span_ms)
+          |> min(slider_max)
+
+        if clamped_window_end_ms == window_end_ms do
+          {socket, false}
+        else
+          time = DateTime.from_unix!(clamped_window_end_ms, :millisecond)
+          statuses = StatusManager.statuses_at(time)
+          canvas = apply_statuses(socket.assigns.canvas, statuses)
+
+          {
+            socket
+            |> update_canvas(canvas)
+            |> assign(timeline_mode: :historical, timeline_time: time),
+            true
+          }
+        end
+
+      nil ->
+        {socket, false}
+    end
   end
 
   defp text_value_for(%{type: :text_series} = element, text_data) do

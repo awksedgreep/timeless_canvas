@@ -666,6 +666,22 @@ body:has(.canvas-container) {
   will-change: transform;
 }
 
+.timeline-bar__controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.timeline-bar__label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 6px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-muted);
+}
+
 .timeline-bar__live-section,
 .timeline-bar__historical-section {
   display: flex;

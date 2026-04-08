@@ -1495,6 +1495,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   attr(:timeline_mode, :atom, required: true)
   attr(:timeline_time, :any, default: nil)
   attr(:timeline_span, :integer, default: 3600)
+  attr(:timeline_range, :any, default: 86_400)
   attr(:timeline_data_range, :any, default: nil)
 
   @span_options [
@@ -1503,6 +1504,13 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     {21600, "6h"},
     {43200, "12h"},
     {86400, "24h"}
+  ]
+
+  @range_options [
+    {86_400, "24h"},
+    {604_800, "7d"},
+    {2_592_000, "30d"},
+    {:all, "All"}
   ]
 
   def timeline_bar(assigns) do
@@ -1520,6 +1528,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     {slider_min, slider_max} =
       timeline_slider_bounds(
         assigns.timeline_data_range,
+        assigns.timeline_range,
         window_end_ms,
         span_ms,
         half_span,
@@ -1538,6 +1547,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     assigns =
       assign(assigns,
         span_options: @span_options,
+        range_options: @range_options,
         slider_min: slider_min,
         slider_max: slider_max,
         slider_value: slider_value,
@@ -1550,18 +1560,39 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     ~H"""
     <div class="timeline-bar">
       <form phx-change="timeline:change" phx-submit="timeline:change">
-        <select
-          name="span"
-          class="timeline-bar__speed"
-        >
-          <option
-            :for={{secs, label} <- @span_options}
-            value={secs}
-            selected={@timeline_span == secs}
-          >
-            {label}
-          </option>
-        </select>
+        <div class="timeline-bar__controls">
+          <label class="timeline-bar__label">
+            <span>Span</span>
+            <select
+              name="span"
+              class="timeline-bar__speed"
+            >
+              <option
+                :for={{secs, label} <- @span_options}
+                value={secs}
+                selected={@timeline_span == secs}
+              >
+                {label}
+              </option>
+            </select>
+          </label>
+
+          <label class="timeline-bar__label">
+            <span>Range</span>
+            <select
+              name="range"
+              class="timeline-bar__speed"
+            >
+              <option
+                :for={{value, label} <- @range_options}
+                value={value}
+                selected={@timeline_range == value}
+              >
+                {label}
+              </option>
+            </select>
+          </label>
+        </div>
       </form>
 
       <span class="timeline-bar__time" title="Earliest time in track">{@track_start}</span>
@@ -1605,6 +1636,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   defp timeline_slider_bounds(
          {data_start, data_end},
+         :all,
          _window_end_ms,
          _span_ms,
          _half_span,
@@ -1625,6 +1657,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   defp timeline_slider_bounds(
          _timeline_data_range,
+         :all,
          _window_end_ms,
          span_ms,
          _half_span,
@@ -1632,6 +1665,20 @@ defmodule TimelessCanvas.Components.CanvasComponents do
          now_ms
        ) do
     slider_range_ms = max(span_ms * 10, 86_400_000)
+    {now_ms - slider_range_ms, now_ms}
+  end
+
+  defp timeline_slider_bounds(
+         _timeline_data_range,
+         range_seconds,
+         _window_end_ms,
+         span_ms,
+         _half_span,
+         _is_live,
+         now_ms
+       )
+       when is_integer(range_seconds) do
+    slider_range_ms = max(range_seconds * 1000, span_ms)
     {now_ms - slider_range_ms, now_ms}
   end
 
