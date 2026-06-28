@@ -347,7 +347,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         plot_h = h - pad_top - pad_bottom
 
         points = Enum.reverse(assigns.expanded_graph_data)
-        meta = assigns.element.meta || %{}
+        meta = assigns.element.meta
 
         {min_val, max_val, y_ticks, polyline_points, area_points, tooltip_data, current_val} =
           if points != [] do
@@ -552,7 +552,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         graph_title = if unit, do: "#{base_title} (#{unit})", else: base_title
         graph_icon = IconCatalog.graph_icon_name(assigns.element)
         points = Enum.reverse(assigns.graph_data_points)
-        meta = assigns.element.meta || %{}
+        meta = assigns.element.meta
 
         {plot_x, plot_y, plot_w, plot_h, min_val, max_val, val_range, y_ticks, x_ticks,
          polyline_points} =
@@ -1714,5 +1714,4 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     end
   end
 
-  defp counter_graph_series?(_meta), do: false
 end
