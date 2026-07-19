@@ -76,8 +76,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       breadcrumbs = persistence().breadcrumb_chain(canvas_id)
 
-      pin_hosts = StatusManager.list_hosts()
-      pin_ifnames = StatusManager.list_label_values("ifname") || []
+      pin_hosts = cap_options(StatusManager.list_hosts())
+      pin_ifnames = cap_options(StatusManager.list_label_values("ifname"))
 
       place_pins = %{
         "host" => %{"mode" => "none", "value" => List.first(pin_hosts) || ""},
@@ -1188,20 +1188,30 @@ defmodule TimelessCanvas.Web.CanvasLive do
     Map.new(variables, fn {name, definition} ->
       case definition["type"] do
         "host" ->
-          {name, StatusManager.list_hosts()}
+          {name, cap_options(StatusManager.list_hosts())}
 
         "label" ->
           label_key = definition["label_key"] || name
-          {name, StatusManager.list_label_values(label_key)}
+          {name, cap_options(StatusManager.list_label_values(label_key))}
 
         "custom" ->
-          {name, definition["options"] || []}
+          {name, cap_options(definition["options"] || [])}
 
         _ ->
           {name, []}
       end
     end)
   end
+
+  # Dropdown option lists must be bounded before they reach the DOM: a
+  # high-cardinality store (50K hosts observed) rendered 50K <option>
+  # nodes per select and morphdom spent 37s applying one patch (INP
+  # 33-46s, tab hung). The current selection is always kept reachable
+  # via select_options' current-value inclusion.
+  @max_dropdown_options 500
+
+  defp cap_options(nil), do: []
+  defp cap_options(list) when is_list(list), do: Enum.take(list, @max_dropdown_options)
 
   defp select_options(_field, selected, values) do
     current = selected || ""
@@ -3284,13 +3294,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp refresh_discovered_hosts(socket) do
-    hosts = StatusManager.list_hosts()
+    hosts = cap_options(StatusManager.list_hosts())
     first = List.first(hosts)
     assign(socket, discovered_hosts: hosts, place_host: first)
   end
 
   defp refresh_pin_ifnames(socket) do
-    pin_ifnames = StatusManager.list_label_values("ifname") || []
+    pin_ifnames = cap_options(StatusManager.list_label_values("ifname"))
     assign(socket, pin_ifnames: pin_ifnames)
   end
 

@@ -1713,5 +1713,4 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       _ -> false
     end
   end
-
 end
