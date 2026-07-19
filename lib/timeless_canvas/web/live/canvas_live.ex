@@ -76,7 +76,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       breadcrumbs = persistence().breadcrumb_chain(canvas_id)
 
-      pin_hosts = cap_options(StatusManager.list_hosts())
+      all_hosts = StatusManager.list_hosts()
+      pin_hosts = cap_options(all_hosts)
       pin_ifnames = cap_options(StatusManager.list_label_values("ifname"))
 
       place_pins = %{
@@ -117,11 +118,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
           expanded_graph_data: [],
           pre_expand_viewbox: nil,
           available_series: [],
-          discovered_hosts: [],
+          all_hosts: all_hosts,
           pin_hosts: pin_hosts,
           pin_ifnames: pin_ifnames,
           place_pins: place_pins,
-          host_filter: "",
+          ta_open: nil,
+          ta_filter: "",
           stream_popover: nil,
           metric_units: %{},
           resolved_elements: resolved_elements,
@@ -280,13 +282,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
               {@type_labels[t]}
             </option>
           </select>
-          <.host_combobox
-            :if={@discovered_hosts != []}
-            hosts={@discovered_hosts}
+          <.typeahead
+            :if={@all_hosts != []}
+            id="place"
+            options={@all_hosts}
             selected={@place_host}
-            filter={@host_filter}
+            placeholder="Search hosts..."
+            open?={@ta_open == "place"}
+            filter={@ta_filter}
           />
-          <span :if={@discovered_hosts == []} class="canvas-toolbar__hint">
+          <span :if={@all_hosts == []} class="canvas-toolbar__hint">
             No hosts discovered
           </span>
           <span class="canvas-toolbar__sep"></span>
@@ -391,15 +396,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
       <div class="canvas-var-bar">
         <div :for={{name, definition} <- @canvas.variables} class="canvas-var-item">
           <span class="canvas-var-label">${name}</span>
-          <select phx-change="var:change" name={name} class="canvas-var-select">
-            <option
-              :for={opt <- Map.get(@variable_options, name, [])}
-              value={opt}
-              selected={opt == definition["current"]}
-            >
-              {opt}
-            </option>
-          </select>
+          <.typeahead
+            id={"var:" <> name}
+            options={Map.get(@variable_options, name, [])}
+            selected={definition["current"]}
+            placeholder={"Select " <> name <> "..."}
+            open?={@ta_open == "var:" <> name}
+            filter={@ta_filter}
+          />
           <button
             :if={@can_edit}
             phx-click="var:remove"
@@ -508,7 +512,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
         selected={sole_selected_object(@selected_ids, @canvas)}
         canvas={@canvas}
         available_series={@available_series}
-        discovered_hosts={@discovered_hosts}
+        all_hosts={@all_hosts}
+        ta_open={@ta_open}
+        ta_filter={@ta_filter}
       />
 
       <.timeline_bar
@@ -635,17 +641,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
       )
 
     assigns =
-      if "host" in base_fields do
-        assign(
-          assigns,
-          graph_host_options:
-            select_options("host", assigns.selected.meta["host"], assigns.discovered_hosts)
-        )
-      else
-        assigns
-      end
-
-    assigns =
       if assigns.selected.type == :graph do
         selected_metric = assigns.selected.meta["metric_name"] || ""
         selected_labels = graph_query_labels_from_meta(assigns.selected.meta)
@@ -729,15 +724,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
                 {label}
               </option>
             </select>
-            <select :if={field == "host"} name={field}>
-              <option
-                :for={{value, label} <- @graph_host_options}
-                value={value}
-                selected={value == (@selected.meta[field] || "")}
-              >
-                {label}
-              </option>
-            </select>
+            <input :if={field == "host"} type="hidden" name={field} value={@selected.meta[field] || ""} />
+            <.typeahead
+              :if={field == "host"}
+              id="meta:host"
+              options={@all_hosts}
+              selected={@selected.meta[field]}
+              placeholder="Search hosts..."
+              open?={@ta_open == "meta:host"}
+              filter={@ta_filter}
+            />
             <select :if={@selected.type == :graph && field == "metric_name"} name={field}>
               <option
                 :for={{value, label} <- @graph_metric_options}
@@ -1041,40 +1037,103 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp log_level_color(:info), do: "#22c55e"
   defp log_level_color(_), do: "#94a3b8"
 
-  defp host_combobox(assigns) do
-    filtered =
-      if assigns.filter == "" do
-        assigns.hosts
+  # Scalable replacement for option-list dropdowns: the full option list
+  # stays server-side; at most @ta_suggestion_cap suggestions are ever
+  # rendered (a 50K-host store previously produced 50K <option> nodes and
+  # a 37s morphdom patch). Enter selects the top suggestion.
+  @ta_suggestion_cap 50
+
+  defp typeahead(assigns) do
+    {shown, more} =
+      if assigns.open? do
+        ta_suggestions(assigns.options, assigns.filter)
       else
-        pattern = String.downcase(assigns.filter)
-        Enum.filter(assigns.hosts, &String.contains?(String.downcase(&1), pattern))
+        {[], 0}
       end
 
-    assigns = assign(assigns, filtered: filtered)
+    assigns = assign(assigns, shown: shown, more: more)
 
     ~H"""
-    <div class="host-combobox" phx-click-away="host_combo:close">
+    <div class="host-combobox" phx-click-away={@open? && "ta:close"}>
       <input
         type="text"
         class="host-combobox__input"
-        placeholder={@selected || "Search hosts..."}
+        placeholder={@selected || @placeholder}
         value={@filter}
-        phx-keyup="host_combo:filter"
-        phx-focus="host_combo:open"
+        autocomplete="off"
+        name="ta_search"
+        phx-keyup="ta:filter"
+        phx-focus="ta:open"
+        phx-value-ta_id={@id}
+        phx-debounce="150"
       />
-      <div :if={@filter != "" || @selected == nil} class="host-combobox__dropdown">
+      <div :if={@open?} class="host-combobox__dropdown">
         <button
-          :for={host <- @filtered}
-          class={"host-combobox__option#{if host == @selected, do: " host-combobox__option--active", else: ""}"}
-          phx-click="set_place_host"
-          phx-value-host={host}
+          :for={opt <- @shown}
+          type="button"
+          class={"host-combobox__option#{if opt == @selected, do: " host-combobox__option--active", else: ""}"}
+          phx-click="ta:select"
+          phx-value-ta_id={@id}
+          phx-value-value={opt}
         >
-          {host}
+          {opt}
         </button>
-        <span :if={@filtered == []} class="host-combobox__empty">No matches</span>
+        <span :if={@shown == []} class="host-combobox__empty">No matches</span>
+        <span :if={@more > 0} class="host-combobox__empty">
+          +{@more} more — keep typing to narrow
+        </span>
       </div>
     </div>
     """
+  end
+
+  # Route a chosen suggestion into the same paths the old selects used.
+  defp ta_apply(socket, id, value) do
+    socket = assign(socket, ta_open: nil, ta_filter: "")
+
+    case id do
+      "place" ->
+        handle_event("set_place_host", %{"host" => value}, socket)
+
+      "meta:" <> field ->
+        case sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas) do
+          %{id: el_id} ->
+            handle_event("property:update_meta", %{"element_id" => el_id, field => value}, socket)
+
+          _ ->
+            {:noreply, socket}
+        end
+
+      "var:" <> name ->
+        handle_event("var:change", %{name => value}, socket)
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  defp ta_raw_options(socket, "place"), do: socket.assigns.all_hosts
+  defp ta_raw_options(socket, "meta:host"), do: socket.assigns.all_hosts
+
+  defp ta_raw_options(socket, "var:" <> name),
+    do: Map.get(socket.assigns.variable_options, name, [])
+
+  defp ta_raw_options(_socket, _id), do: []
+
+  defp ta_suggestions(options, filter) do
+    pattern = String.downcase(filter || "")
+
+    matches =
+      options
+      |> Stream.reject(&is_nil/1)
+      |> Stream.map(&to_string/1)
+      |> Stream.filter(&(pattern == "" or String.contains?(String.downcase(&1), pattern)))
+      |> Enum.take(@ta_suggestion_cap + 1)
+
+    case Enum.split(matches, @ta_suggestion_cap) do
+      {shown, []} -> {shown, 0}
+      {shown, _} -> {shown, 1}
+    end
   end
 
   defp sole_selected_object(selected_ids, canvas) do
@@ -1188,14 +1247,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
     Map.new(variables, fn {name, definition} ->
       case definition["type"] do
         "host" ->
-          {name, cap_options(StatusManager.list_hosts())}
+          {name, StatusManager.list_hosts()}
 
         "label" ->
           label_key = definition["label_key"] || name
-          {name, cap_options(StatusManager.list_label_values(label_key))}
+          {name, StatusManager.list_label_values(label_key) || []}
 
         "custom" ->
-          {name, cap_options(definition["options"] || [])}
+          {name, definition["options"] || []}
 
         _ ->
           {name, []}
@@ -1664,16 +1723,29 @@ defmodule TimelessCanvas.Web.CanvasLive do
     {:noreply, assign(socket, place_kind: String.to_existing_atom(kind))}
   end
 
-  def handle_event("host_combo:filter", %{"value" => value}, socket) do
-    {:noreply, assign(socket, host_filter: value)}
+  def handle_event("ta:open", %{"ta_id" => id}, socket) do
+    {:noreply, assign(socket, ta_open: id, ta_filter: "")}
   end
 
-  def handle_event("host_combo:open", _params, socket) do
-    {:noreply, assign(socket, host_filter: "")}
+  def handle_event("ta:close", _params, socket) do
+    {:noreply, assign(socket, ta_open: nil, ta_filter: "")}
   end
 
-  def handle_event("host_combo:close", _params, socket) do
-    {:noreply, assign(socket, host_filter: "")}
+  def handle_event("ta:filter", %{"ta_id" => id, "key" => "Enter"} = params, socket) do
+    filter = params["value"] || socket.assigns.ta_filter
+
+    case ta_suggestions(ta_raw_options(socket, id), filter) do
+      {[first | _], _} -> ta_apply(socket, id, first)
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("ta:filter", %{"ta_id" => id, "value" => value}, socket) do
+    {:noreply, assign(socket, ta_open: id, ta_filter: value)}
+  end
+
+  def handle_event("ta:select", %{"ta_id" => id, "value" => value}, socket) do
+    ta_apply(socket, id, value)
   end
 
   def handle_event("toggle_grid", _params, socket) do
@@ -3294,9 +3366,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp refresh_discovered_hosts(socket) do
-    hosts = cap_options(StatusManager.list_hosts())
+    hosts = StatusManager.list_hosts()
     first = List.first(hosts)
-    assign(socket, discovered_hosts: hosts, place_host: first)
+    assign(socket, all_hosts: hosts, place_host: first)
   end
 
   defp refresh_pin_ifnames(socket) do
