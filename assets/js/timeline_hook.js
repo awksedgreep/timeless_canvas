@@ -145,18 +145,34 @@ const TimelineSlider = {
 
     // Align ticks to round time boundaries
     const alignedInterval = this.roundInterval(tickInterval);
+    if (!Number.isFinite(alignedInterval) || alignedInterval <= 0) return;
     const firstTick = Math.ceil(min / alignedInterval) * alignedInterval;
 
+    // Hard cap: tick building runs synchronously inside LiveView patches
+    // (i.e. inside user interactions). An unexpectedly wide slider range
+    // must never translate into unbounded DOM — 46s INP class of bug.
+    const maxTicks = 60;
+    let count = 0;
+
     let html = "";
-    for (let t = firstTick; t <= max; t += alignedInterval) {
+    for (let t = firstTick; t <= max && count < maxTicks; t += alignedInterval) {
       const pct = ((t - min) / range) * 100;
       if (pct < 0 || pct > 100) continue;
+      count += 1;
       const date = new Date(t);
       const h = date.getHours().toString().padStart(2, "0");
       const m = date.getMinutes().toString().padStart(2, "0");
       const s = date.getSeconds().toString().padStart(2, "0");
-      // Show seconds only for sub-minute intervals
-      const label = alignedInterval < 60000 ? `${h}:${m}:${s}` : `${h}:${m}`;
+      let label;
+      if (alignedInterval < 60000) {
+        label = `${h}:${m}:${s}`;
+      } else if (alignedInterval < 86400000) {
+        label = `${h}:${m}`;
+      } else {
+        const mo = (date.getMonth() + 1).toString().padStart(2, "0");
+        const d = date.getDate().toString().padStart(2, "0");
+        label = `${mo}-${d}`;
+      }
       html += `<div class="timeline-bar__tick" style="left:${pct}%"><span>${label}</span></div>`;
     }
     this.ticksEl.innerHTML = html;
@@ -165,15 +181,19 @@ const TimelineSlider = {
   roundInterval(ms) {
     // Snap to nice human-readable intervals
     const candidates = [
-      5000, 10000, 15000, 30000,       // seconds
+      5000, 10000, 15000, 30000,        // seconds
       60000, 120000, 300000, 600000,    // minutes
       1800000, 3600000,                 // 30m, 1h
-      7200000, 14400000, 21600000       // 2h, 4h, 6h
+      7200000, 14400000, 21600000,      // 2h, 4h, 6h
+      43200000, 86400000,               // 12h, 1d
+      172800000, 604800000, 2592000000  // 2d, 1w, 30d
     ];
     for (const c of candidates) {
       if (ms <= c) return c;
     }
-    return 21600000;
+    // Beyond 30d: snap up to a whole multiple of 30d so the tick count
+    // stays ~10 regardless of how wide the range is
+    return Math.ceil(ms / 2592000000) * 2592000000;
   },
 
   renderDensity(buckets) {
