@@ -4,7 +4,8 @@ defmodule TimelessCanvas.DataSource.Manager do
 
   - Holds the active data source module + its state
   - Polls `status/2` for each tracked element on a configurable interval
-  - Broadcasts status changes via `Phoenix.PubSub` on configurable topic
+  - Broadcasts status changes via `Phoenix.PubSub` on the per-canvas
+    `status_topic/1` of the canvas each element was registered under
 
   Read-only queries (`metric_range/5`, `list_hosts/1`, time-travel lookups,
   etc.) execute in the **caller process**: the Manager publishes the data
@@ -26,8 +27,13 @@ defmodule TimelessCanvas.DataSource.Manager do
 
   @table :timeless_canvas_data_source
 
-  def status_topic, do: "timeless_canvas:status"
-  def metric_topic, do: "timeless_canvas:metrics"
+  @doc """
+  Per-canvas status topic: `{:element_status, element_id, status}` changes
+  for elements registered under `canvas_id` are broadcast here (previously
+  one global topic fanned every status change out to every client of every
+  canvas).
+  """
+  def status_topic(canvas_id), do: "timeless_canvas:canvas:#{canvas_id}:status"
 
   # --- Client API (GenServer-backed: mutates data-source state) ---
 
@@ -35,8 +41,8 @@ defmodule TimelessCanvas.DataSource.Manager do
     GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
   end
 
-  def register_elements(elements, server \\ __MODULE__) when is_list(elements) do
-    GenServer.call(server, {:register_elements, elements})
+  def register_elements(canvas_id, elements, server \\ __MODULE__) when is_list(elements) do
+    GenServer.call(server, {:register_elements, canvas_id, elements})
   end
 
   def unregister_element(element_id, server \\ __MODULE__) do
@@ -246,6 +252,7 @@ defmodule TimelessCanvas.DataSource.Manager do
           module: module,
           ds_state: ds_state,
           elements: %{},
+          element_canvases: %{},
           poll_interval: poll_interval,
           last_statuses: %{},
           debug: %{
@@ -253,9 +260,7 @@ defmodule TimelessCanvas.DataSource.Manager do
             registered_elements: 0,
             polls: 0,
             poll_time_us: 0,
-            statuses_broadcast: 0,
-            metrics_broadcast: 0,
-            text_metrics_broadcast: 0
+            statuses_broadcast: 0
           }
         }
 
@@ -273,11 +278,13 @@ defmodule TimelessCanvas.DataSource.Manager do
   end
 
   @impl true
-  def handle_call({:register_elements, elements}, _from, state) do
-    {ds_state, element_map} =
-      Enum.reduce(elements, {state.ds_state, state.elements}, fn element, {ds, elmap} ->
+  def handle_call({:register_elements, canvas_id, elements}, _from, state) do
+    acc0 = {state.ds_state, state.elements, state.element_canvases}
+
+    {ds_state, element_map, canvas_map} =
+      Enum.reduce(elements, acc0, fn element, {ds, elmap, cvmap} ->
         {:ok, ds} = state.module.subscribe(ds, element)
-        {ds, Map.put(elmap, element.id, element)}
+        {ds, Map.put(elmap, element.id, element), Map.put(cvmap, element.id, canvas_id)}
       end)
 
     debug =
@@ -286,7 +293,13 @@ defmodule TimelessCanvas.DataSource.Manager do
       |> Map.put(:registered_elements, map_size(element_map))
 
     state =
-      %{state | ds_state: ds_state, elements: element_map, debug: debug}
+      %{
+        state
+        | ds_state: ds_state,
+          elements: element_map,
+          element_canvases: canvas_map,
+          debug: debug
+      }
       |> publish_source()
       |> publish_elements()
 
@@ -302,9 +315,16 @@ defmodule TimelessCanvas.DataSource.Manager do
       {element, elements} ->
         {:ok, ds_state} = state.module.unsubscribe(state.ds_state, element)
         last_statuses = Map.delete(state.last_statuses, element_id)
+        element_canvases = Map.delete(state.element_canvases, element_id)
 
         state =
-          %{state | ds_state: ds_state, elements: elements, last_statuses: last_statuses}
+          %{
+            state
+            | ds_state: ds_state,
+              elements: elements,
+              element_canvases: element_canvases,
+              last_statuses: last_statuses
+          }
           |> publish_source()
           |> publish_elements()
 
@@ -331,7 +351,6 @@ defmodule TimelessCanvas.DataSource.Manager do
     Logger.info(
       "[canvas-prof] manager polls=#{state.debug.polls} register_calls=#{state.debug.register_calls} " <>
         "registered_elements=#{state.debug.registered_elements} status_broadcasts=#{state.debug.statuses_broadcast} " <>
-        "metric_broadcasts=#{state.debug.metrics_broadcast} text_metric_broadcasts=#{state.debug.text_metrics_broadcast} " <>
         "poll_time_ms=#{Float.round(state.debug.poll_time_us / 1000, 1)}"
     )
 
@@ -342,9 +361,7 @@ defmodule TimelessCanvas.DataSource.Manager do
       | polls: 0,
         register_calls: 0,
         poll_time_us: 0,
-        statuses_broadcast: 0,
-        metrics_broadcast: 0,
-        text_metrics_broadcast: 0
+        statuses_broadcast: 0
     }
 
     {:noreply, %{state | debug: debug}}
@@ -374,21 +391,17 @@ defmodule TimelessCanvas.DataSource.Manager do
     Process.send_after(self(), :debug_report, @debug_report_interval)
   end
 
+  # Text-series metric polling moved to TimelessCanvas.CanvasPoller: its
+  # per-canvas text_metric_at diff/broadcast covers what the old
+  # poll_text_metric -> {:element_text_metric, ...} path did, so the
+  # Manager poll loop now only tracks statuses.
   defp poll_all(state) do
-    pubsub = TimelessCanvas.pubsub()
     statuses = poll_statuses(state)
 
-    Enum.reduce(state.elements, state, fn {element_id, element}, acc ->
-      acc =
-        case Map.fetch(statuses, element_id) do
-          {:ok, status} -> maybe_broadcast_status(acc, element_id, status)
-          :error -> acc
-        end
-
-      if element.type == :text_series do
-        poll_text_metric(acc, element_id, element, pubsub)
-      else
-        acc
+    Enum.reduce(state.elements, state, fn {element_id, _element}, acc ->
+      case Map.fetch(statuses, element_id) do
+        {:ok, status} -> maybe_broadcast_status(acc, element_id, status)
+        :error -> acc
       end
     end)
   end
@@ -403,35 +416,11 @@ defmodule TimelessCanvas.DataSource.Manager do
     end
   end
 
-  defp poll_text_metric(state, element_id, element, pubsub) do
-    metric_name = Map.get(element.meta, "metric_name", "default")
-
-    if function_exported?(state.module, :text_metric, 3) do
-      case state.module.text_metric(state.ds_state, element, metric_name) do
-        {:ok, value} ->
-          timestamp = System.system_time(:millisecond)
-
-          Phoenix.PubSub.broadcast(
-            pubsub,
-            metric_topic(),
-            {:element_text_metric, element_id, metric_name, value, timestamp}
-          )
-
-          put_in(state.debug.text_metrics_broadcast, state.debug.text_metrics_broadcast + 1)
-
-        :no_data ->
-          state
-      end
-    else
-      state
-    end
-  end
-
   defp maybe_broadcast_status(state, element_id, status) do
     if Map.get(state.last_statuses, element_id) != status do
       Phoenix.PubSub.broadcast(
         TimelessCanvas.pubsub(),
-        status_topic(),
+        status_topic(Map.get(state.element_canvases, element_id)),
         {:element_status, element_id, status}
       )
 

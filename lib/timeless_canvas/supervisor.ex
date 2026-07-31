@@ -1,6 +1,7 @@
 defmodule TimelessCanvas.Supervisor do
   @moduledoc """
-  Convenience supervisor that starts the DataSource.Manager and StreamManager.
+  Convenience supervisor that starts the DataSource.Manager, StreamManager,
+  and the per-canvas poller infrastructure (registry + dynamic supervisor).
 
   Add to your application's supervision tree:
 
@@ -16,6 +17,8 @@ defmodule TimelessCanvas.Supervisor do
   @impl true
   def init(_opts) do
     children = [
+      {Registry, keys: :unique, name: TimelessCanvas.CanvasRegistry},
+      {DynamicSupervisor, name: TimelessCanvas.PollerSupervisor, strategy: :one_for_one},
       TimelessCanvas.DataSource.Manager,
       TimelessCanvas.StreamManager
     ]

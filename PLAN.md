@@ -63,9 +63,21 @@ Status legend: `[x]` done · `[ ]` pending
 
 ## Phase 2 — Render path and polling
 
-- [ ] Per-canvas shared poller process: batch element queries per tick, broadcast
+- [x] Per-canvas shared poller process: batch element queries per tick, broadcast
       on per-canvas PubSub topics; LiveViews merge only changed entries
-      (today: N clients × G graphs × sequential queries every 2s — `canvas_live.ex:2545,2743`)
+      (was: N clients × G graphs × sequential queries every 2s — `canvas_live.ex:2545,2743`).
+      Done via `TimelessCanvas.CanvasPoller` (one per open canvas, Registry +
+      DynamicSupervisor, `restart: :temporary`) polling graph + text_series data
+      through the new shared `TimelessCanvas.DataQueries` (pure query layer
+      extracted from CanvasLive) and broadcasting only per-element diffs as
+      `{:canvas_data, canvas_id, %{graph_data: ..., text_data: ...}}` on
+      `data_topic(canvas_id)`; the per-LiveView `:graph_refresh` timer is gone.
+      Status fan-out is per-canvas too: `Manager.register_elements/2` now takes a
+      `canvas_id` and `{:element_status, ...}` broadcasts go to
+      `Manager.status_topic(canvas_id)` instead of one global topic. The
+      Manager's text-metric poll path (`poll_text_metric` +
+      `{:element_text_metric, ...}` on the global metric topic) was removed —
+      the poller's text_data diffs replace it end to end.
 - [ ] Client-side graph updates: `push_event` point deltas into a
       `phx-update="ignore"` region; remove per-render `Jason.encode!` data
       attributes (`canvas_components.ex:539-689,203,289`)

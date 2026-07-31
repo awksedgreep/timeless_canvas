@@ -5,6 +5,8 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
 
   alias TimelessCanvas.Canvas
   alias TimelessCanvas.Canvas.Serializer
+  alias TimelessCanvas.CanvasPoller
+  alias TimelessCanvas.DataSource.Manager
 
   defp encode(canvas) do
     # Simulate the JSON round trip a DB-backed record goes through
@@ -371,6 +373,129 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
 
   defp count_occurrences(html, needle) do
     length(String.split(html, needle)) - 1
+  end
+
+  describe "shared canvas poller" do
+    test "two viewers of one canvas both render poller graph updates", %{conn: conn, user: user} do
+      # The poller reads :poll_interval from the data_source config at
+      # start; shrink it for this test and restore afterwards.
+      ds_config = Application.get_env(:timeless_canvas, :data_source)
+
+      Application.put_env(
+        :timeless_canvas,
+        :data_source,
+        Keyword.put(ds_config, :poll_interval, 60)
+      )
+
+      on_exit(fn -> Application.put_env(:timeless_canvas, :data_source, ds_config) end)
+
+      now_ms = System.system_time(:millisecond)
+      FakeDataSource.put(:metric_range, {:ok, [{now_ms - 60_000, 777.0}, {now_ms, 777.0}]})
+
+      {canvas, _el} =
+        Canvas.add_element(Canvas.new(), %{
+          type: :graph,
+          x: 100.0,
+          y: 100.0,
+          label: "cpu graph",
+          meta: %{"host" => "web-1", "metric_name" => "cpu_usage"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: encode(canvas)})
+
+      # A slow poller for this canvas id may linger from an earlier test
+      # (FakePersistence ids restart at 1); replace it with a fast one.
+      stop_poller(record.id)
+      on_exit(fn -> stop_poller(record.id) end)
+
+      {:ok, view_a, _html} = live(conn, "/canvas/#{record.id}")
+      {:ok, view_b, _html} = live(log_in_user(build_conn(), user), "/canvas/#{record.id}")
+      render_async(view_a)
+      render_async(view_b)
+
+      assert render(view_a) =~ "777"
+      assert render(view_b) =~ "777"
+
+      # New live data: one poller tick fans the diff out to both views.
+      FakeDataSource.put(:metric_range, {:ok, [{now_ms - 60_000, 888.0}, {now_ms, 888.0}]})
+
+      assert eventually(fn -> render(view_a) =~ "888" end)
+      assert eventually(fn -> render(view_b) =~ "888" end)
+    end
+
+    test "status broadcasts on one canvas's topic do not reach another canvas", %{
+      conn: conn,
+      user: user
+    } do
+      {data_a, el_a} = canvas_with_element(%{x: 100.0, y: 100.0, label: "a-el", type: :server})
+      {data_b, _el_b} = canvas_with_element(%{x: 100.0, y: 100.0, label: "b-el", type: :server})
+
+      record_a = FakePersistence.seed_canvas(%{name: "A", user_id: user.id, data: data_a})
+      record_b = FakePersistence.seed_canvas(%{name: "B", user_id: user.id, data: data_b})
+
+      {:ok, view_a, _html} = live(conn, "/canvas/#{record_a.id}")
+      {:ok, view_b, _html} = live(log_in_user(build_conn(), user), "/canvas/#{record_b.id}")
+
+      refute render(view_a) =~ "canvas-element__status--error"
+      refute render(view_b) =~ "canvas-element__status--error"
+
+      # Both canvases contain an element with the same id (el-1), so a
+      # leaked broadcast would flip canvas B's element too.
+      Phoenix.PubSub.broadcast(
+        TimelessCanvas.TestPubSub,
+        Manager.status_topic(record_a.id),
+        {:element_status, el_a.id, :error}
+      )
+
+      assert eventually(fn -> render(view_a) =~ "canvas-element__status--error" end)
+      refute render(view_b) =~ "canvas-element__status--error"
+    end
+  end
+
+  defp stop_poller(canvas_id) do
+    case CanvasPoller.whereis(canvas_id) do
+      nil ->
+        :ok
+
+      pid ->
+        try do
+          GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
+
+        wait_until_unregistered(canvas_id, 50)
+    end
+  end
+
+  defp wait_until_unregistered(_canvas_id, 0), do: :ok
+
+  defp wait_until_unregistered(canvas_id, tries) do
+    if CanvasPoller.whereis(canvas_id) do
+      Process.sleep(10)
+      wait_until_unregistered(canvas_id, tries - 1)
+    else
+      :ok
+    end
+  end
+
+  defp eventually(fun, timeout_ms \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(fun, deadline)
+  end
+
+  defp do_eventually(fun, deadline) do
+    cond do
+      fun.() ->
+        true
+
+      System.monotonic_time(:millisecond) > deadline ->
+        false
+
+      true ->
+        Process.sleep(25)
+        do_eventually(fun, deadline)
+    end
   end
 
   describe "element placement" do

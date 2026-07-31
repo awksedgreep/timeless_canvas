@@ -68,7 +68,7 @@ defmodule TimelessCanvas.DataSource.ManagerTest do
 
   describe "caller-side execution (the refactor regression test)" do
     test "queries answer while the Manager GenServer is suspended" do
-      Manager.register_elements([element("suspended-el")])
+      Manager.register_elements(1, [element("suspended-el")])
       FakeDataSource.put(:metric_range, {:ok, [{1_000, 42.0}]})
       FakeDataSource.put(:list_hosts, ["host-a", "host-b"])
 
@@ -138,7 +138,7 @@ defmodule TimelessCanvas.DataSource.ManagerTest do
 
       assert Manager.metric_range("reg-el", "cpu_usage", from, to) == {:ok, []}
 
-      Manager.register_elements([element("reg-el")])
+      Manager.register_elements(1, [element("reg-el")])
       assert Manager.metric_range("reg-el", "cpu_usage", from, to) == {:ok, [{2_000, 7.5}]}
 
       Manager.unregister_element("reg-el")

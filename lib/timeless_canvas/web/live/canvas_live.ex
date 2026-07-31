@@ -12,6 +12,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
     VariableResolver
   }
 
+  alias TimelessCanvas.CanvasPoller
+  alias TimelessCanvas.DataQueries
   alias TimelessCanvas.DataSource.Manager, as: StatusManager
   alias TimelessCanvas.IconCatalog
   alias TimelessCanvas.StreamManager
@@ -39,6 +41,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
     text_series: "TextSeries"
   }
 
+  @default_timeline_span 3600
+
   # Option lists must be bounded before they reach the DOM: a
   # high-cardinality store (50K hosts observed) rendered 50K <option>
   # nodes per select and morphdom spent 37s applying one patch (INP
@@ -58,9 +62,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
       is_owner = record.user_id == current_user.id || auth().admin?(current_user)
 
       if connected?(socket) do
-        Phoenix.PubSub.subscribe(pubsub(), StatusManager.status_topic())
-        Phoenix.PubSub.subscribe(pubsub(), StatusManager.metric_topic())
+        Phoenix.PubSub.subscribe(pubsub(), StatusManager.status_topic(canvas_id))
         Phoenix.PubSub.subscribe(pubsub(), StreamManager.topic())
+        Phoenix.PubSub.subscribe(pubsub(), CanvasPoller.data_topic(canvas_id))
       end
 
       canvas =
@@ -74,9 +78,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
       bindings = VariableResolver.bindings(canvas.variables)
       resolved_elements = VariableResolver.resolve_elements(canvas.elements, bindings)
 
+      if connected?(socket) do
+        # One shared poller per open canvas replaces the old per-LiveView
+        # :graph_refresh timer; it broadcasts diffs on data_topic/1.
+        CanvasPoller.subscribe(canvas_id, resolved_elements, span: @default_timeline_span)
+      end
+
       stream_data =
         if connected?(socket) and map_size(canvas.elements) > 0 do
-          StatusManager.register_elements(Map.values(resolved_elements))
+          StatusManager.register_elements(canvas_id, Map.values(resolved_elements))
           register_stream_elements(resolved_elements)
         else
           %{}
@@ -105,7 +115,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           breadcrumbs: breadcrumbs,
           timeline_mode: :live,
           timeline_time: nil,
-          timeline_span: 3600,
+          timeline_span: @default_timeline_span,
           timeline_range: 86_400,
           timeline_data_range: nil,
           graph_data: %{},
@@ -132,8 +142,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           show_add_variable: false,
           debug_counts: %{
             status_msgs: 0,
-            metric_msgs: 0,
-            text_metric_msgs: 0,
+            data_msgs: 0,
             stream_entry_msgs: 0,
             stream_span_msgs: 0
           }
@@ -150,7 +159,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
           socket
           |> start_async(:initial_data, fn -> load_initial_data(resolved_elements, span) end)
-          |> schedule_graph_refresh()
           |> schedule_debug_report()
         else
           socket
@@ -166,18 +174,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
-  @max_graph_points 60
-  @max_graph_points_expanded 300
-  @max_stream_entries 50
-  # Per-element backfill queries run in the caller process; fan them out
-  # with bounded concurrency so backend I/O overlaps.
-  @element_query_concurrency 8
-  @element_query_timeout 30_000
   @base_viewbox_width 1200.0
   @min_zoom_percent 10
   @max_zoom_percent 190
   @debug_report_interval 30_000
-  @default_graph_refresh_interval 2_000
   @profile_skip_stream_updates false
 
   @impl true
@@ -1243,12 +1243,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp register_elements(socket) do
-    elements = Map.values(socket.assigns.resolved_elements)
-    StatusManager.register_elements(elements)
+    resolved = socket.assigns.resolved_elements
+    StatusManager.register_elements(socket.assigns.canvas_id, Map.values(resolved))
+
+    if connected?(socket) do
+      CanvasPoller.update_elements(socket.assigns.canvas_id, resolved,
+        span: socket.assigns.timeline_span
+      )
+    end
 
     stream_data =
-      if connected?(socket) and map_size(socket.assigns.resolved_elements) > 0 do
-        register_stream_elements(socket.assigns.resolved_elements)
+      if connected?(socket) and map_size(resolved) > 0 do
+        register_stream_elements(resolved)
       else
         %{}
       end
@@ -1268,19 +1274,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
 
     socket
-  end
-
-  defp schedule_graph_refresh(socket) do
-    if connected?(socket) do
-      Process.send_after(self(), :graph_refresh, graph_refresh_interval())
-    end
-
-    socket
-  end
-
-  defp graph_refresh_interval do
-    TimelessCanvas.data_source_config()
-    |> Keyword.get(:poll_interval, @default_graph_refresh_interval)
   end
 
   defp bump_render_stat(key, delta) do
@@ -2147,7 +2140,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
         bindings = VariableResolver.bindings(canvas.variables)
         resolved_el = VariableResolver.resolve_element(el, bindings)
-        StatusManager.register_elements([resolved_el])
+        StatusManager.register_elements(socket.assigns.canvas_id, [resolved_el])
 
         socket =
           socket
@@ -2367,8 +2360,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
      |> refresh_data_range()
      |> fill_graph_data_at(DateTime.utc_now())
      |> push_slider_update()
-     |> push_density_update()
-     |> schedule_graph_refresh()}
+     |> push_density_update()}
   end
 
   def handle_event("timeline:change", %{"time" => center_ms}, socket)
@@ -2420,6 +2412,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
           updated_socket = assign(socket, timeline_span: span)
           {updated_socket, DateTime.utc_now()}
       end
+
+    # Keep the shared poller's window in sync so its next live tick
+    # queries the same span the view now renders.
+    CanvasPoller.update_elements(
+      socket.assigns.canvas_id,
+      socket.assigns.resolved_elements,
+      span: span
+    )
 
     {:noreply,
      socket
@@ -2517,25 +2517,50 @@ defmodule TimelessCanvas.Web.CanvasLive do
     if socket.assigns.timeline_mode == :live do
       canvas = Canvas.set_element_status(socket.assigns.canvas, element_id, status)
       history = %{socket.assigns.history | present: canvas}
-      {:noreply, assign(socket, history: history, canvas: canvas)}
+
+      # The SVG renders @resolved_elements, not @canvas.elements: mirror
+      # the status there too, or the change stays invisible until the
+      # next full re-resolve.
+      resolved_elements =
+        case Map.get(socket.assigns.resolved_elements, element_id) do
+          nil -> socket.assigns.resolved_elements
+          el -> Map.put(socket.assigns.resolved_elements, element_id, %{el | status: status})
+        end
+
+      {:noreply,
+       assign(socket, history: history, canvas: canvas, resolved_elements: resolved_elements)}
     else
       {:noreply, socket}
     end
   end
 
-  def handle_info({:element_metric, element_id, _metric_name, value, timestamp}, socket) do
-    socket = update(socket, :debug_counts, &Map.update!(&1, :metric_msgs, fn n -> n + 1 end))
-    _ = {element_id, value, timestamp}
-    {:noreply, socket}
-  end
-
-  def handle_info({:element_text_metric, element_id, _metric_name, value, timestamp}, socket) do
-    socket =
-      update(socket, :debug_counts, &Map.update!(&1, :text_metric_msgs, fn n -> n + 1 end))
+  # Diff broadcast from the shared per-canvas poller (replaces the old
+  # per-LiveView :graph_refresh timer + the Manager's text-metric poll).
+  # Only the changed element entries are merged; historical viewers keep
+  # their scrubbed data untouched, mirroring the old live-mode-only guard.
+  def handle_info({:canvas_data, _canvas_id, diffs}, socket) do
+    socket = update(socket, :debug_counts, &Map.update!(&1, :data_msgs, fn n -> n + 1 end))
 
     if socket.assigns.timeline_mode == :live do
-      text_data = Map.put(socket.assigns.text_data, element_id, {timestamp, value})
-      {:noreply, assign(socket, text_data: text_data)}
+      socket =
+        assign(socket,
+          graph_data: Map.merge(socket.assigns.graph_data, diffs.graph_data),
+          text_data: Map.merge(socket.assigns.text_data, diffs.text_data)
+        )
+
+      # The old :graph_refresh path also re-queried the expanded graph's
+      # high-resolution window on every tick; keep that per-viewer since
+      # expansion is per-viewer UI state.
+      socket =
+        case socket.assigns.expanded_graph_id do
+          nil ->
+            socket
+
+          expanded_id ->
+            assign(socket, expanded_graph_data: fetch_expanded_data(socket, expanded_id))
+        end
+
+      {:noreply, socket}
     else
       {:noreply, socket}
     end
@@ -2551,7 +2576,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       if socket.assigns.timeline_mode == :live do
         stream_data = socket.assigns.stream_data
         entries = Map.get(stream_data, element_id, [])
-        entries = Enum.take([entry_map | entries], @max_stream_entries)
+        entries = Enum.take([entry_map | entries], DataQueries.max_stream_entries())
         stream_data = Map.put(stream_data, element_id, entries)
         {:noreply, assign(socket, stream_data: stream_data)}
       else
@@ -2569,7 +2594,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       if socket.assigns.timeline_mode == :live do
         stream_data = socket.assigns.stream_data
         entries = Map.get(stream_data, element_id, [])
-        entries = Enum.take([span_map | entries], @max_stream_entries)
+        entries = Enum.take([span_map | entries], DataQueries.max_stream_entries())
         stream_data = Map.put(stream_data, element_id, entries)
         {:noreply, assign(socket, stream_data: stream_data)}
       else
@@ -2587,17 +2612,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     {:noreply, socket}
   end
 
-  def handle_info(:graph_refresh, socket) do
-    socket =
-      if socket.assigns.timeline_mode == :live do
-        fill_graph_data_at(socket, DateTime.utc_now())
-      else
-        socket
-      end
-
-    {:noreply, schedule_graph_refresh(socket)}
-  end
-
   def handle_info(:debug_report, socket) do
     counts = socket.assigns.debug_counts
     render_stats = consume_render_stats()
@@ -2605,7 +2619,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
     Logger.info(
       "[canvas-prof] liveview canvas_id=#{socket.assigns.canvas_id} timeline_mode=#{socket.assigns.timeline_mode} " <>
         "resolved_elements=#{map_size(socket.assigns.resolved_elements)} status_msgs=#{counts.status_msgs} " <>
-        "metric_msgs=#{counts.metric_msgs} text_metric_msgs=#{counts.text_metric_msgs} " <>
+        "data_msgs=#{counts.data_msgs} " <>
         "stream_entry_msgs=#{counts.stream_entry_msgs} stream_span_msgs=#{counts.stream_span_msgs} " <>
         "sorted_calls=#{render_stats.sorted_calls} sorted_time_ms=#{Float.round(render_stats.sorted_time_us / 1000, 1)} " <>
         "graph_point_calls=#{render_stats.graph_point_calls} graph_point_time_ms=#{Float.round(render_stats.graph_point_time_us / 1000, 1)} " <>
@@ -2620,8 +2634,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
      socket
      |> assign(:debug_counts, %{
        status_msgs: 0,
-       metric_msgs: 0,
-       text_metric_msgs: 0,
+       data_msgs: 0,
        stream_entry_msgs: 0,
        stream_span_msgs: 0
      })
@@ -2673,8 +2686,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
   def handle_async(:initial_data, {:exit, reason}, socket) do
     Logger.warning("[canvas] initial data load failed: #{inspect(reason)}")
 
-    # Keep the view alive: the refresh timers stay scheduled, so the next
-    # :graph_refresh poll can recover once the backend comes back.
+    # Keep the view alive: the shared CanvasPoller keeps ticking, so its
+    # next data broadcast can recover once the backend comes back.
     {:noreply, assign(socket, loading_data?: false, data_load_failed?: true)}
   end
 
@@ -2844,16 +2857,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp backfill_graph(socket, %{type: :graph} = el) do
     time = socket.assigns.timeline_time || DateTime.utc_now()
     span = socket.assigns.timeline_span
-    from = DateTime.add(time, -span, :second)
-    metric_name = Map.get(el.meta, "metric_name", "default")
 
-    points =
-      case StatusManager.metric_range(el.id, metric_name, from, time) do
-        {:ok, pts} when pts != [] -> downsample(pts, @max_graph_points)
-        _ -> []
-      end
+    graph_data =
+      Map.merge(socket.assigns.graph_data, query_graph_data(%{el.id => el}, time, span))
 
-    graph_data = Map.put(socket.assigns.graph_data, el.id, points)
     assign(socket, graph_data: graph_data)
   end
 
@@ -2936,35 +2943,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     )
   end
 
-  defp query_expanded_data(resolved_elements, element_id, time, span) do
-    case Map.get(resolved_elements, element_id) do
-      %{type: :graph} = element ->
-        metric_name = Map.get(element.meta, "metric_name", "default")
-        from = DateTime.add(time, -span, :second)
-
-        case StatusManager.metric_range(element_id, metric_name, from, time) do
-          {:ok, pts} when pts != [] -> downsample(pts, @max_graph_points_expanded)
-          _ -> []
-        end
-
-      _ ->
-        []
-    end
-  end
-
-  defp downsample(points, max_count) when length(points) <= max_count do
-    Enum.reverse(points)
-  end
-
-  defp downsample(points, max_count) do
-    total = length(points)
-    step = total / max_count
-
-    0..(max_count - 1)
-    |> Enum.map(fn i -> Enum.at(points, round(i * step)) end)
-    |> Enum.reverse()
-  end
-
   defp fill_stream_data_at(socket, time) do
     trace_canvas_span(
       "canvas.fill_stream_data",
@@ -3003,104 +2981,30 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   # --- Pure data-source queries ---
   #
-  # These take plain data (resolved elements, a time, a span) and return
-  # plain data, so they are usable both from the socket-threading fill_*
-  # wrappers above and from the initial-load async task.
+  # The implementations live in TimelessCanvas.DataQueries so the shared
+  # CanvasPoller runs the exact same code; these thin wrappers keep the
+  # local call sites (fill_* helpers, initial-load task) unchanged.
 
-  defp query_graph_data(resolved_elements, time, span) do
-    from = DateTime.add(time, -span, :second)
+  defp query_graph_data(resolved_elements, time, span),
+    do: DataQueries.query_graph_data(resolved_elements, time, span)
 
-    resolved_elements
-    |> Enum.filter(fn {_id, el} -> el.type == :graph end)
-    |> concurrent_element_query(fn {id, element} ->
-      metric_name = Map.get(element.meta, "metric_name", "default")
+  defp query_text_data(resolved_elements, time),
+    do: DataQueries.query_text_data(resolved_elements, time)
 
-      points =
-        case StatusManager.metric_range(id, metric_name, from, time) do
-          {:ok, pts} when pts != [] -> downsample(pts, @max_graph_points)
-          _ -> []
-        end
+  defp query_stream_data(resolved_elements, time, span),
+    do: DataQueries.query_stream_data(resolved_elements, time, span)
 
-      {id, points}
-    end)
-  end
+  defp query_expanded_data(resolved_elements, element_id, time, span),
+    do: DataQueries.query_expanded_data(resolved_elements, element_id, time, span)
 
-  defp query_text_data(resolved_elements, time) do
-    resolved_elements
-    |> Enum.filter(fn {_id, el} -> el.type == :text_series end)
-    |> concurrent_element_query(fn {id, element} ->
-      metric_name = Map.get(element.meta, "metric_name", "default")
+  defp query_data_range, do: DataQueries.query_data_range()
 
-      case StatusManager.text_metric_at(id, metric_name, time) do
-        {:ok, value} -> {id, {DateTime.to_unix(time, :millisecond), value}}
-        :no_data -> :skip
-      end
-    end)
-  end
+  defp query_host_probe, do: DataQueries.query_host_probe()
 
-  defp query_stream_data(resolved_elements, time, span) do
-    from = DateTime.add(time, -span, :second)
-    backends = TimelessCanvas.stream_backends()
+  defp query_metric_units(resolved_elements),
+    do: DataQueries.query_metric_units(resolved_elements)
 
-    resolved_elements
-    |> Enum.filter(fn {_id, el} -> el.type in [:log_stream, :trace_stream] end)
-    |> concurrent_element_query(fn {id, element} ->
-      {id, query_stream_historical(element, from, time, backends)}
-    end)
-  end
-
-  # Fan out one query per element with bounded concurrency; results are
-  # keyed by element id so ordering does not matter. Timed-out or crashed
-  # queries are skipped, leaving any previously assigned data in place.
-  defp concurrent_element_query(elements, fun) do
-    elements
-    |> Task.async_stream(fun,
-      max_concurrency: @element_query_concurrency,
-      ordered: false,
-      timeout: @element_query_timeout,
-      on_timeout: :kill_task
-    )
-    |> Enum.reduce(%{}, fn
-      {:ok, :skip}, acc -> acc
-      {:ok, {id, value}}, acc -> Map.put(acc, id, value)
-      {:exit, _reason}, acc -> acc
-    end)
-  end
-
-  defp query_data_range do
-    case StatusManager.time_range() do
-      :empty -> nil
-      range -> range
-    end
-  end
-
-  defp query_host_probe do
-    hosts = StatusManager.list_hosts(limit: 1)
-    {hosts != [], List.first(hosts)}
-  end
-
-  defp query_metric_units(resolved_elements) do
-    resolved_elements
-    |> Enum.filter(fn {_id, el} -> el.type == :graph end)
-    |> Enum.reduce(%{}, fn {id, el}, acc ->
-      metric_name = Map.get(el.meta || %{}, "metric_name")
-
-      if metric_name do
-        case StatusManager.metric_metadata(metric_name) do
-          {:ok, %{unit: unit}} when not is_nil(unit) -> Map.put(acc, id, unit)
-          _ -> acc
-        end
-      else
-        acc
-      end
-    end)
-  end
-
-  defp query_density_buckets({%DateTime{} = data_start, %DateTime{} = data_end}) do
-    StatusManager.data_density(data_start, data_end, 80)
-  end
-
-  defp query_density_buckets(_data_range), do: []
+  defp query_density_buckets(data_range), do: DataQueries.query_density_buckets(data_range)
 
   # Live-vs-historical seed decision from the data range: if the newest
   # data point predates the live window, start scrubbed to it.
@@ -3163,86 +3067,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp maybe_set_span_status(code, message) do
     if Code.ensure_loaded?(OpenTelemetry.Tracer) do
       apply(OpenTelemetry.Tracer, :set_status, [code, message])
-    end
-  end
-
-  defp query_stream_historical(%{type: :log_stream} = element, from, to, backends) do
-    case Keyword.get(backends, :log) do
-      nil ->
-        []
-
-      backend ->
-        filters =
-          build_log_opts(element.meta)
-          |> Keyword.put(:since, from)
-          |> Keyword.put(:until, to)
-          |> Keyword.put(:limit, @max_stream_entries)
-          |> Keyword.put(:order, :desc)
-
-        case backend.query(filters) do
-          {:ok, %{entries: entries}} ->
-            Enum.map(entries, fn e ->
-              %{
-                timestamp: e.timestamp,
-                level: e.level,
-                message: e.message,
-                metadata: e.metadata
-              }
-            end)
-
-          _ ->
-            []
-        end
-    end
-  end
-
-  defp query_stream_historical(%{type: :trace_stream} = element, from, to, backends) do
-    case Keyword.get(backends, :trace) do
-      nil ->
-        []
-
-      backend ->
-        filters =
-          build_trace_opts(element.meta)
-          |> Keyword.put(:since, from)
-          |> Keyword.put(:until, to)
-          |> Keyword.put(:limit, @max_stream_entries)
-          |> Keyword.put(:order, :desc)
-
-        case backend.query(filters) do
-          {:ok, %{entries: spans}} ->
-            Enum.map(spans, fn s ->
-              %{
-                timestamp: Map.get(s, :start_time) || Map.get(s, :timestamp),
-                trace_id: s.trace_id,
-                span_id: s.span_id,
-                name: s.name,
-                kind: s.kind,
-                duration_ns: s.duration_ns,
-                status: s.status,
-                status_message: s.status_message,
-                service: get_span_service(s)
-              }
-            end)
-
-          _ ->
-            []
-        end
-    end
-  end
-
-  defp query_stream_historical(_element, _from, _to, _backends), do: []
-
-  defp get_span_service(span) do
-    cond do
-      is_map(span.attributes) && Map.has_key?(span.attributes, "service.name") ->
-        span.attributes["service.name"]
-
-      is_map(span.resource) && Map.has_key?(span.resource, "service.name") ->
-        span.resource["service.name"]
-
-      true ->
-        nil
     end
   end
 
@@ -3457,89 +3281,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end)
   end
 
-  defp build_log_opts(meta) do
-    opts = []
+  defp build_log_opts(meta), do: DataQueries.build_log_opts(meta)
 
-    opts =
-      case Map.get(meta, "host") do
-        nil -> opts
-        "" -> opts
-        host -> Keyword.put(opts, :metadata, %{"host" => host})
-      end
-
-    opts =
-      case Map.get(meta, "level") do
-        nil -> opts
-        "" -> opts
-        level -> Keyword.put(opts, :level, String.to_existing_atom(level))
-      end
-
-    case Map.get(meta, "metadata_filter") do
-      nil ->
-        opts
-
-      "" ->
-        opts
-
-      filter_str ->
-        metadata =
-          filter_str
-          |> String.split(",")
-          |> Enum.reduce(%{}, fn pair, acc ->
-            case String.split(String.trim(pair), "=", parts: 2) do
-              [k, v] -> Map.put(acc, String.trim(k), String.trim(v))
-              _ -> acc
-            end
-          end)
-
-        if map_size(metadata) > 0 do
-          merged =
-            opts
-            |> Keyword.get(:metadata, %{})
-            |> Map.merge(metadata)
-
-          Keyword.put(opts, :metadata, merged)
-        else
-          opts
-        end
-    end
-  end
-
-  defp build_trace_opts(meta) do
-    opts = []
-
-    opts =
-      case Map.get(meta, "host") do
-        nil ->
-          opts
-
-        "" ->
-          opts
-
-        host ->
-          Keyword.put(opts, :attributes, %{"host.name" => host})
-      end
-
-    opts =
-      case Map.get(meta, "service") do
-        nil -> opts
-        "" -> opts
-        svc -> Keyword.put(opts, :service, svc)
-      end
-
-    opts =
-      case Map.get(meta, "name") do
-        nil -> opts
-        "" -> opts
-        name -> Keyword.put(opts, :name, name)
-      end
-
-    case Map.get(meta, "kind") do
-      nil -> opts
-      "" -> opts
-      kind -> Keyword.put(opts, :kind, String.to_existing_atom(kind))
-    end
-  end
+  defp build_trace_opts(meta), do: DataQueries.build_trace_opts(meta)
 
   defp fetch_metric_units(socket) do
     assign(socket, metric_units: query_metric_units(socket.assigns.resolved_elements))
@@ -3575,7 +3319,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
     bindings = VariableResolver.bindings(canvas.variables)
     resolved_el = VariableResolver.resolve_element(el, bindings)
-    StatusManager.register_elements([resolved_el])
+    StatusManager.register_elements(socket.assigns.canvas_id, [resolved_el])
 
     socket =
       socket
