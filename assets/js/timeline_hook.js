@@ -11,6 +11,20 @@ const TimelineSlider = {
     this.dragging = false;
     this.pendingSliderData = null;
     this.dragOffsetPx = 0;
+    this._dragRect = null; // track rect cached at drag start (no per-move reads)
+    this._moveRaf = null; // pending drag-move animation frame id
+    this._pendingClientX = null;
+    this._lastClientX = null; // last known pointer x (touchcancel fallback)
+    this._ticksKey = null; // (min|max|interval) of the last tick rebuild
+    // One shared formatter — constructing Intl.DateTimeFormat per call is
+    // expensive and this runs on every drag frame.
+    this._bubbleFmt = new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit"
+    });
     this.bubbleEl = document.createElement("div");
     this.bubbleEl.className = "timeline-bar__bubble";
     this.bubbleEl.hidden = true;
@@ -64,6 +78,17 @@ const TimelineSlider = {
   },
 
   destroyed() {
+    // Remove all document-level listeners (they leak if the hook is
+    // destroyed mid-drag) and any pending animation frame.
+    document.removeEventListener("mousemove", this._onMouseMove);
+    document.removeEventListener("mouseup", this._onMouseUp);
+    document.removeEventListener("touchmove", this._onTouchMove);
+    document.removeEventListener("touchend", this._onTouchEnd);
+    document.removeEventListener("touchcancel", this._onTouchCancel);
+    if (this._moveRaf) {
+      cancelAnimationFrame(this._moveRaf);
+      this._moveRaf = null;
+    }
     if (this.bubbleEl && this.bubbleEl.parentNode) {
       this.bubbleEl.parentNode.removeChild(this.bubbleEl);
     }
@@ -122,7 +147,9 @@ const TimelineSlider = {
       return;
     }
 
-    const rect = this.track.getBoundingClientRect();
+    // Use the rect cached at drag start — reading layout here would force
+    // a reflow right after the thumb/window style writes above.
+    const rect = this._dragRect || this.track.getBoundingClientRect();
     const bubbleX = rect.left + (pct / 100) * rect.width;
     const bubbleY = rect.top - 14;
 
@@ -146,6 +173,13 @@ const TimelineSlider = {
     // Align ticks to round time boundaries
     const alignedInterval = this.roundInterval(tickInterval);
     if (!Number.isFinite(alignedInterval) || alignedInterval <= 0) return;
+
+    // Tick DOM depends only on (min, max, alignedInterval); skip the
+    // rebuild when the range hasn't changed (render() runs per drag frame).
+    const ticksKey = `${min}|${max}|${alignedInterval}`;
+    if (ticksKey === this._ticksKey) return;
+    this._ticksKey = ticksKey;
+
     const firstTick = Math.ceil(min / alignedInterval) * alignedInterval;
 
     // Hard cap: tick building runs synchronously inside LiveView patches
@@ -227,6 +261,12 @@ const TimelineSlider = {
       const touch = e.changedTouches[0];
       this.onPointerUp(touch.clientX);
     };
+    this._onTouchCancel = (e) => {
+      // End the drag at the last known position (system gesture stole the touch)
+      const touch = e.changedTouches && e.changedTouches[0];
+      const clientX = touch ? touch.clientX : this._lastClientX;
+      if (clientX != null) this.onPointerUp(clientX);
+    };
 
     this.track.addEventListener("keydown", (e) => this.onKeyDown(e));
   },
@@ -237,8 +277,11 @@ const TimelineSlider = {
     this.dragMin = this.min;
     this.dragMax = this.max;
     this.dragWindowRatio = this.windowRatio;
+    // Cache the track rect for the whole drag (no per-mousemove reads)
+    this._dragRect = this.track.getBoundingClientRect();
     this.dragOffsetPx = this.computeDragOffset(e.clientX);
     this.dragging = true;
+    this._lastClientX = e.clientX;
     this.updateFromClientX(e.clientX);
     document.addEventListener("mousemove", this._onMouseMove);
     document.addEventListener("mouseup", this._onMouseUp);
@@ -250,25 +293,44 @@ const TimelineSlider = {
     this.dragMin = this.min;
     this.dragMax = this.max;
     this.dragWindowRatio = this.windowRatio;
+    this._dragRect = this.track.getBoundingClientRect();
     this.dragOffsetPx = this.computeDragOffset(e.touches[0].clientX);
     this.dragging = true;
+    this._lastClientX = e.touches[0].clientX;
     this.updateFromClientX(e.touches[0].clientX);
     document.addEventListener("touchmove", this._onTouchMove, { passive: false });
     document.addEventListener("touchend", this._onTouchEnd);
+    document.addEventListener("touchcancel", this._onTouchCancel);
   },
 
   onPointerMove(clientX) {
     if (!this.dragging) return;
-    this.updateFromClientX(clientX);
+    // Coalesce to one rendered update per animation frame
+    this._lastClientX = clientX;
+    this._pendingClientX = clientX;
+    if (this._moveRaf) return;
+    this._moveRaf = requestAnimationFrame(() => {
+      this._moveRaf = null;
+      const x = this._pendingClientX;
+      this._pendingClientX = null;
+      if (this.dragging && x != null) this.updateFromClientX(x);
+    });
   },
 
   onPointerUp(clientX) {
     if (!this.dragging) return;
     this.dragging = false;
+    if (this._moveRaf) {
+      cancelAnimationFrame(this._moveRaf);
+      this._moveRaf = null;
+    }
+    this._pendingClientX = null;
+    this._dragRect = null;
     document.removeEventListener("mousemove", this._onMouseMove);
     document.removeEventListener("mouseup", this._onMouseUp);
     document.removeEventListener("touchmove", this._onTouchMove);
     document.removeEventListener("touchend", this._onTouchEnd);
+    document.removeEventListener("touchcancel", this._onTouchCancel);
 
     const centerMs = this.clientXToValue(clientX);
     this.applyPendingSliderData();
@@ -295,7 +357,7 @@ const TimelineSlider = {
   },
 
   clientXToValue(clientX) {
-    const rect = this.track.getBoundingClientRect();
+    const rect = this._dragRect || this.track.getBoundingClientRect();
     const adjustedX = clientX - this.dragOffsetPx;
     const pct = Math.max(0, Math.min(1, (adjustedX - rect.left) / rect.width));
     const min = this.dragging ? this.dragMin : this.min;
@@ -310,7 +372,7 @@ const TimelineSlider = {
   },
 
   computeDragOffset(clientX) {
-    const rect = this.track.getBoundingClientRect();
+    const rect = this._dragRect || this.track.getBoundingClientRect();
     const range = this.max - this.min;
     if (range <= 0) return 0;
 
@@ -343,13 +405,7 @@ const TimelineSlider = {
   },
 
   formatBubbleTime(value) {
-    return new Intl.DateTimeFormat(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      second: "2-digit"
-    }).format(new Date(value));
+    return this._bubbleFmt.format(new Date(value));
   },
 
   onKeyDown(e) {

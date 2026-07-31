@@ -23,11 +23,18 @@ body:has(.canvas-container) {
   overflow: hidden;
 }
 
+/* JS fallback for browsers without :has() — the Canvas hook adds this
+   class in mounted() and removes it in destroyed() */
+body.tc-canvas-open {
+  overflow: hidden;
+}
+
 /* Container — use dvh to account for nav bar above */
 .canvas-container {
   position: relative;
   width: 100vw;
-  height: calc(100vh - 50px);
+  height: calc(100vh - 50px); /* fallback for browsers without dvh */
+  height: calc(100dvh - 50px);
   overflow: hidden;
   display: flex;
 }
@@ -43,6 +50,7 @@ body:has(.canvas-container) {
   height: 100%;
   user-select: none;
   -webkit-user-select: none;
+  touch-action: none; /* pointer events own all touch gestures */
   cursor: grab;
   background: var(--bg);
   flex-shrink: 0;
@@ -62,16 +70,22 @@ body:has(.canvas-container) {
   cursor: grab;
 }
 
+/* Hover: stroke highlight instead of filter: brightness() — SVG filters
+   aren't GPU-composited in Firefox/Safari and force expensive repaints */
 .canvas-element:hover .canvas-element__body {
-  filter: brightness(1.15);
+  stroke: var(--accent-hover);
+  stroke-width: 1.5;
 }
 
 .canvas-element:active {
   cursor: grabbing;
 }
 
-.canvas-element--selected .canvas-element__body {
-  filter: drop-shadow(0 0 8px var(--element-shadow));
+/* Selection: stroked outline only (was also filter: drop-shadow()).
+   The :hover variant is listed so selection styling wins over the plain
+   hover rule above (equal specificity, later in the file). */
+.canvas-element--selected .canvas-element__body,
+.canvas-element--selected:hover .canvas-element__body {
   stroke: var(--accent);
   stroke-width: 2;
 }
@@ -83,7 +97,7 @@ body:has(.canvas-container) {
 }
 
 .canvas-element__body {
-  transition: filter 0.15s ease;
+  transition: stroke 0.15s ease, stroke-width 0.15s ease;
 }
 
 .canvas-element__body-rect {
@@ -153,7 +167,6 @@ body:has(.canvas-container) {
 .canvas-connection--selected .canvas-connection__line {
   stroke: var(--accent) !important;
   stroke-width: 3;
-  filter: drop-shadow(0 0 4px var(--element-shadow));
 }
 
 .canvas-temp-connection {
@@ -174,7 +187,7 @@ body:has(.canvas-container) {
   background: var(--toolbar-bg);
   border: 1px solid var(--toolbar-border);
   border-radius: 8px;
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(6px); /* kept light: this sits over the live SVG */
   z-index: 10;
   max-width: calc(100vw - 24px);
 }
@@ -695,10 +708,9 @@ body:has(.canvas-container) {
   border-top: 1px solid var(--toolbar-border);
   border-top-left-radius: 14px;
   border-top-right-radius: 14px;
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(6px); /* kept light: full-width bar over the live SVG */
   z-index: 9999;
   pointer-events: auto;
-  will-change: transform;
 }
 
 .timeline-bar__live-section,
@@ -753,6 +765,7 @@ body:has(.canvas-container) {
   outline: none;
   user-select: none;
   -webkit-user-select: none;
+  touch-action: none; /* the hook owns touch scrubbing */
   overflow: visible;
 }
 
@@ -892,12 +905,23 @@ body:has(.canvas-container) {
 .timeline-bar__live-dot--active {
   background: #22c55e;
   box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+}
+
+/* Pulse the glow on a pseudo-element with an opacity-only animation
+   (animating box-shadow forces a repaint every frame) */
+.timeline-bar__live-dot--active::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(34, 197, 94, 0.55), transparent 70%);
   animation: live-pulse 1.5s ease-in-out infinite;
+  pointer-events: none;
 }
 
 @keyframes live-pulse {
-  0%, 100% { box-shadow: 0 0 4px rgba(34, 197, 94, 0.4); }
-  50% { box-shadow: 0 0 12px rgba(34, 197, 94, 0.8); }
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
 }
 
 .timeline-bar__time {

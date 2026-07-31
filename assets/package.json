@@ -1,0 +1,11 @@
+{
+  "name": "timeless_canvas",
+  "version": "0.4.13",
+  "private": true,
+  "main": "js/index.js",
+  "exports": {
+    ".": "./js/index.js",
+    "./js": "./js/index.js",
+    "./css/timeless_canvas.css": "./css/timeless_canvas.css"
+  }
+}

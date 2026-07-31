@@ -22,13 +22,71 @@ const CanvasHook = {
     this._lastClickId = null; // track element clicks for dblclick detection
     this._lastClickTime = 0;
 
+    // JS fallback for browsers without :has() support — CSS also targets
+    // body.tc-canvas-open to suppress page scrollbars.
+    document.body.classList.add("tc-canvas-open");
+
+    // rAF coalescing + cached layout state (avoid forced layout per event)
+    this._moveRaf = null; // pending pointermove animation frame id
+    this._lastMoveEvent = null;
+    this._hoverRaf = null; // pending graph-hover animation frame id
+    this._lastHoverEvent = null;
+    this._hoverCtmInv = null; // cached inverse screen CTM for hover
+    this._dragCtx = null; // cached rect/scale/CTM for the active drag
+
     this.svg.addEventListener("pointerdown", (e) => this.onPointerDown(e));
     this.svg.addEventListener("pointermove", (e) => this.onPointerMove(e));
     this.svg.addEventListener("pointerup", (e) => this.onPointerUp(e));
-    this.svg.addEventListener("pointerleave", (e) => this.onPointerUp(e));
+    // With pointer capture active, pointerleave never means "drag escaped".
+    // Safari sometimes drops capture on SVG; only end the drag when capture
+    // is really gone.
+    this.svg.addEventListener("pointerleave", (e) => {
+      if (!this.dragging) return;
+      const captured =
+        this.svg.hasPointerCapture && this.svg.hasPointerCapture(e.pointerId);
+      if (!captured) this.onPointerUp(e);
+    });
+    // Interrupted gestures (system dialogs, touch cancel, element removal):
+    // abort without committing a move. lostpointercapture also fires after a
+    // normal pointerup, where dragging is already null → no-op.
+    this.svg.addEventListener("pointercancel", () => this.abortDrag());
+    this.svg.addEventListener("lostpointercapture", (e) => {
+      // lostpointercapture bubbles: on touch, the pointerdown target holds
+      // implicit capture and loses it when our explicit svg capture takes
+      // over — that must not abort the fresh drag. Only react when the svg
+      // itself loses capture.
+      if (e.target === this.svg) this.abortDrag();
+    });
     this.svg.addEventListener("wheel", (e) => this.onWheel(e), {
       passive: false,
     });
+
+    // Safari trackpad pinch: Safari fires proprietary gesture events instead
+    // of (or, on newer versions, alongside) ctrl+wheel. _inGesture guards
+    // against double-applying zoom from both paths.
+    this._inGesture = false;
+    if ("GestureEvent" in window) {
+      this._lastGestureScale = 1;
+      this.svg.addEventListener("gesturestart", (e) => {
+        e.preventDefault();
+        this._inGesture = true;
+        this._lastGestureScale = e.scale || 1;
+      });
+      this.svg.addEventListener("gesturechange", (e) => {
+        e.preventDefault();
+        if (!this._inGesture) return;
+        const scale = e.scale || 1;
+        // scale grows on pinch-out (zoom in) → viewBox width shrinks
+        const factor = this._lastGestureScale / scale;
+        this._lastGestureScale = scale;
+        this.zoomAtClientPoint(factor, e.clientX, e.clientY);
+        this.scheduleViewBoxPush();
+      });
+      this.svg.addEventListener("gestureend", (e) => {
+        e.preventDefault();
+        this._inGesture = false;
+      });
+    }
 
     // Prevent context menu on canvas
     this.svg.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -66,7 +124,16 @@ const CanvasHook = {
     this._tooltipText2 = null;
 
     this.svg.addEventListener("mousemove", (e) => this.onGraphHover(e));
-    this.svg.addEventListener("mouseleave", () => this.hideTooltip());
+    this.svg.addEventListener("mouseleave", () => {
+      // Drop any pending hover frame so it can't re-show the tooltip
+      // after the cursor has left the canvas.
+      if (this._hoverRaf) {
+        cancelAnimationFrame(this._hoverRaf);
+        this._hoverRaf = null;
+      }
+      this._lastHoverEvent = null;
+      this.hideTooltip();
+    });
 
     // Handle set-viewbox events from the server
     this.handleEvent("set-viewbox", ({ x, y, width, height }) => {
@@ -97,6 +164,10 @@ const CanvasHook = {
         }
       }
     }
+    // Layout may have shifted (panel toggles, toolbar wraps): cached
+    // client→SVG matrices are no longer trustworthy.
+    this._hoverCtmInv = null;
+    if (this._dragCtx) this._dragCtx.stale = true;
     // Preserve JS-side viewBox across LiveView DOM patches.
     // LiveView will re-set the viewBox attribute from server state, which is
     // stale during panning/zooming. Re-apply the current JS viewBox immediately.
@@ -136,6 +207,15 @@ const CanvasHook = {
     document.removeEventListener("keydown", this._onKeyDown);
     document.removeEventListener("keydown", this._onSpaceDown);
     document.removeEventListener("keyup", this._onSpaceUp);
+    document.body.classList.remove("tc-canvas-open");
+    if (this._moveRaf) cancelAnimationFrame(this._moveRaf);
+    if (this._hoverRaf) cancelAnimationFrame(this._hoverRaf);
+    this._moveRaf = null;
+    this._hoverRaf = null;
+    this._lastMoveEvent = null;
+    this._lastHoverEvent = null;
+    clearTimeout(this._zoomDebounce);
+    this._zoomDebounce = null;
     if (this.graphCache) this.graphCache.clear();
   },
 
@@ -154,24 +234,55 @@ const CanvasHook = {
     vb.height = height;
     // Track JS-side viewBox so we can re-apply after LiveView DOM patches
     this._jsViewBox = { minX, minY, width, height };
+    // Any viewBox change invalidates cached client→SVG matrices. The pan
+    // move path clears the stale flag itself (translation keeps the scale).
+    this._hoverCtmInv = null;
+    if (this._dragCtx) this._dragCtx.stale = true;
   },
 
-  clientToSvgDelta(dxPx, dyPx) {
-    const vb = this.getViewBox();
-    const rect = this.svg.getBoundingClientRect();
-    return {
-      dx: dxPx * (vb.width / rect.width),
-      dy: dyPx * (vb.height / rect.height),
-    };
+  // Screen-px → viewBox-unit deltas. Pass the cached drag context on hot
+  // paths to avoid forcing layout (getBoundingClientRect) per event.
+  clientToSvgDelta(dxPx, dyPx, ctx) {
+    let scaleX, scaleY;
+    if (ctx) {
+      scaleX = ctx.scaleX;
+      scaleY = ctx.scaleY;
+    } else {
+      const vb = this.getViewBox();
+      const rect = this.svg.getBoundingClientRect();
+      scaleX = vb.width / rect.width;
+      scaleY = vb.height / rect.height;
+    }
+    return { dx: dxPx * scaleX, dy: dyPx * scaleY };
   },
 
-  clientToSvg(clientX, clientY) {
+  clientToSvg(clientX, clientY, ctmInv) {
     const pt = this.svg.createSVGPoint();
     pt.x = clientX;
     pt.y = clientY;
-    const ctm = this.svg.getScreenCTM().inverse();
-    const svgPt = pt.matrixTransform(ctm);
+    const inv = ctmInv || this.svg.getScreenCTM()?.inverse();
+    if (!inv) return { x: clientX, y: clientY };
+    const svgPt = pt.matrixTransform(inv);
     return { x: svgPt.x, y: svgPt.y };
+  },
+
+  // Layout snapshot taken at drag start and reused for every pointermove;
+  // refreshed only when the viewBox or DOM changes mid-drag (stale flag).
+  _computeDragCtx() {
+    const vb = this.getViewBox();
+    const rect = this.svg.getBoundingClientRect();
+    const ctm = this.svg.getScreenCTM();
+    return {
+      rect,
+      scaleX: vb.width / rect.width,
+      scaleY: vb.height / rect.height,
+      ctmInv: ctm ? ctm.inverse() : null,
+      stale: false,
+    };
+  },
+
+  _refreshDragCtx() {
+    this._dragCtx = this._computeDragCtx();
   },
 
   getMode() {
@@ -181,10 +292,23 @@ const CanvasHook = {
   // --- Pointer Events ---
 
   onPointerDown(e) {
-    if (e.button !== 0) return; // left button only
-    this.svg.setPointerCapture(e.pointerId);
+    if (e.button !== 0 && e.button !== 1) return; // left or middle button
+    try {
+      this.svg.setPointerCapture(e.pointerId);
+    } catch (_err) {
+      // Firefox can throw NotFoundError for stale pointer ids
+    }
     this.startClient = { x: e.clientX, y: e.clientY };
     this.lastClient = { x: e.clientX, y: e.clientY };
+    this._dragCtx = this._computeDragCtx();
+
+    // Middle mouse always pans (never selects/clicks)
+    if (e.button === 1) {
+      e.preventDefault();
+      this.svg.style.cursor = "grabbing";
+      this.dragging = { type: "pan", noClick: true };
+      return;
+    }
 
     // Check if clicking a resize handle
     const handle = e.target.closest("[data-handle]");
@@ -265,7 +389,7 @@ const CanvasHook = {
         const g = this.svg.querySelector(`[data-element-id="${gid}"]`);
         if (g) g.parentNode.appendChild(g);
       }
-      const svgStart = this.clientToSvg(e.clientX, e.clientY);
+      const svgStart = this.clientToSvg(e.clientX, e.clientY, this._dragCtx.ctmInv);
       this.dragging = {
         type: "element",
         id,
@@ -285,7 +409,7 @@ const CanvasHook = {
       this.dragging = { type: "pan" };
     } else if (this.getMode() === "select") {
       // In select mode, start marquee selection
-      const svgStart = this.clientToSvg(e.clientX, e.clientY);
+      const svgStart = this.clientToSvg(e.clientX, e.clientY, this._dragCtx.ctmInv);
       this.dragging = { type: "marquee", svgStart, shiftKey: e.shiftKey };
     } else {
       this.dragging = { type: "pan" };
@@ -293,6 +417,19 @@ const CanvasHook = {
   },
 
   onPointerMove(e) {
+    // Coalesce to one processed move per animation frame; all viewBox and
+    // transform writes happen inside the rAF callback.
+    this._lastMoveEvent = e;
+    if (this._moveRaf) return;
+    this._moveRaf = requestAnimationFrame(() => {
+      this._moveRaf = null;
+      const ev = this._lastMoveEvent;
+      this._lastMoveEvent = null;
+      if (ev) this.processPointerMove(ev);
+    });
+  },
+
+  processPointerMove(e) {
     if (!this.dragging) {
       // In connect mode, draw temp line from source to cursor
       if (this.getMode() === "connect" && this.svg.dataset.connectFrom) {
@@ -300,12 +437,15 @@ const CanvasHook = {
       }
       return;
     }
+    if (!this.lastClient) return;
+    // Zoom or a DOM patch invalidated the cached layout: recompute once.
+    if (this._dragCtx && this._dragCtx.stale) this._refreshDragCtx();
 
     const dxPx = e.clientX - this.lastClient.x;
     const dyPx = e.clientY - this.lastClient.y;
 
     if (this.dragging.type === "pan") {
-      const delta = this.clientToSvgDelta(-dxPx, -dyPx);
+      const delta = this.clientToSvgDelta(-dxPx, -dyPx, this._dragCtx);
       const vb = this.getViewBox();
       this.setViewBox(
         vb.minX + delta.dx,
@@ -313,11 +453,18 @@ const CanvasHook = {
         vb.width,
         vb.height,
       );
+      // Panning only translates the viewBox — the cached scale stays valid,
+      // so don't force a layout re-read on the next pan delta.
+      if (this._dragCtx) this._dragCtx.stale = false;
     } else if (this.dragging.type === "element") {
       // Don't drag elements in connect mode
       if (this.getMode() !== "connect") {
         // Compute total delta from absolute SVG positions (no accumulation drift)
-        const svgNow = this.clientToSvg(e.clientX, e.clientY);
+        const svgNow = this.clientToSvg(
+          e.clientX,
+          e.clientY,
+          this._dragCtx && this._dragCtx.ctmInv,
+        );
         this.dragging.totalDx = svgNow.x - this.dragging.svgStart.x;
         this.dragging.totalDy = svgNow.y - this.dragging.svgStart.y;
         // Apply transform to all elements in the drag group
@@ -332,10 +479,14 @@ const CanvasHook = {
         }
       }
     } else if (this.dragging.type === "marquee") {
-      const svgNow = this.clientToSvg(e.clientX, e.clientY);
+      const svgNow = this.clientToSvg(
+        e.clientX,
+        e.clientY,
+        this._dragCtx && this._dragCtx.ctmInv,
+      );
       this.updateMarquee(this.dragging.svgStart, svgNow);
     } else if (this.dragging.type === "handle") {
-      const delta = this.clientToSvgDelta(dxPx, dyPx);
+      const delta = this.clientToSvgDelta(dxPx, dyPx, this._dragCtx);
       this.dragging.startWidth += delta.dx;
       this.dragging.startHeight += delta.dy;
       this.resizeElementVisual(
@@ -351,6 +502,15 @@ const CanvasHook = {
   onPointerUp(e) {
     if (!this.dragging) return;
 
+    // Flush any pending coalesced move so the commit uses final deltas.
+    if (this._moveRaf) {
+      cancelAnimationFrame(this._moveRaf);
+      this._moveRaf = null;
+      const ev = this._lastMoveEvent;
+      this._lastMoveEvent = null;
+      if (ev) this.processPointerMove(ev);
+    }
+
     const totalDxPx = e.clientX - this.startClient.x;
     const totalDyPx = e.clientY - this.startClient.y;
     const dist = Math.sqrt(totalDxPx * totalDxPx + totalDyPx * totalDyPx);
@@ -358,10 +518,12 @@ const CanvasHook = {
 
     if (this.dragging.type === "pan") {
       if (isClick) {
-        // Click on empty canvas
-        const svgPt = this.clientToSvg(e.clientX, e.clientY);
-        this.pushEvent("canvas:click", { x: svgPt.x, y: svgPt.y });
-        this.removeTempLine();
+        // Click on empty canvas (middle-mouse pans never count as clicks)
+        if (!this.dragging.noClick) {
+          const svgPt = this.clientToSvg(e.clientX, e.clientY);
+          this.pushEvent("canvas:click", { x: svgPt.x, y: svgPt.y });
+          this.removeTempLine();
+        }
       } else {
         // Push final pan position
         const vb = this.getViewBox();
@@ -438,19 +600,103 @@ const CanvasHook = {
       }
     }
 
+    this._resetDragState();
+    try {
+      this.svg.releasePointerCapture(e.pointerId);
+    } catch (_err) {
+      // Firefox can throw NotFoundError for stale pointer ids
+    }
+  },
+
+  // Abort an in-progress drag without committing anything (pointercancel,
+  // unexpectedly lost capture). Visual transforms/marquee are undone and
+  // no move/resize/click event is pushed.
+  abortDrag() {
+    if (this._moveRaf) {
+      cancelAnimationFrame(this._moveRaf);
+      this._moveRaf = null;
+    }
+    this._lastMoveEvent = null;
+    const d = this.dragging;
+    if (!d) return;
+
+    if (d.type === "element") {
+      for (const gid of d.groupIds) {
+        const g = this.svg.querySelector(`[data-element-id="${gid}"]`);
+        if (g) g.removeAttribute("transform");
+      }
+    } else if (d.type === "marquee") {
+      this.removeMarquee();
+    } else if (d.type === "handle") {
+      // Restore original size (must run before dragging is cleared:
+      // resizeElementVisual reads this.dragging for the icon transform)
+      this.resizeElementVisual(d.id, d.origWidth, d.origHeight);
+    }
+
+    this._resetDragState();
+  },
+
+  _resetDragState() {
     this.dragging = null;
     this.startClient = null;
     this.lastClient = null;
+    this._dragCtx = null;
     this.svg.style.cursor = this._spaceHeld ? "grab" : "";
-    this.svg.releasePointerCapture(e.pointerId);
   },
 
-  // --- Zoom ---
+  // --- Zoom / wheel ---
+
+  // Normalize wheel deltas to pixels. deltaMode 1 = lines, 2 = pages.
+  // Per-event magnitude is clamped (~400px) to tame Firefox momentum and
+  // free-spinning mouse wheels.
+  normalizeWheelDelta(e) {
+    let mult = 1;
+    if (e.deltaMode === 1) mult = 16;
+    else if (e.deltaMode === 2) mult = window.innerHeight;
+    const clamp = (v) => Math.max(-400, Math.min(400, v * mult));
+    return { dx: clamp(e.deltaX), dy: clamp(e.deltaY) };
+  },
 
   onWheel(e) {
     e.preventDefault();
-    const factor = e.deltaY > 0 ? 1.015 : 0.985;
-    const svgPt = this.clientToSvg(e.clientX, e.clientY);
+    // Safari 18+ can emit ctrl+wheel alongside gesture events; the gesture
+    // handlers own zooming while a pinch is active.
+    if (this._inGesture) return;
+
+    const { dx, dy } = this.normalizeWheelDelta(e);
+
+    if (e.ctrlKey) {
+      // Trackpad pinch (Chrome/Firefox/Edge emulate ctrl+wheel) or real
+      // ctrl+wheel: exponential zoom anchored at the cursor.
+      const factor = Math.exp(dy * 0.01);
+      this.zoomAtClientPoint(factor, e.clientX, e.clientY);
+    } else {
+      // Plain wheel pans: two-finger trackpad scroll pans both axes, a
+      // mouse wheel scrolls vertically, shift+wheel scrolls horizontally
+      // (some platforms already report shift+wheel as deltaX — keep it).
+      let panX = dx;
+      let panY = dy;
+      if (e.shiftKey && dx === 0) {
+        panX = dy;
+        panY = 0;
+      }
+      const vb = this.getViewBox();
+      const rect = this.svg.getBoundingClientRect();
+      this.setViewBox(
+        vb.minX + panX * (vb.width / rect.width),
+        vb.minY + panY * (vb.height / rect.height),
+        vb.width,
+        vb.height,
+      );
+    }
+
+    this.scheduleViewBoxPush();
+  },
+
+  // Zoom by `factor` (multiplies viewBox width) keeping the given client
+  // point stationary. Shared by wheel zoom and Safari pinch gestures.
+  zoomAtClientPoint(factor, clientX, clientY) {
+    const svgPt = this.clientToSvg(clientX, clientY);
     const vb = this.getViewBox();
 
     const newWidth = this.clampZoomWidth(vb.width * factor);
@@ -461,10 +707,13 @@ const CanvasHook = {
     const newMinY = svgPt.y - (svgPt.y - vb.minY) * appliedFactor;
 
     this.setViewBox(newMinX, newMinY, newWidth, newHeight);
+  },
 
-    // Debounce push to server
+  // Debounced viewbox push to the server (payload shape must not change).
+  scheduleViewBoxPush() {
     clearTimeout(this._zoomDebounce);
     this._zoomDebounce = setTimeout(() => {
+      this._zoomDebounce = null;
       const final = this.getViewBox();
       this.pushEvent("canvas:zoom", {
         min_x: final.minX,
@@ -549,22 +798,14 @@ const CanvasHook = {
     const rect = this.svg.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
-    const svgPt = this.clientToSvg(centerX, centerY);
+    this.zoomAtClientPoint(factor, centerX, centerY);
+
     const vb = this.getViewBox();
-
-    const newWidth = this.clampZoomWidth(vb.width * factor);
-    const newHeight = vb.height * (newWidth / vb.width);
-
-    const appliedFactor = newWidth / vb.width;
-    const newMinX = svgPt.x - (svgPt.x - vb.minX) * appliedFactor;
-    const newMinY = svgPt.y - (svgPt.y - vb.minY) * appliedFactor;
-    this.setViewBox(newMinX, newMinY, newWidth, newHeight);
-
     this.pushEvent("canvas:zoom", {
-      min_x: newMinX,
-      min_y: newMinY,
-      width: newWidth,
-      height: newHeight,
+      min_x: vb.minX,
+      min_y: vb.minY,
+      width: vb.width,
+      height: vb.height,
     });
   },
 
@@ -931,6 +1172,18 @@ const CanvasHook = {
   // --- Expanded Graph Tooltip ---
 
   onGraphHover(e) {
+    // Coalesce to one processed hover per animation frame.
+    this._lastHoverEvent = e;
+    if (this._hoverRaf) return;
+    this._hoverRaf = requestAnimationFrame(() => {
+      this._hoverRaf = null;
+      const ev = this._lastHoverEvent;
+      this._lastHoverEvent = null;
+      if (ev) this.processGraphHover(ev);
+    });
+  },
+
+  processGraphHover(e) {
     const expandedGroup = e.target.closest("[data-expanded]");
     if (!expandedGroup) {
       this.hideTooltip();
@@ -946,7 +1199,14 @@ const CanvasHook = {
     const { raw, poly } = cached;
     if (raw.length === 0 || poly.length < 2) return;
 
-    const svgPt = this.clientToSvg(e.clientX, e.clientY);
+    // Screen CTM is cached across hover frames; invalidated whenever the
+    // viewBox changes (setViewBox) or the DOM is patched (updated()).
+    if (!this._hoverCtmInv) {
+      const ctm = this.svg.getScreenCTM();
+      if (!ctm) return;
+      this._hoverCtmInv = ctm.inverse();
+    }
+    const svgPt = this.clientToSvg(e.clientX, e.clientY, this._hoverCtmInv);
 
     const plotMinX = poly[0].x;
     const plotMaxX = poly[poly.length - 1].x;

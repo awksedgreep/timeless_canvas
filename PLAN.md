@@ -118,25 +118,45 @@ Status legend: `[x]` done · `[ ]` pending
       outside `:live` timeline mode). Test support adds a subscribe-counting
       `FakeStreamBackend` that can emit live entries/spans.
 
-## Phase 3 — Browser/input fixes (independent of 1-2)
+## Phase 3 — Browser/input fixes (independent of 1-2) ✅ (2026-07-31)
 
-- [ ] Wheel rewrite (`canvas_hook.js:419`): normalize `deltaMode`, exponential
+- [x] Wheel rewrite (`canvas_hook.js:419`): normalize `deltaMode`, exponential
       factor from delta magnitude, `ctrlKey`+wheel = pinch zoom, plain wheel = pan,
       Safari `gesturestart/gesturechange` (today only the sign of deltaY is used —
-      mouse feels dead, trackpad zooms wildly, Safari pinch zooms the page)
-- [ ] Touch: `touch-action: none` on the SVG, `pointercancel` +
-      `lostpointercapture`, try/catch pointer capture
-- [ ] rAF-coalesce pointermove/pan/drag/marquee; cache CTM/rect at drag start
-      (today: forced layout per event — `canvas_hook.js:264-318`)
-- [ ] Tooltip: parse `data-points` once in `updated()`, rAF-coalesce hover
-      (today: `JSON.parse` of up to 300 points per mousemove — `canvas_hook.js:744`)
-- [ ] Timeline hook: cache `Intl.DateTimeFormat`, rebuild ticks only on range
-      change, fix `destroyed()` document-listener leak, `touchcancel`
-- [ ] Ship the missing `CanvasDebugCopy` hook (referenced at `canvas_live.ex:354`,
-      never exported); add `package.json` + document hook registration
-- [ ] CSS: `100dvh` fallback, `:has()` fallback, replace hover `filter` /
-      selection `drop-shadow` with stroke changes, drop dead `will-change`,
-      tone down `backdrop-filter` over the live SVG
+      mouse feels dead, trackpad zooms wildly, Safari pinch zooms the page).
+      Deltas normalized to px (lines ×16, pages ×innerHeight) and clamped to
+      ±400/event; ctrl+wheel zooms via `Math.exp(dy * 0.01)` anchored at the
+      cursor; plain wheel pans (shift+wheel → horizontal); Safari pinch via
+      gesture events with an `_inGesture` guard against double-apply; wheel
+      pan/zoom share the existing debounced `canvas:zoom` push
+- [x] Touch: `touch-action: none` on the SVG (and timeline track),
+      `pointercancel` + `lostpointercapture` abort via a shared `abortDrag()`,
+      try/catch pointer capture, capture-aware `pointerleave`; bonus:
+      middle-mouse pan
+- [x] rAF-coalesce pointermove/pan/drag/marquee; cache CTM/rect at drag start
+      (was: forced layout per event — `canvas_hook.js:264-318`). One rAF
+      processes the latest pointermove; drag context (rect/scale/inverse CTM)
+      cached at pointerdown, refreshed only when marked stale by zoom/DOM
+      patches; pan keeps its cached scale and derives the viewbox
+      arithmetically
+- [x] Tooltip: points cached at `graph:expanded` push (done in Phase 2b);
+      hover handler now rAF-coalesced with a cached inverse screen CTM
+      invalidated on viewbox change/DOM patch
+- [x] Timeline hook: cache `Intl.DateTimeFormat`, rebuild ticks only when
+      (min, max, alignedInterval) changes, fix `destroyed()` document-listener
+      leak, `touchcancel` ends the drag, rAF-coalesced scrubbing with the
+      track rect cached at drag start
+- [x] Ship the missing `CanvasDebugCopy` hook (referenced at `canvas_live.ex:354`,
+      never exported) — `assets/js/canvas_debug_copy.js` (clipboard API with
+      execCommand fallback + button feedback); add `assets/package.json`
+      (`main`/`exports`) + README "JavaScript setup" documenting registration
+      as `hooks: { Canvas: CanvasHook, TimelineSlider, CanvasDebugCopy }`
+- [x] CSS: `100dvh` with `100vh` fallback, `body.tc-canvas-open` JS fallback
+      for `:has()` (class toggled by the Canvas hook), hover `filter` /
+      selection `drop-shadow` replaced with stroke changes, `live-pulse`
+      animates opacity on a pseudo-element instead of box-shadow, dead
+      `will-change` dropped, `backdrop-filter` blur 12px→6px on the toolbar
+      and timeline bar (12px kept on small overlays)
 
 ## Phase 4 — Usability
 

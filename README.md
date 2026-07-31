@@ -35,3 +35,37 @@ Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_do
 and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
 be found at <https://hexdocs.pm/timeless_canvas>.
 
+## JavaScript setup
+
+TimelessCanvas ships three LiveView hooks that must be registered on your
+`LiveSocket`. In your host app's `assets/js/app.js`:
+
+```js
+import { CanvasHook, TimelineSlider, CanvasDebugCopy } from "../deps/timeless_canvas/assets/js";
+
+const liveSocket = new LiveSocket("/live", Socket, {
+  params: { _csrf_token: csrfToken },
+  hooks: { Canvas: CanvasHook, TimelineSlider, CanvasDebugCopy },
+});
+```
+
+The hook names must match the `phx-hook` attributes in the templates exactly:
+
+| Registered name | Export | Used by |
+| --- | --- | --- |
+| `Canvas` | `CanvasHook` | the canvas SVG (pan/zoom/drag/selection/graphs) |
+| `TimelineSlider` | `TimelineSlider` | the timeline scrubber |
+| `CanvasDebugCopy` | `CanvasDebugCopy` | the "Copy SVG" toolbar button |
+
+Note that `CanvasHook` is registered under the name `Canvas`.
+
+Also import the stylesheet in your `assets/css/app.css`:
+
+```css
+@import "../../deps/timeless_canvas/assets/css/timeless_canvas.css";
+```
+
+`assets/package.json` declares `main`/`exports`, so bundlers that resolve
+packages (esbuild with `NODE_PATH=deps`, Vite, webpack) can also use
+`import { CanvasHook } from "timeless_canvas"`.
+
