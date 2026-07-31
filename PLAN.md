@@ -44,8 +44,12 @@ Status legend: `[x]` done · `[ ]` pending
       `ta:open` / `ta:filter` now run bounded server-side queries (≤50
       suggestions in a `ta_suggestions` assign); dead `pin_hosts` /
       `pin_ifnames` / `place_pins` assigns dropped
-- [ ] Async mount: data loading behind `connected?/1` + `start_async`, skeleton
-      states (today mount runs 4-8 full scans synchronously before first paint)
+- [x] Async mount: dead render performs zero data-source queries; connected
+      mount gathers all initial data (range, seed decision, host probe, units,
+      per-element backfill via `Task.async_stream`) in one `start_async` task,
+      merged in `handle_async` without stomping concurrent timeline changes;
+      "Loading data…" toolbar badge while pending, non-fatal failure badge on
+      crash (per-element skeletons remain a Phase 4 item)
 
 ## Phase 2 — Render path and polling
 

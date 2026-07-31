@@ -94,10 +94,16 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
 
       assert html =~ "cpu graph"
       assert has_element?(view, ~s([data-element-id="el-1"]))
+
+      # The initial async load completes despite the backend error and
+      # clears the loading badge without crashing the view.
+      html = render_async(view)
+      refute html =~ "Loading data"
+      refute html =~ "Data load failed"
       # NOTE (known issue, do not pin as correct): query errors currently
       # render identically to no-data, so we only assert that mount does not
       # crash.
-      assert render(view) =~ "cpu graph"
+      assert html =~ "cpu graph"
     end
 
     test "programmed hosts are discoverable in place mode", %{conn: conn, user: user} do
@@ -105,6 +111,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       record = FakePersistence.seed_canvas(%{user_id: user.id})
 
       {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
 
       html =
         view
@@ -116,6 +123,115 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
     end
   end
 
+  describe "async initial data load" do
+    test "canvas structure renders immediately; data arrives via render_async", %{
+      conn: conn,
+      user: user
+    } do
+      now_ms = System.system_time(:millisecond)
+      FakeDataSource.put(:metric_range, {:ok, [{now_ms - 60_000, 777.0}, {now_ms, 777.0}]})
+      FakeDataSource.put(:list_hosts, ["host-a"])
+
+      {canvas, _el} =
+        Canvas.add_element(Canvas.new(), %{
+          type: :graph,
+          x: 100.0,
+          y: 100.0,
+          label: "cpu graph",
+          meta: %{"host" => "web-1", "metric_name" => "cpu_usage"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: encode(canvas)})
+
+      {:ok, view, html} = live(conn, "/canvas/#{record.id}")
+
+      # Mount renders the structure with a loading badge and no data yet
+      assert html =~ "cpu graph"
+      assert has_element?(view, "#canvas-svg")
+      assert html =~ "Loading data"
+      refute html =~ "777"
+
+      html = render_async(view)
+
+      # Badge gone, programmed graph data and hosts are in
+      refute html =~ "Loading data"
+      assert html =~ "777"
+
+      html = view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
+      assert html =~ "host-a"
+      refute html =~ "No hosts discovered"
+    end
+
+    @tag capture_log: true
+    test "a crashing initial load flags the failure without killing the view", %{
+      conn: conn,
+      user: user
+    } do
+      FakeDataSource.put(:time_range, fn -> raise "backend down" end)
+
+      {data, _el} = canvas_with_element(%{label: "still-here"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, html} = live(conn, "/canvas/#{record.id}")
+      assert html =~ "Loading data"
+
+      html = render_async(view)
+
+      refute html =~ "Loading data"
+      assert html =~ "Data load failed"
+      assert html =~ "still-here"
+
+      # The view is still interactive after the failed load
+      assert render(view) =~ "still-here"
+    end
+
+    test "a data range error from the backend does not crash the load", %{
+      conn: conn,
+      user: user
+    } do
+      FakeDataSource.put(:time_range, {:error, :backend_down})
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      html = render_async(view)
+
+      refute html =~ "Loading data"
+      refute html =~ "Data load failed"
+    end
+
+    test "a timeline scrub during the initial load is not stomped", %{conn: conn, user: user} do
+      now = DateTime.utc_now()
+
+      # Delay the initial load so the scrub lands while it is in flight;
+      # the range is recent so the seed decision would be :live.
+      FakeDataSource.put(:time_range, fn ->
+        Process.sleep(200)
+        {DateTime.add(now, -7200, :second), now}
+      end)
+
+      {data, _el} = canvas_with_element(%{label: "scrub-target"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      # Scrub to ten minutes ago while the async load sleeps
+      center_ms = System.system_time(:millisecond) - 600_000
+      render_hook(view, "timeline:change", %{"time" => center_ms})
+
+      scrubbed_time = :sys.get_state(view.pid).socket.assigns.timeline_time
+      assert :sys.get_state(view.pid).socket.assigns.timeline_mode == :historical
+
+      html = render_async(view, 1000)
+
+      # The merge kept the user's historical position instead of resetting
+      # to the live mount default.
+      assigns = :sys.get_state(view.pid).socket.assigns
+      assert assigns.timeline_mode == :historical
+      assert assigns.timeline_time == scrubbed_time
+      refute html =~ "Loading data"
+    end
+  end
+
   describe "bounded host discovery" do
     test "a 1000-host universe never reaches the client wholesale", %{conn: conn, user: user} do
       hosts = for i <- 1..1000, do: "host-" <> String.pad_leading(Integer.to_string(i), 4, "0")
@@ -123,6 +239,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       record = FakePersistence.seed_canvas(%{user_id: user.id})
 
       {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
 
       html = view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
 
@@ -151,6 +268,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       record = FakePersistence.seed_canvas(%{user_id: user.id})
 
       {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
       view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
       view |> element(~s{input[name="ta_search"]}) |> render_focus()
 

@@ -10,6 +10,11 @@ defmodule TimelessCanvas.Test.FakeDataSource do
       FakeDataSource.put(:list_hosts, ["host-a", "host-b"])
       FakeDataSource.put(:metric_range, {:ok, [{ts, 1.0}]})
 
+  A canned value that is a 0-arity function is invoked on every call, so
+  tests can inject per-call behaviour (latency, raises, changing values):
+
+      FakeDataSource.put(:time_range, fn -> raise "backend down" end)
+
   Canned values are stored in a public ETS table and cleared by `reset/0`
   (done automatically by `TimelessCanvas.ConnCase`).
 
@@ -58,6 +63,7 @@ defmodule TimelessCanvas.Test.FakeDataSource do
     ensure_table!()
 
     case :ets.lookup(@table, fun_name) do
+      [{^fun_name, value}] when is_function(value, 0) -> value.()
       [{^fun_name, value}] -> value
       [] -> default
     end
