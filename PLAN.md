@@ -27,15 +27,25 @@ Status legend: `[x]` done · `[ ]` pending
       `list_series_for_host(state, host, opts)` with `:filter`/`:limit` opts,
       plus optional batch `statuses/2` + `statuses_at/3`; Manager shims
       old-arity backends (filter/limit applied in Elixir)
-- [ ] Implement the bounded contract in
+- [x] Implement the bounded contract in
       `timeless_stack/lib/timeless_stack/ui_data_source.ex` with ETS cache + TTL
-      background refresh (today: N+1 full-store scans per call — `ui_data_source.ex:145-193`)
+      background refresh (was: N+1 full-store scans per call — `ui_data_source.ex:145-193`).
+      Done via supervised `TimelessStack.UIDataSource.Cache` (public ETS table):
+      hosts + requested label keys refreshed on a TTL tick (default 60s);
+      per-host series fetched on demand in the cache process and refreshed on
+      access with their own TTL (TimelessMetrics has no cross-metric
+      label-filtered series query, so a global index is avoided instead of
+      queried); callbacks are pure ETS reads + `apply_query_opts`, cold cache
+      returns `[]`
 - [x] Execute queries in the caller process (source module/state + element map
       published to a public ETS table); `DataSource.Manager` keeps only
       registration state + the poll loop (was: every query from every client
       serialized through one GenServer — `manager.ex:186-206`)
-- [ ] Batch host status checks into one grouped logs query per tick
-      (today: up to 2 log queries per host element per tick — `ui_data_source.ex:309-336`)
+- [x] Batch host status checks into one grouped logs query per tick
+      (was: up to 2 log queries per host element per tick — `ui_data_source.ex:309-336`).
+      `statuses/2` + `statuses_at/3` use `TimelessLogs.field_values("host", ...)`
+      — exactly 2 grouped queries per batch (one per level) regardless of
+      element/host count; per-element `status/2`/`status_at/3` semantics unchanged
 - [x] Cap `available_series` at the assign boundary (limit 200 + server-side
       filter via new `series:filter` event) + group by metric name; grouped
       shape renders one Add-Elements button per metric with a
