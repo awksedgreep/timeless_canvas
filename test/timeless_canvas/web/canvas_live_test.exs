@@ -847,6 +847,42 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
     end
   end
 
+  describe "host placement semantics" do
+    # Placing a host binds the literal chosen host — never the $host
+    # variable. Variable binding is an explicit user opt-in via the
+    # properties panel.
+    test "placing a host pins the literal host and creates no variable", %{
+      conn: conn,
+      user: user
+    } do
+      FakeDataSource.put(:list_hosts, ["ohm", "watt"])
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
+      view |> element(~s{input[name="ta_search"]}) |> render_focus()
+      view |> element(~s{button[phx-value-value="ohm"]}) |> render_click()
+
+      html =
+        view
+        |> element("#canvas-svg")
+        |> render_hook("canvas:click", %{"x" => 100, "y" => 100})
+
+      assert html =~ "ohm"
+      refute html =~ "$host"
+
+      state = :sys.get_state(view.pid)
+      [{_id, el}] = Map.to_list(state.socket.assigns.canvas.elements)
+      assert el.label == "ohm"
+      assert el.meta["host"] == "ohm"
+      assert el.pins["host"] == %{"mode" => "literal", "value" => "ohm"}
+      refute Map.has_key?(state.socket.assigns.canvas.variables, "host")
+      assert state.socket.assigns.resolved_elements[el.id].meta["host"] == "ohm"
+    end
+  end
+
   describe "meta edits vs pins" do
     # Serializer.decode derives a pin for host/ifname from meta, and pins
     # override meta at resolution — so a properties-panel host edit must

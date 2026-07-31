@@ -3310,17 +3310,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
     defaults = Element.defaults_for(type)
     canvas = socket.assigns.canvas
 
-    variables =
-      case canvas.variables["host"] do
-        nil ->
-          Map.put(canvas.variables, "host", %{"type" => "host", "current" => host})
-
-        existing ->
-          Map.put(canvas.variables, "host", Map.put(existing, "current", host))
-      end
-
-    canvas = %{canvas | variables: variables}
-
+    # Place the literal host the user chose. Binding to the $host canvas
+    # variable is an explicit opt-in (type `$host` into the host field),
+    # not something placement does implicitly.
     {canvas, el} =
       Canvas.add_element(canvas, %{
         type: type,
@@ -3329,8 +3321,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
         color: defaults.color,
         width: defaults.width,
         height: defaults.height,
-        label: "$host",
-        meta: %{"host" => "$host"}
+        label: host,
+        meta: %{"host" => host},
+        pins: %{"host" => Element.derive_pin(host)}
       })
 
     bindings = VariableResolver.bindings(canvas.variables)
