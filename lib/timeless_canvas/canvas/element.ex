@@ -59,6 +59,23 @@ defmodule TimelessCanvas.Canvas.Element do
   def pin_dimensions, do: @pin_dimensions
 
   @doc """
+  Derive a pin from a raw meta value: empty → none, `$var` → variable,
+  anything else → literal.
+  """
+  def derive_pin(val) do
+    cond do
+      is_nil(val) or val == "" ->
+        %{"mode" => "none", "value" => ""}
+
+      String.starts_with?(val, "$") ->
+        %{"mode" => "variable", "value" => val}
+
+      true ->
+        %{"mode" => "literal", "value" => val}
+    end
+  end
+
+  @doc """
   Create a new element with type defaults merged with caller attrs.
   Attrs with explicit values override type defaults.
   """

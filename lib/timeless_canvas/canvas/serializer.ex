@@ -151,18 +151,7 @@ defmodule TimelessCanvas.Canvas.Serializer do
 
   defp safe_atom(val, _default) when is_atom(val), do: val
 
-  defp derive_pin(val) do
-    cond do
-      is_nil(val) or val == "" ->
-        %{"mode" => "none", "value" => ""}
-
-      String.starts_with?(val, "$") ->
-        %{"mode" => "variable", "value" => val}
-
-      true ->
-        %{"mode" => "literal", "value" => val}
-    end
-  end
+  defp derive_pin(val), do: Element.derive_pin(val)
 
   defp migrate_pins(pins, meta) do
     dims = ~w(host ifname)

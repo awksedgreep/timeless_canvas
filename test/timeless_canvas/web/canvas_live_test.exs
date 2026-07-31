@@ -847,6 +847,64 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
     end
   end
 
+  describe "meta edits vs pins" do
+    # Serializer.decode derives a pin for host/ifname from meta, and pins
+    # override meta at resolution — so a properties-panel host edit must
+    # update the pin too, or it is silently inert after any reload.
+    test "editing host in the properties panel updates the resolved host", %{
+      conn: conn,
+      user: user
+    } do
+      {data, el} =
+        canvas_with_element(%{
+          x: 100.0,
+          y: 100.0,
+          label: "pinned",
+          type: :server,
+          meta: %{"host" => "host-a"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      # Decode derived a literal pin for host-a
+      state = :sys.get_state(view.pid)
+      assert state.socket.assigns.resolved_elements[el.id].meta["host"] == "host-a"
+
+      render_hook(view, "property:update_meta", %{"element_id" => el.id, "host" => "host-b"})
+
+      state = :sys.get_state(view.pid)
+      assert state.socket.assigns.canvas.elements[el.id].pins["host"]["value"] == "host-b"
+      assert state.socket.assigns.resolved_elements[el.id].meta["host"] == "host-b"
+    end
+  end
+
+  describe "icon rendering safety" do
+    test "an unknown icon renders without crashing the view", %{conn: conn, user: user} do
+      {data, el} =
+        canvas_with_element(%{
+          x: 100.0,
+          y: 100.0,
+          label: "bad-icon",
+          type: :server,
+          meta: %{"host" => "host-a", "icon" => "heroicons:no-such-icon-xyz"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {view, html} =
+        ExUnit.CaptureLog.with_log(fn ->
+          {:ok, view, html} = live(conn, "/canvas/#{record.id}")
+          {view, html}
+        end)
+        |> then(fn {{view, html}, _log} -> {view, html} end)
+
+      assert html =~ "bad-icon"
+      assert has_element?(view, ~s([data-element-id="#{el.id}"]))
+      assert Process.alive?(view.pid)
+    end
+  end
+
   describe "element manipulation" do
     test "element:move updates the rendered position", %{conn: conn, user: user} do
       {data, el} = canvas_with_element(%{x: 100.0, y: 100.0, label: "mover"})

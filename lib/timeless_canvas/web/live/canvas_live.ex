@@ -2373,7 +2373,26 @@ defmodule TimelessCanvas.Web.CanvasLive do
         end)
         |> maybe_apply_graph_series(old_meta, params["graph_series"])
 
-      canvas = Canvas.update_element(socket.assigns.canvas, id, %{meta: new_meta})
+      # Pins override meta at resolution time (and Serializer.decode derives
+      # them for every persisted element), so an edited host/ifname field must
+      # update its pin too or the edit is silently inert after a reload.
+      new_pins =
+        Enum.reduce(
+          Element.pin_dimensions(),
+          socket.assigns.canvas.elements[id].pins,
+          fn dim_atom, pins ->
+            dim = Atom.to_string(dim_atom)
+
+            case params[dim] do
+              nil -> pins
+              val -> Map.put(pins, dim, Element.derive_pin(val))
+            end
+          end
+        )
+
+      canvas =
+        Canvas.update_element(socket.assigns.canvas, id, %{meta: new_meta, pins: new_pins})
+
       socket = push_canvas(socket, canvas) |> schedule_autosave()
       time = socket.assigns.timeline_time || DateTime.utc_now()
 

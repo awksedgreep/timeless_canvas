@@ -4,6 +4,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   """
   use Phoenix.Component
 
+  require Logger
+
   alias TimelessCanvas.Canvas.Element
   alias TimelessCanvas.IconCatalog
   alias TimelessCanvas.MetricFormatter
@@ -952,6 +954,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
     ~H"""
     <image
+      :if={@src}
       href={@src}
       x={@x}
       y={@y}
@@ -962,15 +965,30 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     """
   end
 
+  # Iconify.prepare raises when an icon isn't pre-generated and the
+  # @iconify/json npm assets aren't installed; that must never take the
+  # LiveView down. Failures are cached as nil (logged once per icon) and
+  # the element renders without an icon.
   defp icon_image_src(icon) do
     key = {__MODULE__, :icon_image_src, icon}
 
     case :persistent_term.get(key, :missing) do
       :missing ->
         src =
-          case Iconify.prepare(%{icon: icon, __changed__: nil}, mode: :img) do
-            {:img, _fun, %{src: src}} -> src
-            other -> raise "unexpected Iconify image data: #{inspect(other)}"
+          try do
+            case Iconify.prepare(%{icon: icon, __changed__: nil}, mode: :img) do
+              {:img, _fun, %{src: src}} -> src
+              _other -> nil
+            end
+          rescue
+            e ->
+              Logger.warning(
+                "TimelessCanvas: cannot render icon #{inspect(icon)} " <>
+                  "(#{Exception.message(e)}); rendering without an icon. " <>
+                  "Pre-generate icon assets or install @iconify/json to fix."
+              )
+
+              nil
           end
 
         :persistent_term.put(key, src)
