@@ -92,8 +92,16 @@ defmodule TimelessCanvas.Test.FakeDataSource do
   @impl true
   def metric_at(_state, _element, _metric, _time), do: get(:metric_at, :no_data)
 
+  # A canned :metric_range value that is a 1-arity function receives the
+  # element, so tests can program per-element data (e.g. to prove that
+  # two canvases sharing an element id resolve their own elements).
   @impl true
-  def metric_range(_state, _element, _metric, _from, _to), do: get(:metric_range, {:ok, []})
+  def metric_range(_state, element, _metric, _from, _to) do
+    case get(:metric_range, {:ok, []}) do
+      fun when is_function(fun, 1) -> fun.(element)
+      other -> other
+    end
+  end
 
   @impl true
   def status_at(_state, _element, _time), do: get(:status_at, :unknown)

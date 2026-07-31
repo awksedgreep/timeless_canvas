@@ -87,12 +87,20 @@ defmodule TimelessCanvas.Canvas.SerializerTest do
       end
     end
 
-    test "empty map returns an error" do
-      assert {:error, _} = Serializer.decode(%{})
+    # create_canvas persists %{} as the initial blob, so explicitly-empty
+    # data must decode as a brand-new canvas, never as corruption.
+    test "empty map decodes to a fresh canvas" do
+      assert {:ok, canvas} = Serializer.decode(%{})
+      assert canvas == TimelessCanvas.Canvas.new()
     end
 
-    test "nil returns an error" do
-      assert {:error, _} = Serializer.decode(nil)
+    test "nil decodes to a fresh canvas" do
+      assert {:ok, canvas} = Serializer.decode(nil)
+      assert canvas == TimelessCanvas.Canvas.new()
+    end
+
+    test "non-empty data without a version key returns an error" do
+      assert {:error, _} = Serializer.decode(%{"elements" => %{}})
     end
 
     test "unsupported version returns an error" do

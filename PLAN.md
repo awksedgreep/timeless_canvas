@@ -160,12 +160,24 @@ Status legend: `[x]` done · `[ ]` pending
 
 ## Phase 4 — Usability
 
-- [ ] Surface autosave failures + persistent saved/unsaved indicator
-      (today silently discarded — `canvas_live.ex:2536-2543`)
-- [ ] `schedule_autosave()` on undo/redo (data-loss bug: undone changes lost on reload)
-- [ ] Warn + hold autosave when `Serializer.decode` fails instead of silently
-      overwriting the stored blob (also: `decode(%{})` errors, so every fresh
-      canvas falls through this path — fix the fresh-canvas shape too)
+- [x] Surface autosave failures + persistent saved/unsaved indicator
+      (was silently discarded). `save_state` assign (:saved/:dirty/:saving/
+      :error) rendered as a toolbar indicator next to the canvas name;
+      failed saves log, retry on a longer delay (`:autosave_retry_ms`,
+      default 5s) and give up after 5 consecutive misses until the next
+      edit re-arms the timer; manual `canvas:save` goes through the same
+      path. Autosave delay is app-env configurable (`:autosave_ms`).
+- [x] `schedule_autosave()` on undo/redo (data-loss bug: undone changes lost
+      on reload) — both handlers now also `register_elements()` so a
+      restored stream/graph element gets its Manager/poller/StreamManager
+      registrations back
+- [x] Warn + hold autosave when `Serializer.decode` fails instead of silently
+      overwriting the stored blob: mount assigns `decode_failed?`, renders a
+      warning banner, and `require_edit` denies (so nothing can arm an
+      autosave) until the user clicks the data-confirm-guarded "Discard
+      stored data and start fresh" button. Fresh-canvas shape fixed too:
+      `decode(%{})` / `decode(nil)` now return `{:ok, Canvas.new()}` —
+      only genuinely malformed data errors
 - [ ] Read-only: `data-can-edit` gates drag/resize in JS; server rejection pushes
       an explicit reset (today viewers' ghost drags stick visually)
 - [ ] Keyboard scoping: bind shortcuts to the SVG, exempt `[tabindex]`/buttons
@@ -180,9 +192,22 @@ Status legend: `[x]` done · `[ ]` pending
 - [ ] Polish: middle-mouse pan, share-revoke confirm, consistent return-to-select
       after placement, Shift+Arrow = large nudge
 - [ ] Multi-editor minimum: presence indicator + stale-write warning (no merging)
-- [ ] Fix registration leak: Manager never unregisters elements on LiveView exit
-- [ ] Fix Iconify render-time raise when icon assets are missing (500s the editor)
-- [ ] Add `id` to the timeline form (LiveView form recovery)
+- [x] Fix registration leak: Manager never unregisters elements on LiveView
+      exit. Manager's element registry is now keyed `{canvas_id, element_id}`
+      (element-scoped queries — `metric_range`, `metric_at`,
+      `text_metric_at`, `statuses_at` — take the canvas id, threaded through
+      DataQueries/CanvasPoller/CanvasLive), so same-id elements on two
+      canvases no longer collide; registrant pids are monitored per canvas
+      and a canvas's elements are unsubscribed+dropped when its last
+      registrant exits (ref-counted: a second viewer keeps them alive).
+      StreamManager had the same leak and got the same per-canvas
+      registrant-monitor cleanup.
+- [x] Fix Iconify render-time raise when icon assets are missing (500s the
+      editor) — done earlier (safe icon fallback + "icon rendering safety"
+      LiveView test)
+- [x] Add `id` to the timeline form (LiveView form recovery) — plus the three
+      properties-panel forms; the `missing_form_id: :ignore` test silence is
+      removed
 
 ## Phase 5 — Browser E2E suite
 

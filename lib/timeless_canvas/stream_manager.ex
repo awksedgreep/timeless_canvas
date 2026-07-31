@@ -21,6 +21,12 @@ defmodule TimelessCanvas.StreamManager do
 
   message per element per window, newest entry first. A window is flushed
   early when it reaches 50 pending entries (backpressure cap).
+
+  Registering processes are monitored per canvas: when the last
+  registrant of a canvas exits (e.g. its LiveView goes away), that
+  canvas's stream subscriptions are torn down, so subscriptions for
+  closed canvases no longer accumulate. While a second viewer of the
+  same canvas is alive, its subscriptions are kept.
   """
 
   use GenServer
@@ -59,11 +65,13 @@ defmodule TimelessCanvas.StreamManager do
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
-    {:ok, %{subscriptions: %{}, batch_ms: opts[:batch_ms]}}
+    {:ok, %{subscriptions: %{}, registrants: %{}, batch_ms: opts[:batch_ms]}}
   end
 
   @impl true
-  def handle_call({:register, type, canvas_id, element_id, opts}, _from, state) do
+  def handle_call({:register, type, canvas_id, element_id, opts}, {caller, _tag}, state) do
+    state = monitor_registrant(state, canvas_id, caller)
+
     case stream_backend(type) do
       nil ->
         {:reply, :ok, state}
@@ -152,9 +160,45 @@ defmodule TimelessCanvas.StreamManager do
     {:noreply, state}
   end
 
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    {:noreply, drop_registrant(state, pid, ref)}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   # --- Private ---
+
+  defp monitor_registrant(state, canvas_id, pid) do
+    canvas_pids = Map.get(state.registrants, canvas_id, %{})
+
+    if Map.has_key?(canvas_pids, pid) do
+      state
+    else
+      canvas_pids = Map.put(canvas_pids, pid, Process.monitor(pid))
+      %{state | registrants: Map.put(state.registrants, canvas_id, canvas_pids)}
+    end
+  end
+
+  # A registrant exited: canvases whose registrant set empties lose all
+  # of their stream subscriptions (mirrors DataSource.Manager).
+  defp drop_registrant(state, pid, ref) do
+    {registrants, emptied} =
+      Enum.reduce(state.registrants, {%{}, []}, fn {canvas_id, pids}, {acc, emptied} ->
+        case Map.pop(pids, pid) do
+          {^ref, rest} when map_size(rest) == 0 -> {acc, [canvas_id | emptied]}
+          {^ref, rest} -> {Map.put(acc, canvas_id, rest), emptied}
+          {_other, _rest} -> {Map.put(acc, canvas_id, pids), emptied}
+        end
+      end)
+
+    state = %{state | registrants: registrants}
+
+    Enum.reduce(emptied, state, fn canvas_id, acc ->
+      acc.subscriptions
+      |> Enum.filter(fn {_element_id, sub} -> sub.canvas_id == canvas_id end)
+      |> Enum.reduce(acc, fn {element_id, _sub}, acc2 -> do_unregister(acc2, element_id) end)
+    end)
+  end
 
   defp stream_backend(type) do
     backends = TimelessCanvas.stream_backends()

@@ -40,7 +40,7 @@ defmodule TimelessCanvas.DataQueries do
   @doc """
   Latest graph window for every graph-type element: `%{id => [{ts, val}]}`.
   """
-  def query_graph_data(resolved_elements, time, span) do
+  def query_graph_data(canvas_id, resolved_elements, time, span) do
     from = DateTime.add(time, -span, :second)
 
     resolved_elements
@@ -49,7 +49,7 @@ defmodule TimelessCanvas.DataQueries do
       metric_name = Map.get(element.meta, "metric_name", "default")
 
       points =
-        case Manager.metric_range(id, metric_name, from, time) do
+        case Manager.metric_range(canvas_id, id, metric_name, from, time) do
           {:ok, pts} when pts != [] -> downsample(pts, @max_graph_points)
           _ -> []
         end
@@ -62,13 +62,13 @@ defmodule TimelessCanvas.DataQueries do
   Text metric values for every text_series element:
   `%{id => {unix_ms, value}}`. Elements without data are omitted.
   """
-  def query_text_data(resolved_elements, time) do
+  def query_text_data(canvas_id, resolved_elements, time) do
     resolved_elements
     |> Enum.filter(fn {_id, el} -> el.type == :text_series end)
     |> concurrent_element_query(fn {id, element} ->
       metric_name = Map.get(element.meta, "metric_name", "default")
 
-      case Manager.text_metric_at(id, metric_name, time) do
+      case Manager.text_metric_at(canvas_id, id, metric_name, time) do
         {:ok, value} -> {id, {DateTime.to_unix(time, :millisecond), value}}
         :no_data -> :skip
       end
@@ -93,13 +93,13 @@ defmodule TimelessCanvas.DataQueries do
   @doc """
   High-resolution point list for one expanded graph element.
   """
-  def query_expanded_data(resolved_elements, element_id, time, span) do
+  def query_expanded_data(canvas_id, resolved_elements, element_id, time, span) do
     case Map.get(resolved_elements, element_id) do
       %{type: :graph} = element ->
         metric_name = Map.get(element.meta, "metric_name", "default")
         from = DateTime.add(time, -span, :second)
 
-        case Manager.metric_range(element_id, metric_name, from, time) do
+        case Manager.metric_range(canvas_id, element_id, metric_name, from, time) do
           {:ok, pts} when pts != [] -> downsample(pts, @max_graph_points_expanded)
           _ -> []
         end

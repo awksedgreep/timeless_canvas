@@ -1010,4 +1010,329 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       assert elements["el-1"][:label] == "persist-me" or elements["el-1"]["label"] == "persist-me"
     end
   end
+
+  defp with_fast_autosave(ms \\ 20, retry_ms \\ 40) do
+    Application.put_env(:timeless_canvas, :autosave_ms, ms)
+    Application.put_env(:timeless_canvas, :autosave_retry_ms, retry_ms)
+
+    on_exit(fn ->
+      Application.delete_env(:timeless_canvas, :autosave_ms)
+      Application.delete_env(:timeless_canvas, :autosave_retry_ms)
+    end)
+  end
+
+  defp saved_elements(canvas_id) do
+    {:ok, saved} = FakePersistence.get_canvas(canvas_id)
+    saved.data["elements"] || %{}
+  end
+
+  describe "autosave and save state" do
+    test "an edit marks the canvas dirty and the autosave persists it as saved", %{
+      conn: conn,
+      user: user
+    } do
+      with_fast_autosave()
+      {data, el} = canvas_with_element(%{x: 100.0, y: 100.0, label: "dirty-me"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, html} = live(conn, "/canvas/#{record.id}")
+      assert html =~ "Saved"
+      refute html =~ "Unsaved changes"
+
+      html = render_hook(view, "element:move", %{"id" => el.id, "dx" => 41, "dy" => 0})
+      assert html =~ "Unsaved changes"
+
+      assert eventually(fn -> saved_elements(record.id)[el.id]["x"] == 141.0 end)
+
+      assert eventually(fn ->
+               render(view) =~ "Saved" and !(render(view) =~ "Unsaved changes")
+             end)
+    end
+
+    @tag capture_log: true
+    test "a failing autosave shows the error state and retries until the store recovers", %{
+      conn: conn,
+      user: user
+    } do
+      with_fast_autosave()
+      {data, el} = canvas_with_element(%{x: 100.0, y: 100.0, label: "retry-me"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      FakePersistence.fail_update_canvas_data({:error, :db_down})
+      render_hook(view, "element:move", %{"id" => el.id, "dx" => 41, "dy" => 0})
+
+      assert eventually(fn -> render(view) =~ "Save failed — retrying" end)
+      assert saved_elements(record.id)[el.id]["x"] == 100.0
+
+      # The store recovers; a scheduled retry self-heals without any
+      # further user interaction.
+      FakePersistence.fail_update_canvas_data(nil)
+
+      assert eventually(fn -> saved_elements(record.id)[el.id]["x"] == 141.0 end)
+      assert eventually(fn -> render(view) =~ "Saved" and !(render(view) =~ "Save failed") end)
+    end
+
+    @tag capture_log: true
+    test "autosave stops retrying after 5 consecutive failures; the next edit re-arms it", %{
+      conn: conn,
+      user: user
+    } do
+      with_fast_autosave(10, 10)
+      {data, el} = canvas_with_element(%{x: 100.0, y: 100.0, label: "give-up"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      FakePersistence.fail_update_canvas_data({:error, :db_down})
+      render_hook(view, "element:move", %{"id" => el.id, "dx" => 41, "dy" => 0})
+
+      assert eventually(fn ->
+               :sys.get_state(view.pid).socket.assigns.autosave_failures == 5
+             end)
+
+      # Gave up: error state without a pending retry timer.
+      assigns = :sys.get_state(view.pid).socket.assigns
+      assert assigns.save_state == :error
+      assert assigns.autosave_ref == nil
+      assert render(view) =~ "Save failed"
+      refute render(view) =~ "retrying"
+
+      # A new edit resets the failure budget and re-arms autosave.
+      FakePersistence.fail_update_canvas_data(nil)
+      html = render_hook(view, "element:move", %{"id" => el.id, "dx" => 1, "dy" => 0})
+      assert html =~ "Unsaved changes"
+      assert eventually(fn -> saved_elements(record.id)[el.id]["x"] == 142.0 end)
+    end
+
+    @tag capture_log: true
+    test "manual canvas:save updates the save state in both directions", %{
+      conn: conn,
+      user: user
+    } do
+      with_fast_autosave()
+      {data, _el} = canvas_with_element(%{label: "manual-save"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      FakePersistence.fail_update_canvas_data({:error, :db_down})
+      html = render_hook(view, "canvas:save", %{})
+      assert html =~ "Save failed — retrying"
+
+      FakePersistence.fail_update_canvas_data(nil)
+      html = render_hook(view, "canvas:save", %{})
+      assert html =~ "Saved"
+      refute html =~ "Save failed"
+    end
+  end
+
+  describe "undo/redo persistence" do
+    test "undo and redo both autosave the resulting state", %{conn: conn, user: user} do
+      with_fast_autosave()
+      {data, el} = canvas_with_element(%{x: 100.0, y: 100.0, label: "undo-me"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      render_hook(view, "element:select", %{"id" => el.id})
+      view |> element(~s{button[phx-click="delete_selected"]}) |> render_click()
+      assert eventually(fn -> saved_elements(record.id) == %{} end)
+
+      # The data-loss bug: an undone delete must reach the store too.
+      view |> element(~s{button[phx-click="canvas:undo"]}) |> render_click()
+      assert eventually(fn -> saved_elements(record.id)[el.id]["label"] == "undo-me" end)
+
+      view |> element(~s{button[phx-click="canvas:redo"]}) |> render_click()
+      assert eventually(fn -> saved_elements(record.id) == %{} end)
+    end
+
+    test "undoing a stream element delete re-registers its subscription", %{
+      conn: conn,
+      user: user
+    } do
+      with_fast_autosave()
+      with_fake_stream_backends()
+      {record, el} = seed_registered_stream_canvas(user)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+      assert eventually(fn -> FakeStreamBackend.subscribe_count() == 1 end)
+
+      render_hook(view, "element:select", %{"id" => el.id})
+      view |> element(~s{button[phx-click="delete_selected"]}) |> render_click()
+
+      # Undo restores the element; the fingerprint diff must re-register
+      # the stream subscription (a second backend subscribe).
+      view |> element(~s{button[phx-click="canvas:undo"]}) |> render_click()
+      assert eventually(fn -> FakeStreamBackend.subscribe_count() == 2 end)
+
+      assert eventually(fn ->
+               Enum.any?(FakeStreamBackend.subscribers(), fn {pid, _opts} ->
+                 Process.alive?(pid)
+               end)
+             end)
+    end
+  end
+
+  describe "stored-data decode protection" do
+    @corrupt_data %{"version" => 999, "elements" => "garbage"}
+
+    test "fresh %{} data mounts editable with no warning", %{conn: conn, user: user} do
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: %{}})
+
+      {:ok, view, html} = live(conn, "/canvas/#{record.id}")
+
+      refute html =~ "could not be read"
+      assert html =~ "Saved"
+
+      # Editing works: place a rect.
+      view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
+      view |> element(~s{button[phx-value-kind="rect"]}) |> render_click()
+
+      html =
+        view
+        |> element("#canvas-svg")
+        |> render_hook("canvas:click", %{"x" => 100, "y" => 100})
+
+      assert html =~ "Rect 1"
+    end
+
+    test "corrupt data shows the banner, denies edits, and never overwrites the blob", %{
+      conn: conn,
+      user: user
+    } do
+      with_fast_autosave()
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: @corrupt_data})
+
+      {:ok, view, html} =
+        ExUnit.CaptureLog.with_log(fn -> live(conn, "/canvas/#{record.id}") end)
+        |> then(fn {{:ok, view, html}, _log} -> {:ok, view, html} end)
+
+      assert html =~ "could not be read"
+      assert html =~ "Discard stored data and start fresh"
+
+      # Edits are denied while the flag is set.
+      view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
+      view |> element(~s{button[phx-value-kind="rect"]}) |> render_click()
+
+      html =
+        view
+        |> element("#canvas-svg")
+        |> render_hook("canvas:click", %{"x" => 100, "y" => 100})
+
+      refute html =~ "Rect 1"
+      refute has_element?(view, "[data-element-id]")
+
+      # No autosave ever fires: the stored blob stays untouched.
+      Process.sleep(80)
+      {:ok, saved} = FakePersistence.get_canvas(record.id)
+      assert saved.data == @corrupt_data
+    end
+
+    test "the discard button restores editability and persists a fresh canvas", %{
+      conn: conn,
+      user: user
+    } do
+      with_fast_autosave()
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: @corrupt_data})
+
+      {:ok, view, _html} =
+        ExUnit.CaptureLog.with_log(fn -> live(conn, "/canvas/#{record.id}") end)
+        |> then(fn {{:ok, view, html}, _log} -> {:ok, view, html} end)
+
+      html = view |> element(".canvas-decode-warning__btn") |> render_click()
+      refute html =~ "could not be read"
+
+      # The fresh (empty) canvas is persisted over the unreadable blob.
+      assert eventually(fn ->
+               match?(%{"version" => 2}, elem(FakePersistence.get_canvas(record.id), 1).data)
+             end)
+
+      # Editing works again and persists.
+      view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
+      view |> element(~s{button[phx-value-kind="rect"]}) |> render_click()
+
+      html =
+        view
+        |> element("#canvas-svg")
+        |> render_hook("canvas:click", %{"x" => 100, "y" => 100})
+
+      assert html =~ "Rect 1"
+      assert eventually(fn -> map_size(saved_elements(record.id)) == 1 end)
+    end
+  end
+
+  describe "per-canvas element scoping and cleanup" do
+    defp manager_registered?(canvas_id, element_id) do
+      case :ets.lookup(:timeless_canvas_data_source, :elements) do
+        [{:elements, elements}] -> Map.has_key?(elements, {canvas_id, element_id})
+        _ -> false
+      end
+    end
+
+    test "two canvases sharing an element id each get their own element's data", %{
+      conn: conn,
+      user: user
+    } do
+      now_ms = System.system_time(:millisecond)
+
+      # Per-element canned data: the value depends on the element's host.
+      FakeDataSource.put(:metric_range, fn element ->
+        value = if element.meta["host"] == "host-a", do: 111.0, else: 222.0
+        {:ok, [{now_ms - 60_000, value}, {now_ms, value}]}
+      end)
+
+      graph = fn host ->
+        {canvas, _el} =
+          Canvas.add_element(Canvas.new(), %{
+            type: :graph,
+            x: 100.0,
+            y: 100.0,
+            label: "#{host} graph",
+            meta: %{"host" => host, "metric_name" => "cpu_usage"}
+          })
+
+        encode(canvas)
+      end
+
+      record_a = FakePersistence.seed_canvas(%{user_id: user.id, data: graph.("host-a")})
+      record_b = FakePersistence.seed_canvas(%{user_id: user.id, data: graph.("host-b")})
+
+      {:ok, view_a, _html} = live(conn, "/canvas/#{record_a.id}")
+      {:ok, view_b, _html} = live(log_in_user(build_conn(), user), "/canvas/#{record_b.id}")
+      render_async(view_a)
+      render_async(view_b)
+
+      # Both canvases contain "el-1", but each query resolves its own
+      # canvas's element (the old registry collided on the bare id).
+      assert_push_event(view_a, "graph:data", %{id: "el-1", value: "111"}, 1_000)
+      assert_push_event(view_b, "graph:data", %{id: "el-1", value: "222"}, 1_000)
+    end
+
+    test "a closed viewer drops its canvas's registrations — unless another viewer remains", %{
+      conn: conn,
+      user: user
+    } do
+      Process.flag(:trap_exit, true)
+
+      {data, el} = canvas_with_element(%{x: 100.0, y: 100.0, label: "leak-check", type: :server})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view_a, _html} = live(conn, "/canvas/#{record.id}")
+      {:ok, view_b, _html} = live(log_in_user(build_conn(), user), "/canvas/#{record.id}")
+
+      assert eventually(fn -> manager_registered?(record.id, el.id) end)
+
+      # First viewer dies: the second keeps the registration alive.
+      Process.exit(view_a.pid, :kill)
+      Process.sleep(100)
+      assert manager_registered?(record.id, el.id)
+
+      # Last viewer dies: the canvas's registrations are dropped.
+      Process.exit(view_b.pid, :kill)
+      assert eventually(fn -> not manager_registered?(record.id, el.id) end)
+    end
+  end
 end

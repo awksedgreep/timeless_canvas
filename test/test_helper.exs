@@ -19,10 +19,6 @@ Application.put_env(:timeless_canvas, TimelessCanvas.Test.Endpoint,
 
 Logger.configure(level: :warning)
 
-# CanvasLive's timeline form has phx-change but no id (candidate cleanup in
-# the lib); silence LiveViewTest's form-recovery warning until that is fixed.
-Application.put_env(:phoenix_live_view, :test_warnings, missing_form_id: :ignore)
-
 # iconify_ex cannot generate icons without npm assets; use pre-seeded
 # placeholders in a temp directory instead (see TimelessCanvas.Test.Icons).
 TimelessCanvas.Test.Icons.ensure_placeholders!()

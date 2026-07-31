@@ -10,7 +10,7 @@ defmodule TimelessCanvas.Test.FakePersistence do
 
   use Agent
 
-  @initial_state %{canvases: %{}, access: %{}, users: %{}, next_id: 1}
+  @initial_state %{canvases: %{}, access: %{}, users: %{}, next_id: 1, update_error: nil}
 
   def start_link(_opts \\ []) do
     Agent.start_link(fn -> @initial_state end, name: __MODULE__)
@@ -51,6 +51,15 @@ defmodule TimelessCanvas.Test.FakePersistence do
 
       {record, state}
     end)
+  end
+
+  @doc """
+  Force every subsequent `update_canvas_data/2` call to return `error`
+  (an `{:error, reason}` tuple). Pass `nil` to restore normal behaviour;
+  `reset/0` also clears it.
+  """
+  def fail_update_canvas_data(error \\ {:error, :forced_failure}) do
+    Agent.update(__MODULE__, &Map.put(&1, :update_error, error))
   end
 
   @doc "Register a user so `lookup_user_by_username/1` can find it."
@@ -104,7 +113,10 @@ defmodule TimelessCanvas.Test.FakePersistence do
 
   @impl true
   def update_canvas_data(canvas_id, data) do
-    update_record(canvas_id, fn record -> %{record | data: data} end)
+    case Agent.get(__MODULE__, & &1.update_error) do
+      nil -> update_record(canvas_id, fn record -> %{record | data: data} end)
+      error -> error
+    end
   end
 
   @impl true

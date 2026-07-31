@@ -66,10 +66,22 @@ defmodule TimelessCanvas.Web.CanvasLive do
         Phoenix.PubSub.subscribe(pubsub(), CanvasPoller.data_topic(canvas_id))
       end
 
-      canvas =
+      # A decode failure renders an empty canvas but flags it: editing is
+      # held (require_edit denies) so no autosave can overwrite the stored
+      # blob until the user explicitly discards it. Serializer.decode
+      # treats %{}/nil as a fresh canvas, so only genuinely malformed
+      # data lands here.
+      {canvas, decode_failed?} =
         case Serializer.decode(record.data) do
-          {:ok, c} -> c
-          {:error, _} -> Canvas.new()
+          {:ok, c} ->
+            {c, false}
+
+          {:error, reason} ->
+            Logger.error(
+              "[canvas] failed to decode stored data for canvas #{canvas_id}: #{inspect(reason)} — editing held"
+            )
+
+            {Canvas.new(), true}
         end
 
       history = History.new(canvas)
@@ -106,6 +118,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
           canvas_name: record.name,
           canvas_id: canvas_id,
           user_id: current_user.id,
+          decode_failed?: decode_failed?,
+          save_state: :saved,
+          autosave_failures: 0,
           can_edit: can_edit,
           is_owner: is_owner,
           show_share: false,
@@ -159,7 +174,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
           span = socket.assigns.timeline_span
 
           socket
-          |> start_async(:initial_data, fn -> load_initial_data(resolved_elements, span) end)
+          |> start_async(:initial_data, fn ->
+            load_initial_data(canvas_id, resolved_elements, span)
+          end)
           |> schedule_debug_report()
         else
           socket
@@ -246,6 +263,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
           {@canvas_name}
         </span>
         <span class="canvas-toolbar__sep"></span>
+        <span
+          :if={@can_edit && !@decode_failed?}
+          class={"canvas-toolbar__save-state canvas-toolbar__save-state--#{@save_state}"}
+        >
+          {save_state_label(@save_state, @autosave_failures)}
+        </span>
         <span :if={!@can_edit} class="canvas-toolbar__badge canvas-toolbar__badge--readonly">
           View Only
         </span>
@@ -413,6 +436,20 @@ defmodule TimelessCanvas.Web.CanvasLive do
         </button>
       </div>
 
+      <div :if={@decode_failed?} class="canvas-decode-warning" role="alert">
+        <span class="canvas-decode-warning__text">
+          This canvas's stored data could not be read — editing is disabled to protect it.
+        </span>
+        <button
+          :if={@can_edit}
+          phx-click="canvas:discard_stored_data"
+          data-confirm="Discard this canvas's stored data and start fresh? The unreadable data will be permanently overwritten."
+          class="canvas-decode-warning__btn"
+        >
+          Discard stored data and start fresh
+        </button>
+      </div>
+
       <div class="canvas-var-bar">
         <div :for={{name, definition} <- @canvas.variables} class="canvas-var-item">
           <span class="canvas-var-label">${name}</span>
@@ -567,7 +604,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
           100%
         </button>
         <span class="canvas-zoom-indicator__sep"></span>
-        <form phx-change="timeline:change" phx-submit="timeline:change" class="canvas-zoom-indicator__timeline-form">
+        <form
+          id="timeline-controls-form"
+          phx-change="timeline:change"
+          phx-submit="timeline:change"
+          class="canvas-zoom-indicator__timeline-form"
+        >
           <label class="canvas-zoom-indicator__meta">
             <span>Span</span>
             <select name="span" class="timeline-bar__speed">
@@ -687,7 +729,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
     ~H"""
     <div class="properties-panel">
       <h3 class="properties-panel__title">Element Properties</h3>
-      <form phx-change="property:update_element" phx-submit="property:update_element">
+      <form
+        id="element-properties-form"
+        phx-change="property:update_element"
+        phx-submit="property:update_element"
+      >
         <input type="hidden" name="element_id" value={@selected.id} />
         <div class="properties-panel__field">
           <label>Label</label>
@@ -746,7 +792,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       </div>
       <div :if={@meta_fields != []} class="properties-panel__section">
         <h4 class="properties-panel__subtitle">Metadata</h4>
-        <form phx-change="property:update_meta" phx-submit="property:update_meta">
+        <form id="element-meta-form" phx-change="property:update_meta" phx-submit="property:update_meta">
           <input type="hidden" name="element_id" value={@selected.id} />
           <div :for={field <- @display_meta_fields} class="properties-panel__field">
             <label>{if field == "graph_series", do: "Series", else: field}</label>
@@ -865,7 +911,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
     ~H"""
     <div class="properties-panel">
       <h3 class="properties-panel__title">Connection Properties</h3>
-      <form phx-change="property:update_connection" phx-submit="property:update_connection">
+      <form
+        id="connection-properties-form"
+        phx-change="property:update_connection"
+        phx-submit="property:update_connection"
+      >
         <input type="hidden" name="conn_id" value={@selected.id} />
         <div class="properties-panel__field">
           <label>Label</label>
@@ -1513,14 +1563,72 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp graph_query_labels_from_meta(_meta), do: %{}
 
+  # Autosave gives up after this many consecutive failed writes; the
+  # error indicator stays until the next user edit re-arms the timer.
+  @max_autosave_failures 5
+
+  defp autosave_ms, do: Application.get_env(:timeless_canvas, :autosave_ms, 2000)
+  defp autosave_retry_ms, do: Application.get_env(:timeless_canvas, :autosave_retry_ms, 5000)
+
+  # User-edit path: (re)arm the autosave timer, mark the canvas dirty,
+  # and reset the consecutive-failure counter (a fresh edit restarts the
+  # retry budget even after autosave previously gave up).
   defp schedule_autosave(socket) do
     if Map.get(socket.assigns, :autosave_ref) do
       Process.cancel_timer(socket.assigns.autosave_ref)
     end
 
-    ref = Process.send_after(self(), :autosave, 2000)
-    assign(socket, autosave_ref: ref)
+    ref = Process.send_after(self(), :autosave, autosave_ms())
+    assign(socket, autosave_ref: ref, save_state: :dirty, autosave_failures: 0)
   end
+
+  # Persist the current canvas and track the outcome in save_state.
+  # Failures re-arm the timer with a longer delay so transient DB
+  # outages self-heal, up to @max_autosave_failures consecutive misses.
+  defp attempt_save(socket) do
+    data = Serializer.encode(socket.assigns.canvas)
+
+    case safe_update_canvas_data(socket.assigns.canvas_id, data) do
+      {:ok, _} ->
+        assign(socket, save_state: :saved, autosave_failures: 0)
+
+      {:error, reason} ->
+        failures = socket.assigns.autosave_failures + 1
+
+        Logger.error(
+          "[canvas] save failed for canvas #{socket.assigns.canvas_id} " <>
+            "(attempt #{failures}/#{@max_autosave_failures}): #{inspect(reason)}"
+        )
+
+        socket = assign(socket, save_state: :error, autosave_failures: failures)
+
+        if failures < @max_autosave_failures do
+          ref = Process.send_after(self(), :autosave, autosave_retry_ms())
+          assign(socket, autosave_ref: ref)
+        else
+          socket
+        end
+    end
+  end
+
+  defp safe_update_canvas_data(canvas_id, data) do
+    case persistence().update_canvas_data(canvas_id, data) do
+      {:ok, _} = ok -> ok
+      {:error, _} = error -> error
+      other -> {:error, {:unexpected_result, other}}
+    end
+  rescue
+    exception -> {:error, exception}
+  end
+
+  defp save_state_label(:saved, _failures), do: "Saved"
+  defp save_state_label(:dirty, _failures), do: "Unsaved changes"
+  defp save_state_label(:saving, _failures), do: "Saving…"
+
+  defp save_state_label(:error, failures) when failures >= @max_autosave_failures,
+    do: "Save failed"
+
+  defp save_state_label(:error, _failures), do: "Save failed — retrying"
 
   defp apply_statuses(canvas, statuses) do
     Enum.reduce(statuses, canvas, fn {id, status}, acc ->
@@ -1714,7 +1822,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   def handle_event("element:dblclick", %{"id" => id}, socket) do
     case Map.get(socket.assigns.canvas.elements, id) do
       %{type: :canvas, meta: %{"canvas_id" => canvas_id}} when canvas_id != "" ->
-        if socket.assigns.can_edit do
+        if socket.assigns.can_edit and not socket.assigns.decode_failed? do
           data = Serializer.encode(socket.assigns.canvas)
           persistence().update_canvas_data(socket.assigns.canvas_id, data)
         end
@@ -2112,6 +2220,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
     {:noreply, assign(socket, show_share: false)}
   end
 
+  # Undo/redo mutate the canvas like any other edit, so they must
+  # re-register (a restored stream/graph element needs its Manager,
+  # poller, and StreamManager registrations back) and autosave (an
+  # undone change that never persists is silently lost on reload).
   def handle_event("canvas:undo", _params, socket) do
     require_edit(socket, fn ->
       history = History.undo(socket.assigns.history)
@@ -2119,7 +2231,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
       socket =
         assign(socket, history: history, canvas: history.present, selected_ids: MapSet.new())
         |> resolve_and_assign()
+        |> register_elements()
         |> push_graph_data()
+        |> schedule_autosave()
 
       {:noreply, socket}
     end)
@@ -2132,7 +2246,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
       socket =
         assign(socket, history: history, canvas: history.present, selected_ids: MapSet.new())
         |> resolve_and_assign()
+        |> register_elements()
         |> push_graph_data()
+        |> schedule_autosave()
 
       {:noreply, socket}
     end)
@@ -2441,16 +2557,32 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("canvas:save", _params, socket) do
     require_edit(socket, fn ->
-      data = Serializer.encode(socket.assigns.canvas)
+      socket = attempt_save(socket)
 
-      case persistence().update_canvas_data(socket.assigns.canvas_id, data) do
-        {:ok, _} ->
+      case socket.assigns.save_state do
+        :saved ->
           {:noreply, put_flash(socket, :info, "Canvas saved")}
 
-        {:error, _} ->
+        _ ->
           {:noreply, put_flash(socket, :error, "Failed to save canvas")}
       end
     end)
+  end
+
+  # Explicit, user-confirmed (data-confirm) escape hatch from the
+  # decode-failed hold: clear the flag so require_edit allows edits
+  # again and persist the fresh canvas over the unreadable blob.
+  def handle_event("canvas:discard_stored_data", _params, socket) do
+    if socket.assigns.can_edit and socket.assigns.decode_failed? do
+      socket =
+        socket
+        |> assign(decode_failed?: false)
+        |> schedule_autosave()
+
+      {:noreply, put_flash(socket, :info, "Stored data discarded — starting fresh")}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_event("canvas:load", _params, socket) do
@@ -2493,7 +2625,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       when is_number(center_ms) do
     half_span = div(socket.assigns.timeline_span * 1000, 2)
     time = DateTime.from_unix!(round(center_ms) + half_span, :millisecond)
-    statuses = StatusManager.statuses_at(time)
+    statuses = StatusManager.statuses_at(socket.assigns.canvas_id, time)
     canvas = apply_statuses(socket.assigns.canvas, statuses)
 
     {:noreply,
@@ -2524,7 +2656,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           adjusted_window_end =
             DateTime.from_unix!(window_center_ms + new_half_span_ms, :millisecond)
 
-          statuses = StatusManager.statuses_at(adjusted_window_end)
+          statuses = StatusManager.statuses_at(socket.assigns.canvas_id, adjusted_window_end)
           canvas = apply_statuses(socket.assigns.canvas, statuses)
 
           {
@@ -2712,12 +2844,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_info(:autosave, socket) do
-    if socket.assigns.can_edit do
-      data = Serializer.encode(socket.assigns.canvas)
-      persistence().update_canvas_data(socket.assigns.canvas_id, data)
-    end
+    socket = assign(socket, autosave_ref: nil)
 
-    {:noreply, socket}
+    if socket.assigns.can_edit and not socket.assigns.decode_failed? do
+      {:noreply, attempt_save(socket)}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info(:debug_report, socket) do
@@ -2819,7 +2952,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # Runs inside the start_async task: every initial data-source query,
   # none of them touching the socket. Per-element backfill queries run
   # concurrently (queries execute in the calling process since Phase 1b).
-  defp load_initial_data(resolved_elements, span) do
+  defp load_initial_data(canvas_id, resolved_elements, span) do
     data_range = query_data_range()
     {timeline_mode, timeline_time} = seed_timeline(data_range, span)
     initial_time = timeline_time || DateTime.utc_now()
@@ -2834,16 +2967,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
       place_host: place_host,
       metric_units: query_metric_units(resolved_elements),
       density_buckets: query_density_buckets(data_range),
-      graph_data: query_graph_data(resolved_elements, initial_time, span),
-      text_data: query_text_data(resolved_elements, initial_time),
+      graph_data: query_graph_data(canvas_id, resolved_elements, initial_time, span),
+      text_data: query_text_data(canvas_id, resolved_elements, initial_time),
       stream_data: query_stream_data(resolved_elements, initial_time, span)
     }
   end
 
   # --- Guards ---
 
+  # Denies while decode_failed?: any allowed edit would arm an autosave
+  # that overwrites the stored blob we could not read.
   defp require_edit(socket, fun) do
-    if socket.assigns.can_edit do
+    if socket.assigns.can_edit and not socket.assigns.decode_failed? do
       fun.()
     else
       {:noreply, socket}
@@ -2870,7 +3005,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
     span = socket.assigns.timeline_span
 
     graph_data =
-      Map.merge(socket.assigns.graph_data, query_graph_data(%{el.id => el}, time, span))
+      Map.merge(
+        socket.assigns.graph_data,
+        query_graph_data(socket.assigns.canvas_id, %{el.id => el}, time, span)
+      )
 
     socket
     |> assign(graph_data: graph_data)
@@ -2894,7 +3032,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
         graph_data =
           Map.merge(
             socket.assigns.graph_data,
-            query_graph_data(socket.assigns.resolved_elements, time, socket.assigns.timeline_span)
+            query_graph_data(
+              socket.assigns.canvas_id,
+              socket.assigns.resolved_elements,
+              time,
+              socket.assigns.timeline_span
+            )
           )
 
         socket = assign(socket, graph_data: graph_data)
@@ -2929,7 +3072,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         text_data =
           Map.merge(
             socket.assigns.text_data,
-            query_text_data(socket.assigns.resolved_elements, time)
+            query_text_data(socket.assigns.canvas_id, socket.assigns.resolved_elements, time)
           )
 
         assign(socket, text_data: text_data)
@@ -2950,6 +3093,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         time = socket.assigns.timeline_time || DateTime.utc_now()
 
         query_expanded_data(
+          socket.assigns.canvas_id,
           socket.assigns.resolved_elements,
           element_id,
           time,
@@ -3001,17 +3145,17 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # CanvasPoller runs the exact same code; these thin wrappers keep the
   # local call sites (fill_* helpers, initial-load task) unchanged.
 
-  defp query_graph_data(resolved_elements, time, span),
-    do: DataQueries.query_graph_data(resolved_elements, time, span)
+  defp query_graph_data(canvas_id, resolved_elements, time, span),
+    do: DataQueries.query_graph_data(canvas_id, resolved_elements, time, span)
 
-  defp query_text_data(resolved_elements, time),
-    do: DataQueries.query_text_data(resolved_elements, time)
+  defp query_text_data(canvas_id, resolved_elements, time),
+    do: DataQueries.query_text_data(canvas_id, resolved_elements, time)
 
   defp query_stream_data(resolved_elements, time, span),
     do: DataQueries.query_stream_data(resolved_elements, time, span)
 
-  defp query_expanded_data(resolved_elements, element_id, time, span),
-    do: DataQueries.query_expanded_data(resolved_elements, element_id, time, span)
+  defp query_expanded_data(canvas_id, resolved_elements, element_id, time, span),
+    do: DataQueries.query_expanded_data(canvas_id, resolved_elements, element_id, time, span)
 
   defp query_data_range, do: DataQueries.query_data_range()
 
@@ -3245,7 +3389,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           {socket, false}
         else
           time = DateTime.from_unix!(clamped_window_end_ms, :millisecond)
-          statuses = StatusManager.statuses_at(time)
+          statuses = StatusManager.statuses_at(socket.assigns.canvas_id, time)
           canvas = apply_statuses(socket.assigns.canvas, statuses)
 
           {

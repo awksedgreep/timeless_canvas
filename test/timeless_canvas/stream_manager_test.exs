@@ -135,6 +135,58 @@ defmodule TimelessCanvas.StreamManagerTest do
       refute_receive {:stream_entries, _, _}, 200
     end
 
+    test "registrant exit drops a canvas's subscriptions only when the last one dies" do
+      manager = start_manager()
+      parent = self()
+
+      registrant = fn canvas_id, element_id ->
+        pid =
+          spawn(fn ->
+            StreamManager.register_log_stream(canvas_id, element_id, [], manager)
+            send(parent, {:registered, self()})
+
+            receive do
+              :stop -> :ok
+            end
+          end)
+
+        assert_receive {:registered, ^pid}, 1_000
+        pid
+      end
+
+      stop = fn pid ->
+        ref = Process.monitor(pid)
+        send(pid, :stop)
+        assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
+        # Synchronize so the manager has processed its own DOWN.
+        :sys.get_state(manager)
+        Process.sleep(20)
+      end
+
+      subscriptions = fn -> :sys.get_state(manager).subscriptions end
+
+      # Two viewers of canvas 1, one viewer of canvas 2.
+      pid_a = registrant.(1, "el-mon")
+      pid_b = registrant.(1, "el-mon")
+      pid_c = registrant.(2, "el-other")
+
+      wait_until(fn -> Map.has_key?(subscriptions.(), "el-mon") end)
+      wait_until(fn -> Map.has_key?(subscriptions.(), "el-other") end)
+
+      # First canvas-1 registrant exits: subscription survives.
+      stop.(pid_a)
+      assert Map.has_key?(subscriptions.(), "el-mon")
+
+      # Last canvas-1 registrant exits: canvas 1's subscription is
+      # dropped; canvas 2's is untouched.
+      stop.(pid_b)
+      wait_until(fn -> not Map.has_key?(subscriptions.(), "el-mon") end)
+      assert Map.has_key?(subscriptions.(), "el-other")
+
+      stop.(pid_c)
+      wait_until(fn -> subscriptions.() == %{} end)
+    end
+
     test "trace spans are batched as :stream_spans" do
       manager = start_manager(batch_ms: 20)
       Phoenix.PubSub.subscribe(TimelessCanvas.pubsub(), StreamManager.stream_topic(1))

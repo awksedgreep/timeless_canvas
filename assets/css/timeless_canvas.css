@@ -422,6 +422,62 @@ body.tc-canvas-open {
   color: #ef4444;
 }
 
+/* Save-state indicator (near the canvas name) */
+.canvas-toolbar__save-state {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+  margin-right: 4px;
+  color: var(--text-muted, #888);
+}
+
+.canvas-toolbar__save-state--dirty,
+.canvas-toolbar__save-state--saving {
+  color: var(--text, #ccc);
+}
+
+.canvas-toolbar__save-state--error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  font-weight: 600;
+}
+
+/* Decode-failure warning banner */
+.canvas-decode-warning {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+  font-size: 12px;
+  max-width: 90%;
+}
+
+.canvas-decode-warning__btn {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  color: #ef4444;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.canvas-decode-warning__btn:hover {
+  background: rgba(239, 68, 68, 0.3);
+}
+
 /* Variable Bar */
 .canvas-var-bar {
   position: absolute;

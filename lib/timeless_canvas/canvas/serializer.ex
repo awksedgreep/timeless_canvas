@@ -30,7 +30,16 @@ defmodule TimelessCanvas.Canvas.Serializer do
   @doc """
   Decode a map (from JSON) back to a Canvas struct.
   Returns `{:ok, canvas}` or `{:error, reason}`.
+
+  `nil` and the empty map decode to a fresh `Canvas`: `create_canvas`
+  persists `%{}` as the initial blob, so explicitly-empty data is a
+  brand-new canvas, not corruption. Non-empty data with a missing or
+  unsupported version is still an error so callers can protect the
+  stored blob instead of overwriting it.
   """
+  def decode(nil), do: {:ok, Canvas.new()}
+  def decode(data) when data == %{}, do: {:ok, Canvas.new()}
+
   def decode(%{"version" => version} = data) when version in [1, 2] do
     canvas = %Canvas{
       view_box: decode_view_box(data["view_box"]),

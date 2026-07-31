@@ -196,8 +196,8 @@ defmodule TimelessCanvas.CanvasPoller do
 
   defp poll_and_broadcast(state) do
     now = DateTime.utc_now()
-    graph_data = DataQueries.query_graph_data(state.elements, now, state.span)
-    text_data = DataQueries.query_text_data(state.elements, now)
+    graph_data = DataQueries.query_graph_data(state.canvas_id, state.elements, now, state.span)
+    text_data = DataQueries.query_text_data(state.canvas_id, state.elements, now)
 
     changed_graph =
       for {id, points} <- graph_data,

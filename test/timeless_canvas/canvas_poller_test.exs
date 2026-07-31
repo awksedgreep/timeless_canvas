@@ -60,7 +60,7 @@ defmodule TimelessCanvas.CanvasPollerTest do
 
   defp register_and_map(canvas_id, elements) do
     Manager.register_elements(canvas_id, elements)
-    on_exit(fn -> Enum.each(elements, &Manager.unregister_element(&1.id)) end)
+    on_exit(fn -> Enum.each(elements, &Manager.unregister_element(canvas_id, &1.id)) end)
     Map.new(elements, &{&1.id, &1})
   end
 
