@@ -39,12 +39,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
     text_series: "TextSeries"
   }
 
-  # Dropdown option lists must be bounded before they reach the DOM: a
+  # Option lists must be bounded before they reach the DOM: a
   # high-cardinality store (50K hosts observed) rendered 50K <option>
   # nodes per select and morphdom spent 37s applying one patch (INP
-  # 33-46s, tab hung). The current selection is always kept reachable
-  # via select_options' current-value inclusion.
-  @max_dropdown_options 500
+  # 33-46s, tab hung). Series lists are fetched with a server-side
+  # filter and this cap, then grouped by metric name at the assign
+  # boundary; nothing unbounded ever enters socket assigns.
+  @series_limit 200
 
   @impl true
   def mount(%{"id" => id_str}, _session, socket) do
@@ -83,17 +84,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       breadcrumbs = persistence().breadcrumb_chain(canvas_id)
 
-      all_hosts = StatusManager.list_hosts(limit: @max_dropdown_options)
-      pin_hosts = cap_options(all_hosts)
-
-      pin_ifnames =
-        cap_options(StatusManager.list_label_values("ifname", limit: @max_dropdown_options))
-
-      place_pins = %{
-        "host" => %{"mode" => "none", "value" => List.first(pin_hosts) || ""},
-        "ifname" => %{"mode" => "none", "value" => ""}
-      }
-
       socket =
         assign(socket,
           history: history,
@@ -127,16 +117,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
           expanded_graph_data: [],
           pre_expand_viewbox: nil,
           available_series: [],
-          all_hosts: all_hosts,
-          pin_hosts: pin_hosts,
-          pin_ifnames: pin_ifnames,
-          place_pins: place_pins,
+          series_filter: "",
+          series_truncated: false,
           ta_open: nil,
           ta_filter: "",
+          ta_suggestions: [],
+          ta_more: 0,
           stream_popover: nil,
           metric_units: %{},
           resolved_elements: resolved_elements,
-          variable_options: build_variable_options(canvas.variables),
           show_add_variable: false,
           debug_counts: %{
             status_msgs: 0,
@@ -149,7 +138,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
         |> refresh_data_range()
         |> maybe_seed_historical_timeline()
         |> refresh_discovered_hosts()
-        |> refresh_pin_ifnames()
         |> fetch_metric_units()
 
       initial_time = socket.assigns.timeline_time || DateTime.utc_now()
@@ -292,15 +280,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
             </option>
           </select>
           <.typeahead
-            :if={@all_hosts != []}
+            :if={@hosts_available?}
             id="place"
-            options={@all_hosts}
             selected={@place_host}
             placeholder="Search hosts..."
             open?={@ta_open == "place"}
             filter={@ta_filter}
+            suggestions={@ta_suggestions}
+            more={@ta_more}
           />
-          <span :if={@all_hosts == []} class="canvas-toolbar__hint">
+          <span :if={!@hosts_available?} class="canvas-toolbar__hint">
             No hosts discovered
           </span>
           <span class="canvas-toolbar__sep"></span>
@@ -407,11 +396,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
           <span class="canvas-var-label">${name}</span>
           <.typeahead
             id={"var:" <> name}
-            options={Map.get(@variable_options, name, [])}
             selected={definition["current"]}
             placeholder={"Select " <> name <> "..."}
             open?={@ta_open == "var:" <> name}
             filter={@ta_filter}
+            suggestions={@ta_suggestions}
+            more={@ta_more}
           />
           <button
             :if={@can_edit}
@@ -521,9 +511,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
         selected={sole_selected_object(@selected_ids, @canvas)}
         canvas={@canvas}
         available_series={@available_series}
-        all_hosts={@all_hosts}
+        series_filter={@series_filter}
+        series_truncated={@series_truncated}
         ta_open={@ta_open}
         ta_filter={@ta_filter}
+        ta_suggestions={@ta_suggestions}
+        ta_more={@ta_more}
       />
 
       <.timeline_bar
@@ -641,6 +634,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
     assigns =
       assign(assigns,
         meta_fields: base_fields ++ var_fields,
+        series_limit: @series_limit,
         display_meta_fields:
           display_meta_fields(base_fields ++ var_fields, assigns.selected.type),
         icon_select_options:
@@ -709,6 +703,24 @@ defmodule TimelessCanvas.Web.CanvasLive do
           </div>
         </div>
       </form>
+      <div
+        :if={@available_series != [] or @series_filter != ""}
+        class="properties-panel__field"
+      >
+        <label>Series Filter</label>
+        <input
+          type="text"
+          name="series_filter"
+          value={@series_filter}
+          placeholder="Filter series..."
+          autocomplete="off"
+          phx-keyup="series:filter"
+          phx-debounce="200"
+        />
+        <span :if={@series_truncated} class="properties-panel__hint">
+          showing first {@series_limit} series — refine filter
+        </span>
+      </div>
       <div :if={@meta_fields != []} class="properties-panel__section">
         <h4 class="properties-panel__subtitle">Metadata</h4>
         <form phx-change="property:update_meta" phx-submit="property:update_meta">
@@ -737,11 +749,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
             <.typeahead
               :if={field == "host"}
               id="meta:host"
-              options={@all_hosts}
               selected={@selected.meta[field]}
               placeholder="Search hosts..."
               open?={@ta_open == "meta:host"}
               filter={@ta_filter}
+              suggestions={@ta_suggestions}
+              more={@ta_more}
             />
             <select :if={@selected.type == :graph && field == "metric_name"} name={field}>
               <option
@@ -782,6 +795,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
               <strong>{metric_name}</strong>
               <span>{format_series_labels(labels)}</span>
             </div>
+            <div :if={@series_truncated} class="properties-panel__series-hint">
+              showing first {@series_limit} series — refine filter
+            </div>
           </div>
         </div>
       </div>
@@ -805,7 +821,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
             Traces
           </button>
           <button
-            :for={{metric_name, _labels} <- @available_series}
+            :for={{metric_name, _series} <- @available_series}
             class="properties-panel__series-btn"
             phx-click="place_series_graph"
             phx-value-metric_name={metric_name}
@@ -813,6 +829,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
           >
             {metric_name}
           </button>
+          <div :if={@series_truncated} class="properties-panel__series-hint">
+            showing first {@series_limit} series — refine filter
+          </div>
         </div>
       </div>
     </div>
@@ -1046,22 +1065,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp log_level_color(:info), do: "#22c55e"
   defp log_level_color(_), do: "#94a3b8"
 
-  # Scalable replacement for option-list dropdowns: the full option list
-  # stays server-side; at most @ta_suggestion_cap suggestions are ever
-  # rendered (a 50K-host store previously produced 50K <option> nodes and
-  # a 37s morphdom patch). Enter selects the top suggestion.
+  # Scalable replacement for option-list dropdowns: the full option
+  # universe never leaves the data source; opening a typeahead or typing
+  # a filter runs one bounded server-side query and at most
+  # @ta_suggestion_cap suggestions ever reach assigns or the DOM (a
+  # 50K-host store previously produced 50K <option> nodes and a 37s
+  # morphdom patch). Enter selects the top suggestion.
   @ta_suggestion_cap 50
 
   defp typeahead(assigns) do
-    {shown, more} =
-      if assigns.open? do
-        ta_suggestions(assigns.options, assigns.filter)
-      else
-        {[], 0}
-      end
-
-    assigns = assign(assigns, shown: shown, more: more)
-
     ~H"""
     <div class="host-combobox" phx-click-away={@open? && "ta:close"}>
       <input
@@ -1078,7 +1090,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       />
       <div :if={@open?} class="host-combobox__dropdown">
         <button
-          :for={opt <- @shown}
+          :for={opt <- @suggestions}
           type="button"
           class={"host-combobox__option#{if opt == @selected, do: " host-combobox__option--active", else: ""}"}
           phx-click="ta:select"
@@ -1087,7 +1099,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         >
           {opt}
         </button>
-        <span :if={@shown == []} class="host-combobox__empty">No matches</span>
+        <span :if={@suggestions == []} class="host-combobox__empty">No matches</span>
         <span :if={@more > 0} class="host-combobox__empty">
           +{@more} more — keep typing to narrow
         </span>
@@ -1098,7 +1110,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   # Route a chosen suggestion into the same paths the old selects used.
   defp ta_apply(socket, id, value) do
-    socket = assign(socket, ta_open: nil, ta_filter: "")
+    socket = assign(socket, ta_open: nil, ta_filter: "", ta_suggestions: [], ta_more: 0)
 
     case id do
       "place" ->
@@ -1121,25 +1133,56 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
-  defp ta_raw_options(socket, "place"), do: socket.assigns.all_hosts
-  defp ta_raw_options(socket, "meta:host"), do: socket.assigns.all_hosts
+  # On-demand bounded suggestion lookup. Fetches @ta_suggestion_cap + 1
+  # rows so truncation can be signalled without ever holding more than a
+  # page of options.
+  defp ta_fetch(socket, id, filter) do
+    socket
+    |> ta_query(id, filter)
+    |> split_suggestions()
+  end
 
-  defp ta_raw_options(socket, "var:" <> name),
-    do: Map.get(socket.assigns.variable_options, name, [])
+  defp ta_query(_socket, "place", filter), do: bounded_hosts(filter)
+  defp ta_query(_socket, "meta:host", filter), do: bounded_hosts(filter)
 
-  defp ta_raw_options(_socket, _id), do: []
+  defp ta_query(socket, "var:" <> name, filter) do
+    case socket.assigns.canvas.variables[name] do
+      %{"type" => "host"} ->
+        bounded_hosts(filter)
 
-  defp ta_suggestions(options, filter) do
-    pattern = String.downcase(filter || "")
+      %{"type" => "label"} = definition ->
+        StatusManager.list_label_values(definition["label_key"] || name,
+          filter: filter,
+          limit: @ta_suggestion_cap + 1
+        ) || []
 
-    matches =
+      %{"type" => "custom"} = definition ->
+        (definition["options"] || [])
+        |> Enum.reject(&is_nil/1)
+        |> Enum.map(&to_string/1)
+        |> TimelessCanvas.DataSource.apply_query_opts(
+          filter: filter,
+          limit: @ta_suggestion_cap + 1
+        )
+
+      _ ->
+        []
+    end
+  end
+
+  defp ta_query(_socket, _id, _filter), do: []
+
+  defp bounded_hosts(filter) do
+    StatusManager.list_hosts(filter: filter, limit: @ta_suggestion_cap + 1)
+  end
+
+  defp split_suggestions(options) do
+    options =
       options
-      |> Stream.reject(&is_nil/1)
-      |> Stream.map(&to_string/1)
-      |> Stream.filter(&(pattern == "" or String.contains?(String.downcase(&1), pattern)))
-      |> Enum.take(@ta_suggestion_cap + 1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&to_string/1)
 
-    case Enum.split(matches, @ta_suggestion_cap) do
+    case Enum.split(options, @ta_suggestion_cap) do
       {shown, []} -> {shown, 0}
       {shown, _} -> {shown, 1}
     end
@@ -1198,10 +1241,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     assign(socket, resolved_elements: resolved)
   end
 
-  defp refresh_variable_options(socket) do
-    assign(socket, variable_options: build_variable_options(socket.assigns.canvas.variables))
-  end
-
   defp schedule_debug_report(socket) do
     if connected?(socket) do
       Process.send_after(self(), :debug_report, @debug_report_interval)
@@ -1252,28 +1291,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     value
   end
 
-  defp build_variable_options(variables) do
-    Map.new(variables, fn {name, definition} ->
-      case definition["type"] do
-        "host" ->
-          {name, StatusManager.list_hosts()}
-
-        "label" ->
-          label_key = definition["label_key"] || name
-          {name, StatusManager.list_label_values(label_key) || []}
-
-        "custom" ->
-          {name, definition["options"] || []}
-
-        _ ->
-          {name, []}
-      end
-    end)
-  end
-
-  defp cap_options(nil), do: []
-  defp cap_options(list) when is_list(list), do: Enum.take(list, @max_dropdown_options)
-
   defp select_options(_field, selected, values) do
     current = selected || ""
 
@@ -1292,23 +1309,32 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end)
   end
 
-  defp graph_metric_options(series, selected_metric) do
-    values =
-      series
-      |> Enum.map(fn {metric_name, _labels} -> metric_name end)
-      |> Enum.uniq()
-      |> Enum.sort()
+  # The helpers below consume the grouped available_series shape:
+  # [{metric_name, [labels_map, ...]}] sorted by metric name.
 
+  defp graph_metric_options(grouped_series, selected_metric) do
+    values = Enum.map(grouped_series, fn {metric_name, _labels_list} -> metric_name end)
     select_options("metric_name", selected_metric, values)
   end
 
-  defp graph_series_options(series, metric_name, selected_labels) do
-    selected_value = selected_graph_series_value(series, metric_name, selected_labels)
+  defp series_for_metric(grouped_series, metric_name) do
+    case List.keyfind(grouped_series, metric_name, 0) do
+      {_name, labels_list} -> labels_list
+      nil -> []
+    end
+  end
+
+  defp graph_series_options(grouped_series, metric_name, selected_labels) do
+    labels_list = series_for_metric(grouped_series, metric_name)
+
+    selected_value =
+      Enum.find_value(labels_list, fn labels ->
+        if series_matches_labels?(labels, selected_labels), do: encode_graph_series(labels)
+      end)
 
     options =
-      series
-      |> Enum.filter(fn {name, _labels} -> name == metric_name end)
-      |> Enum.map(fn {_name, labels} ->
+      labels_list
+      |> Enum.map(fn labels ->
         encoded = encode_graph_series(labels)
         {encoded, format_series_labels(labels), encoded == selected_value}
       end)
@@ -1318,22 +1344,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
     [{"", "Any series", selected_value in [nil, ""]} | options]
   end
 
-  defp selected_graph_series_value(series, metric_name, selected_labels) do
-    Enum.find_value(series, fn
-      {^metric_name, labels} ->
-        if series_matches_labels?(labels, selected_labels),
-          do: encode_graph_series(labels),
-          else: nil
-
-      _ ->
-        nil
-    end)
-  end
-
-  defp matching_graph_series(series, metric_name, selected_labels) do
-    Enum.filter(series, fn {name, labels} ->
-      name == metric_name and series_matches_labels?(labels, selected_labels)
-    end)
+  defp matching_graph_series(grouped_series, metric_name, selected_labels) do
+    grouped_series
+    |> series_for_metric(metric_name)
+    |> Enum.filter(&series_matches_labels?(&1, selected_labels))
+    |> Enum.map(&{metric_name, &1})
   end
 
   defp format_series_labels(labels) when is_map(labels) do
@@ -1580,7 +1595,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       :select ->
         {:noreply,
-         assign(socket, selected_ids: MapSet.new(), available_series: [], stream_popover: nil)}
+         socket
+         |> assign(selected_ids: MapSet.new(), stream_popover: nil)
+         |> reset_available_series()}
     end
   end
 
@@ -1726,28 +1743,41 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_event("ta:open", %{"ta_id" => id}, socket) do
-    {:noreply, assign(socket, ta_open: id, ta_filter: "")}
+    {shown, more} = ta_fetch(socket, id, "")
+    {:noreply, assign(socket, ta_open: id, ta_filter: "", ta_suggestions: shown, ta_more: more)}
   end
 
   def handle_event("ta:close", _params, socket) do
-    {:noreply, assign(socket, ta_open: nil, ta_filter: "")}
+    {:noreply, assign(socket, ta_open: nil, ta_filter: "", ta_suggestions: [], ta_more: 0)}
   end
 
   def handle_event("ta:filter", %{"ta_id" => id, "key" => "Enter"} = params, socket) do
     filter = params["value"] || socket.assigns.ta_filter
 
-    case ta_suggestions(ta_raw_options(socket, id), filter) do
+    case ta_fetch(socket, id, filter) do
       {[first | _], _} -> ta_apply(socket, id, first)
       _ -> {:noreply, socket}
     end
   end
 
   def handle_event("ta:filter", %{"ta_id" => id, "value" => value}, socket) do
-    {:noreply, assign(socket, ta_open: id, ta_filter: value)}
+    {shown, more} = ta_fetch(socket, id, value)
+
+    {:noreply,
+     assign(socket, ta_open: id, ta_filter: value, ta_suggestions: shown, ta_more: more)}
   end
 
   def handle_event("ta:select", %{"ta_id" => id, "value" => value}, socket) do
     ta_apply(socket, id, value)
+  end
+
+  def handle_event("series:filter", params, socket) do
+    filter = params["value"] || ""
+
+    case sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas) do
+      %Element{id: id} -> {:noreply, fetch_series_for_selected(socket, id, filter)}
+      _ -> {:noreply, socket}
+    end
   end
 
   def handle_event("toggle_grid", _params, socket) do
@@ -1845,12 +1875,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("canvas:deselect", _params, socket) do
     {:noreply,
-     assign(socket,
-       selected_ids: MapSet.new(),
-       connect_from: nil,
-       available_series: [],
-       stream_popover: nil
-     )}
+     socket
+     |> assign(selected_ids: MapSet.new(), connect_from: nil, stream_popover: nil)
+     |> reset_available_series()}
   end
 
   def handle_event(
@@ -1990,7 +2017,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
       socket =
         assign(socket, history: history, canvas: history.present, selected_ids: MapSet.new())
         |> resolve_and_assign()
-        |> refresh_variable_options()
 
       {:noreply, socket}
     end)
@@ -2003,7 +2029,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
       socket =
         assign(socket, history: history, canvas: history.present, selected_ids: MapSet.new())
         |> resolve_and_assign()
-        |> refresh_variable_options()
 
       {:noreply, socket}
     end)
@@ -2174,7 +2199,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
         socket =
           socket
           |> push_canvas(canvas)
-          |> refresh_variable_options()
           |> assign(show_add_variable: false)
           |> schedule_autosave()
 
@@ -2194,7 +2218,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
       socket =
         socket
         |> push_canvas(canvas)
-        |> refresh_variable_options()
         |> schedule_autosave()
 
       {:noreply, socket}
@@ -2301,7 +2324,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
             socket =
               assign(socket, history: history, canvas: canvas, selected_ids: MapSet.new())
               |> resolve_and_assign()
-              |> refresh_variable_options()
               |> register_elements()
 
             {:noreply, socket}
@@ -3367,17 +3389,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
     assign(socket, metric_units: units)
   end
 
+  # One bounded probe: the default place-host plus an "any hosts at all?"
+  # flag. Full host lookup happens on demand through the typeahead.
   defp refresh_discovered_hosts(socket) do
-    hosts = StatusManager.list_hosts()
-    first = List.first(hosts)
-    assign(socket, all_hosts: hosts, place_host: first)
-  end
-
-  defp refresh_pin_ifnames(socket) do
-    pin_ifnames =
-      cap_options(StatusManager.list_label_values("ifname", limit: @max_dropdown_options))
-
-    assign(socket, pin_ifnames: pin_ifnames)
+    hosts = StatusManager.list_hosts(limit: 1)
+    assign(socket, hosts_available?: hosts != [], place_host: List.first(hosts))
   end
 
   defp place_host_element(socket, host, x, y) do
@@ -3415,7 +3431,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     socket =
       socket
       |> push_canvas(canvas)
-      |> refresh_variable_options()
       |> assign(selected_ids: MapSet.new([el.id]))
       |> fetch_series_for_selected(el.id)
       |> schedule_autosave()
@@ -3488,23 +3503,38 @@ defmodule TimelessCanvas.Web.CanvasLive do
     ax < bx + bw and ax + aw > bx and ay < by + bh and ay + ah > by
   end
 
-  defp fetch_series_for_selected(socket, element_id) do
+  # Bounded + grouped at the assign boundary: at most @series_limit series
+  # are fetched (optionally metric-name-filtered server-side) and grouped
+  # into [{metric_name, [labels, ...]}] sorted by metric name.
+  defp fetch_series_for_selected(socket, element_id, filter \\ "") do
     case Map.get(socket.assigns.resolved_elements, element_id) do
       %Element{meta: meta} when is_map(meta) ->
         host = meta["host"] || meta["service_name"]
 
         if host && host != "" do
-          # Stopgap cap until available_series is grouped/typeahead-bounded
-          # at the assign boundary (later Phase 1 task).
-          series = StatusManager.list_series_for_host(host, limit: 500)
-          assign(socket, available_series: series)
+          series = StatusManager.list_series_for_host(host, filter: filter, limit: @series_limit)
+
+          grouped =
+            series
+            |> Enum.group_by(fn {name, _labels} -> name end, fn {_name, labels} -> labels end)
+            |> Enum.sort_by(fn {name, _labels_list} -> name end)
+
+          assign(socket,
+            available_series: grouped,
+            series_filter: filter,
+            series_truncated: length(series) >= @series_limit
+          )
         else
-          assign(socket, available_series: [])
+          reset_available_series(socket)
         end
 
       _ ->
-        assign(socket, available_series: [])
+        reset_available_series(socket)
     end
+  end
+
+  defp reset_available_series(socket) do
+    assign(socket, available_series: [], series_filter: "", series_truncated: false)
   end
 
   defp maybe_put(map, _key, nil), do: map

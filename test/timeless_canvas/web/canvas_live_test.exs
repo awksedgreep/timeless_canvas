@@ -116,6 +116,145 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
     end
   end
 
+  describe "bounded host discovery" do
+    test "a 1000-host universe never reaches the client wholesale", %{conn: conn, user: user} do
+      hosts = for i <- 1..1000, do: "host-" <> String.pad_leading(Integer.to_string(i), 4, "0")
+      FakeDataSource.put(:list_hosts, hosts)
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
+
+      # Closed typeahead: only the bounded default (first host) appears as
+      # the input placeholder; the rest of the universe is absent.
+      assert html =~ "host-0001"
+      refute html =~ "host-0100"
+      refute html =~ "host-1000"
+
+      # Opening runs one bounded query: exactly the cap of 50 suggestions
+      # plus a truncation hint, never the full list.
+      html = view |> element(~s{input[name="ta_search"]}) |> render_focus()
+
+      assert html =~ "host-0050"
+      refute html =~ "host-0051"
+      assert html =~ "keep typing to narrow"
+      assert count_occurrences(html, ~s(phx-click="ta:select")) == 50
+    end
+
+    test "ta:filter narrows via a bounded server-side query and pick still works", %{
+      conn: conn,
+      user: user
+    } do
+      hosts = for i <- 1..1000, do: "host-" <> String.pad_leading(Integer.to_string(i), 4, "0")
+      FakeDataSource.put(:list_hosts, hosts)
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
+      view |> element(~s{input[name="ta_search"]}) |> render_focus()
+
+      html =
+        view
+        |> element(~s{input[name="ta_search"]})
+        |> render_keyup(%{"value" => "host-0777"})
+
+      assert count_occurrences(html, ~s(phx-click="ta:select")) == 1
+      assert html =~ "host-0777"
+      refute html =~ "host-0002"
+      refute html =~ "keep typing to narrow"
+
+      # Selecting a suggestion goes through the existing pick flow
+      html = view |> element(~s{button[phx-value-value="host-0777"]}) |> render_click()
+
+      assert html =~ ~s(placeholder="host-0777")
+      refute html =~ ~s(phx-click="ta:select")
+    end
+  end
+
+  describe "bounded series discovery" do
+    test "series UI is grouped by metric, capped, hinted, and filterable", %{
+      conn: conn,
+      user: user
+    } do
+      # 240 programmed series across 3 metrics; the 200 cap keeps
+      # alpha(80) + beta(80) + gamma(40).
+      series =
+        for metric <- ["alpha_metric", "beta_metric", "gamma_metric"],
+            i <- 1..80,
+            do: {metric, %{"idx" => "#{i}"}}
+
+      FakeDataSource.put(:list_series_for_host, series)
+
+      {data, el} =
+        canvas_with_element(%{
+          x: 100.0,
+          y: 100.0,
+          label: "web-1",
+          type: :server,
+          meta: %{"host" => "web-1"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = render_hook(view, "element:select", %{"id" => el.id})
+
+      # Grouped: one Add Elements button per metric, not one per series
+      assert count_occurrences(html, ~s(phx-click="place_series_graph")) == 3
+      assert html =~ "alpha_metric"
+      assert html =~ "gamma_metric"
+      assert html =~ "showing first 200 series"
+
+      # series:filter re-runs the bounded query with the typed filter
+      html =
+        view
+        |> element(~s{input[name="series_filter"]})
+        |> render_keyup(%{"value" => "beta"})
+
+      assert count_occurrences(html, ~s(phx-click="place_series_graph")) == 1
+      assert html =~ "beta_metric"
+      refute html =~ "alpha_metric"
+      refute html =~ "showing first 200 series"
+    end
+
+    test "graph series options and matching list come from the grouped structure", %{
+      conn: conn,
+      user: user
+    } do
+      FakeDataSource.put(:list_series_for_host, [
+        {"cpu_usage", %{"core" => "0", "host" => "web-1"}},
+        {"cpu_usage", %{"core" => "1", "host" => "web-1"}},
+        {"mem_usage", %{"kind" => "rss", "host" => "web-1"}}
+      ])
+
+      {data, el} =
+        canvas_with_element(%{
+          x: 100.0,
+          y: 100.0,
+          label: "cpu graph",
+          type: :graph,
+          meta: %{"host" => "web-1", "metric_name" => "cpu_usage"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = render_hook(view, "element:select", %{"id" => el.id})
+
+      assert html =~ "Matching Series"
+      assert html =~ "Any series"
+      assert html =~ "core=0"
+      assert html =~ "core=1"
+      assert html =~ "mem_usage"
+      refute html =~ "showing first 200 series"
+    end
+  end
+
+  defp count_occurrences(html, needle) do
+    length(String.split(html, needle)) - 1
+  end
+
   describe "element placement" do
     test "placing a rect via canvas:click adds it to the rendered SVG", %{
       conn: conn,

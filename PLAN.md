@@ -36,10 +36,14 @@ Status legend: `[x]` done · `[ ]` pending
       serialized through one GenServer — `manager.ex:186-206`)
 - [ ] Batch host status checks into one grouped logs query per tick
       (today: up to 2 log queries per host element per tick — `ui_data_source.ex:309-336`)
-- [ ] Cap `available_series` at the assign boundary + group by metric + typeahead
-      (uncapped at `canvas_live.ex:3487-3502`, rendered element-per-series 3×)
-- [ ] Remove `all_hosts` / per-variable option universes from socket assigns;
-      route `ta:filter` to bounded server-side queries (`canvas_live.ex:121,1246-1263`)
+- [x] Cap `available_series` at the assign boundary (limit 200 + server-side
+      filter via new `series:filter` event) + group by metric name; grouped
+      shape renders one Add-Elements button per metric with a
+      "showing first N — refine filter" hint when truncated
+- [x] Remove `all_hosts` / per-variable option universes from socket assigns;
+      `ta:open` / `ta:filter` now run bounded server-side queries (≤50
+      suggestions in a `ta_suggestions` assign); dead `pin_hosts` /
+      `pin_ifnames` / `place_pins` assigns dropped
 - [ ] Async mount: data loading behind `connected?/1` + `start_async`, skeleton
       states (today mount runs 4-8 full scans synchronously before first paint)
 
