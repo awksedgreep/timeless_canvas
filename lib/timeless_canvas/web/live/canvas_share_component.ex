@@ -65,6 +65,7 @@ defmodule TimelessCanvas.Web.CanvasShareComponent do
           phx-click="revoke"
           phx-value-user-id={access.user_id}
           phx-target={@myself}
+          data-confirm={"Remove #{access.user.username}'s access to this canvas?"}
           class="btn btn-xs btn-error btn-outline"
         >
           Remove

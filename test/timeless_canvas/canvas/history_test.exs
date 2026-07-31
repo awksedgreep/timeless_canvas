@@ -97,6 +97,48 @@ defmodule TimelessCanvas.Canvas.HistoryTest do
     assert history.past == [canvas(9), canvas(8), canvas(7)]
   end
 
+  test "replace_top/2 swaps the present without touching the past" do
+    history =
+      History.new(canvas(1))
+      |> History.push(canvas(2))
+      |> History.replace_top(canvas(3))
+
+    assert history.present == canvas(3)
+    assert history.past == [canvas(1)]
+  end
+
+  test "replace_top/2 then undo skips the replaced snapshot" do
+    history =
+      History.new(canvas(1))
+      |> History.push(canvas(2))
+      |> History.replace_top(canvas(3))
+      |> History.undo()
+
+    # One undo returns to the pre-burst state, not the coalesced middle one
+    assert history.present == canvas(1)
+    assert history.future == [canvas(3)]
+  end
+
+  test "replace_top/2 clears the redo stack like push/2" do
+    history =
+      History.new(canvas(1))
+      |> History.push(canvas(2))
+      |> History.undo()
+      |> History.replace_top(canvas(3))
+
+    assert history.present == canvas(3)
+    assert history.future == []
+    refute History.can_redo?(history)
+  end
+
+  test "replace_top/2 on a fresh history only replaces the present" do
+    history = History.new(canvas(1)) |> History.replace_top(canvas(2))
+
+    assert history.present == canvas(2)
+    assert history.past == []
+    refute History.can_undo?(history)
+  end
+
   test "multiple undos walk back through history in order" do
     history =
       History.new(canvas(1))

@@ -21,6 +21,10 @@ const CanvasHook = {
     this.marqueeRect = null; // SVG rect for marquee selection
     this._lastClickId = null; // track element clicks for dblclick detection
     this._lastClickTime = 0;
+    this._pendingResize = null; // committed resize awaiting the server patch
+    // Read-only gate: viewers must not get optimistic drag/resize visuals
+    // (the server would silently deny the commit and the ghost would stick).
+    this.canEdit = this.svg.dataset.canEdit !== "false";
 
     // JS fallback for browsers without :has() support — CSS also targets
     // body.tc-canvas-open to suppress page scrollbars.
@@ -93,10 +97,11 @@ const CanvasHook = {
 
     this._zoomDebounce = null;
 
-    // Space key state for pan override
+    // Space key state for pan override. Same focus exemption as the
+    // shortcut handler: a focused button must still activate on Space.
     this._spaceHeld = false;
     this._onSpaceDown = (e) => {
-      if (e.code === "Space" && !e.target.matches("input, textarea, select")) {
+      if (e.code === "Space" && !this.keyboardExempt(e)) {
         e.preventDefault();
         this._spaceHeld = true;
         this.svg.style.cursor = "grab";
@@ -147,6 +152,11 @@ const CanvasHook = {
     this.graphCache = new Map();
     this.handleEvent("graph:data", (payload) => this.applyGraphData(payload));
     this.handleEvent("graph:expanded", (payload) => this.applyGraphData(payload));
+
+    // Server denied an optimistic move/resize (require_edit): clear any
+    // lingering client-side transform/size for that element — no patch
+    // with authoritative coordinates is coming.
+    this.handleEvent("canvas:reset-element", ({ id }) => this.resetElement(id));
   },
 
   reconnected() {
@@ -156,6 +166,10 @@ const CanvasHook = {
   },
 
   updated() {
+    // can_edit can change while mounted (e.g. access revoked mid-session).
+    this.canEdit = this.svg.dataset.canEdit !== "false";
+    // A patch carries authoritative geometry; a committed resize is settled.
+    this._pendingResize = null;
     // Drop cached graph data for elements no longer in the DOM.
     if (this.graphCache) {
       for (const id of Array.from(this.graphCache.keys())) {
@@ -293,6 +307,12 @@ const CanvasHook = {
 
   onPointerDown(e) {
     if (e.button !== 0 && e.button !== 1) return; // left or middle button
+    // The SVG carries tabindex="-1": focusing it on interaction moves focus
+    // off toolbar buttons / the timeline track so canvas keyboard shortcuts
+    // apply again naturally.
+    if (typeof this.svg.focus === "function") {
+      this.svg.focus({ preventScroll: true });
+    }
     try {
       this.svg.setPointerCapture(e.pointerId);
     } catch (_err) {
@@ -310,8 +330,9 @@ const CanvasHook = {
       return;
     }
 
-    // Check if clicking a resize handle
-    const handle = e.target.closest("[data-handle]");
+    // Check if clicking a resize handle (viewers fall through to the
+    // element branch, where the press becomes a plain click/select)
+    const handle = this.canEdit && e.target.closest("[data-handle]");
     if (handle) {
       const elGroup = handle.closest("[data-element-id]");
       const id = elGroup?.dataset.elementId;
@@ -385,9 +406,12 @@ const CanvasHook = {
           ? selectedGroups.map((g) => g.dataset.elementId)
           : [id];
       // Move dragged elements to end of SVG so they render on top
-      for (const gid of groupIds) {
-        const g = this.svg.querySelector(`[data-element-id="${gid}"]`);
-        if (g) g.parentNode.appendChild(g);
+      // (skip for viewers: their press is only ever a click/select)
+      if (this.canEdit) {
+        for (const gid of groupIds) {
+          const g = this.svg.querySelector(`[data-element-id="${gid}"]`);
+          if (g) g.parentNode.appendChild(g);
+        }
       }
       const svgStart = this.clientToSvg(e.clientX, e.clientY, this._dragCtx.ctmInv);
       this.dragging = {
@@ -399,6 +423,7 @@ const CanvasHook = {
         totalDy: 0,
         svgStart,
         shiftKey: e.shiftKey,
+        viewOnly: !this.canEdit,
       };
       return;
     }
@@ -457,8 +482,8 @@ const CanvasHook = {
       // so don't force a layout re-read on the next pan delta.
       if (this._dragCtx) this._dragCtx.stale = false;
     } else if (this.dragging.type === "element") {
-      // Don't drag elements in connect mode
-      if (this.getMode() !== "connect") {
+      // Don't drag elements in connect mode or as a read-only viewer
+      if (this.getMode() !== "connect" && !this.dragging.viewOnly) {
         // Compute total delta from absolute SVG positions (no accumulation drift)
         const svgNow = this.clientToSvg(
           e.clientX,
@@ -574,7 +599,7 @@ const CanvasHook = {
             this.pushEvent("element:select", { id });
           }
         }
-      } else if (this.getMode() !== "connect") {
+      } else if (this.getMode() !== "connect" && !this.dragging.viewOnly) {
         // Keep transform until server patches with new coordinates
         this._pendingDrop = { ids: this.dragging.groupIds };
         this.pushEvent("element:move", {
@@ -589,6 +614,15 @@ const CanvasHook = {
         }
       }
     } else if (this.dragging.type === "handle") {
+      // Remember the pre-resize state until the server patch lands; a
+      // require_edit denial answers with "canvas:reset-element" instead
+      // of a patch, and this is what lets us restore the visuals.
+      this._pendingResize = {
+        id: this.dragging.id,
+        origWidth: this.dragging.origWidth,
+        origHeight: this.dragging.origHeight,
+        _iconOrig: this.dragging._iconOrig,
+      };
       this.pushEvent("element:resize", {
         id: this.dragging.id,
         width: Math.max(this.dragging.startWidth, 20),
@@ -634,6 +668,28 @@ const CanvasHook = {
     }
 
     this._resetDragState();
+  },
+
+  // Server-pushed cleanup after a denied optimistic move/resize: reuses
+  // the abortDrag cleanup paths (transform removal / resizeElementVisual
+  // restore) but runs after the drag already committed client-side.
+  resetElement(id) {
+    if (this._pendingDrop && this._pendingDrop.ids.includes(id)) {
+      for (const gid of this._pendingDrop.ids) {
+        const g = this.svg.querySelector(`[data-element-id="${gid}"]`);
+        if (g) g.removeAttribute("transform");
+      }
+      this._pendingDrop = null;
+    } else {
+      const g = this.svg.querySelector(`[data-element-id="${id}"]`);
+      if (g) g.removeAttribute("transform");
+    }
+
+    if (this._pendingResize && this._pendingResize.id === id) {
+      const pending = this._pendingResize;
+      this._pendingResize = null;
+      this.resizeElementVisual(id, pending.origWidth, pending.origHeight, pending);
+    }
   },
 
   _resetDragState() {
@@ -726,44 +782,71 @@ const CanvasHook = {
 
   // --- Keyboard Shortcuts ---
 
+  // Canvas shortcuts must not fire while another interactive control owns
+  // the keyboard: inputs, buttons, contenteditable regions, and anything
+  // focusable via tabindex (the timeline track is a tabindex="0" div with
+  // its own arrow-key handling — Backspace there must not delete the
+  // canvas selection). The canvas SVG itself carries tabindex="-1" so it
+  // can take focus on pointerdown; it is explicitly NOT exempt.
+  keyboardExempt(e) {
+    const target = e.target;
+    if (!(target instanceof Element) || target === this.svg) return false;
+    const owner = target.closest(
+      "input, textarea, select, button, [contenteditable], [tabindex]",
+    );
+    return !!owner && owner !== this.svg;
+  },
+
+  // Ctrl+C/X only make sense with a canvas element selection; without one
+  // (or with page text selected) the browser's own copy must win.
+  hasElementSelection() {
+    return !!this.svg.querySelector(".canvas-element--selected[data-element-id]");
+  },
+
+  textSelectionCollapsed() {
+    const sel = window.getSelection();
+    return !sel || sel.isCollapsed;
+  },
+
+  nudgeAmount(shiftKey) {
+    // Arrow = fine 1px nudge; Shift+Arrow = one grid step (large)
+    return shiftKey ? parseInt(this.svg.dataset.gridSize) || 20 : 1;
+  },
+
   onKeyDown(e) {
-    // Don't intercept if typing in an input/textarea/select
-    if (
-      e.target.tagName === "INPUT" ||
-      e.target.tagName === "TEXTAREA" ||
-      e.target.tagName === "SELECT"
-    ) {
-      return;
-    }
+    if (this.keyboardExempt(e)) return;
 
     const ctrl = e.ctrlKey || e.metaKey;
 
     if (e.key === "Delete" || e.key === "Backspace") {
+      if (!this.canEdit) return;
       e.preventDefault();
       this.pushEvent("delete_selected", {});
     } else if (e.key === "Escape") {
       e.preventDefault();
-      this.pushEvent("canvas:deselect", {});
+      // The server cascades: share overlay → stream popover → typeahead
+      // dropdown → exit place/connect mode → deselect.
+      this.pushEvent("canvas:escape", {});
       this.removeTempLine();
     } else if (e.key === "a" && ctrl) {
       e.preventDefault();
       this.pushEvent("select_all", {});
     } else if (e.key === "ArrowUp") {
+      if (!this.canEdit) return;
       e.preventDefault();
-      const amount = e.shiftKey ? -1 : -(parseInt(this.svg.dataset.gridSize) || 20);
-      this.pushEvent("element:nudge", { dx: 0, dy: amount });
+      this.pushEvent("element:nudge", { dx: 0, dy: -this.nudgeAmount(e.shiftKey) });
     } else if (e.key === "ArrowDown") {
+      if (!this.canEdit) return;
       e.preventDefault();
-      const amount = e.shiftKey ? 1 : parseInt(this.svg.dataset.gridSize) || 20;
-      this.pushEvent("element:nudge", { dx: 0, dy: amount });
+      this.pushEvent("element:nudge", { dx: 0, dy: this.nudgeAmount(e.shiftKey) });
     } else if (e.key === "ArrowLeft") {
+      if (!this.canEdit) return;
       e.preventDefault();
-      const amount = e.shiftKey ? -1 : -(parseInt(this.svg.dataset.gridSize) || 20);
-      this.pushEvent("element:nudge", { dx: amount, dy: 0 });
+      this.pushEvent("element:nudge", { dx: -this.nudgeAmount(e.shiftKey), dy: 0 });
     } else if (e.key === "ArrowRight") {
+      if (!this.canEdit) return;
       e.preventDefault();
-      const amount = e.shiftKey ? 1 : parseInt(this.svg.dataset.gridSize) || 20;
-      this.pushEvent("element:nudge", { dx: amount, dy: 0 });
+      this.pushEvent("element:nudge", { dx: this.nudgeAmount(e.shiftKey), dy: 0 });
     } else if ((e.key === "+" || e.key === "=") && !ctrl) {
       e.preventDefault();
       this.zoomByFactor(0.97);
@@ -780,14 +863,22 @@ const CanvasHook = {
       e.preventDefault();
       this.pushEvent("canvas:undo", {});
     } else if (e.key === "c" && ctrl) {
-      e.preventDefault();
-      this.pushEvent("canvas:copy", {});
+      // Only hijack copy when a canvas element is selected and no page
+      // text is selected (copying log/trace text must keep working).
+      if (this.hasElementSelection() && this.textSelectionCollapsed()) {
+        e.preventDefault();
+        this.pushEvent("canvas:copy", {});
+      }
     } else if (e.key === "x" && ctrl) {
-      e.preventDefault();
-      this.pushEvent("canvas:cut", {});
+      if (this.canEdit && this.hasElementSelection() && this.textSelectionCollapsed()) {
+        e.preventDefault();
+        this.pushEvent("canvas:cut", {});
+      }
     } else if (e.key === "v" && ctrl) {
-      e.preventDefault();
-      this.pushEvent("canvas:paste", {});
+      if (this.canEdit && this.textSelectionCollapsed()) {
+        e.preventDefault();
+        this.pushEvent("canvas:paste", {});
+      }
     } else if (e.key === "s" && ctrl) {
       e.preventDefault();
       this.pushEvent("canvas:save", {});
@@ -1342,7 +1433,10 @@ const CanvasHook = {
     }
   },
 
-  resizeElementVisual(id, width, height) {
+  // `state` carries {origWidth, origHeight, _iconOrig}: the active drag by
+  // default, or a saved _pendingResize snapshot when restoring a denied
+  // resize after the drag state is already gone.
+  resizeElementVisual(id, width, height, state = this.dragging) {
     const group = this.svg.querySelector(`[data-element-id="${id}"]`);
     if (!group) return;
 
@@ -1436,14 +1530,14 @@ const CanvasHook = {
 
     // Icon (transform-based, positioned relative to element center)
     const icon = group.querySelector(".canvas-element__icon");
-    if (icon) {
-      // Save original icon transform in this.dragging (survives DOM patches)
-      if (!this.dragging._iconOrig) {
+    if (icon && state) {
+      // Save original icon transform in the drag state (survives DOM patches)
+      if (!state._iconOrig) {
         const t = icon.getAttribute("transform");
         if (t) {
           const m = t.match(/translate\(\s*([^,)]+)[,\s]+([^)]+)\)(.*)/);
           if (m) {
-            this.dragging._iconOrig = {
+            state._iconOrig = {
               tx: parseFloat(m[1]),
               ty: parseFloat(m[2]),
               rest: m[3] || "",
@@ -1451,11 +1545,11 @@ const CanvasHook = {
           }
         }
       }
-      if (this.dragging._iconOrig) {
-        const orig = this.dragging._iconOrig;
+      if (state._iconOrig) {
+        const orig = state._iconOrig;
         // Shift icon center by half the size delta
-        const dCx = (width - this.dragging.origWidth) / 2;
-        const dCy = (height - this.dragging.origHeight) / 2;
+        const dCx = (width - state.origWidth) / 2;
+        const dCy = (height - state.origHeight) / 2;
         icon.setAttribute(
           "transform",
           `translate(${orig.tx + dCx}, ${orig.ty + dCy})${orig.rest}`,

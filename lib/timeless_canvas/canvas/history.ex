@@ -36,6 +36,19 @@ defmodule TimelessCanvas.Canvas.History do
   end
 
   @doc """
+  Replace the present state without pushing the old present into the past.
+  Clears the future like `push/2` (no redo after a new action).
+
+  Used to coalesce rapid successive edits (e.g. per-keystroke property
+  updates) into one undo step: the first edit of a burst is `push/2`ed,
+  the rest `replace_top/2` it, so a single undo returns to the state
+  before the burst.
+  """
+  def replace_top(%__MODULE__{} = history, %Canvas{} = canvas) do
+    %{history | present: canvas, future: []}
+  end
+
+  @doc """
   Undo: move present to future, pop past to present.
   Returns unchanged history if nothing to undo.
   """

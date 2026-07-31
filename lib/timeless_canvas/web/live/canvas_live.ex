@@ -124,6 +124,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
           can_edit: can_edit,
           is_owner: is_owner,
           show_share: false,
+          show_view_only_toast: false,
+          view_only_notice_shown: false,
+          last_history_op: nil,
           renaming: false,
           page_title: record.name,
           breadcrumbs: breadcrumbs,
@@ -251,6 +254,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
             value={@canvas_name}
             class="canvas-toolbar__name-input"
             autofocus
+            phx-debounce="300"
             phx-key="Escape"
             phx-keydown="cancel_rename"
           />
@@ -492,6 +496,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
         </form>
       </div>
 
+      <div
+        :if={@show_view_only_toast}
+        class="canvas-view-only-toast"
+        role="status"
+        title="Dismiss"
+        phx-click="view_only_toast:dismiss"
+      >
+        View-only canvas
+      </div>
+
       <div :if={@show_share && @is_owner} class="canvas-share-overlay">
         <.live_component
           module={TimelessCanvas.Web.CanvasShareComponent}
@@ -505,9 +519,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
         phx-hook="Canvas"
         viewBox={ViewBox.to_string(@canvas.view_box)}
         class="canvas-svg"
+        tabindex="-1"
         data-mode={@mode}
         data-connect-from={@connect_from}
         data-grid-size={@canvas.grid_size}
+        data-can-edit={to_string(@can_edit && !@decode_failed?)}
       >
         <defs>
           <pattern
@@ -647,8 +663,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
     {"Ctrl+A", "Select all"},
     {"Ctrl+S", "Save"},
     {"Backspace", "Delete"},
-    {"Arrows", "Nudge"},
-    {"Shift+Arrow", "Nudge 1px"},
+    {"Arrows", "Nudge 1px"},
+    {"Shift+Arrow", "Nudge grid step"},
     {"+ / -", "Zoom"},
     {"Space+Drag", "Pan"},
     {"Alt+Drag", "Pan"},
@@ -737,7 +753,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         <input type="hidden" name="element_id" value={@selected.id} />
         <div class="properties-panel__field">
           <label>Label</label>
-          <input type="text" name="label" value={@selected.label} />
+          <input type="text" name="label" value={@selected.label} phx-debounce="300" />
         </div>
         <div class="properties-panel__field">
           <label>Type</label>
@@ -749,26 +765,40 @@ defmodule TimelessCanvas.Web.CanvasLive do
         </div>
         <div class="properties-panel__field">
           <label>Color</label>
-          <input type="color" name="color" value={@selected.color} />
+          <input type="color" name="color" value={@selected.color} phx-debounce="300" />
         </div>
         <div class="properties-panel__row">
           <div class="properties-panel__field">
             <label>X</label>
-            <input type="number" name="x" value={round(@selected.x)} step="1" />
+            <input type="number" name="x" value={round(@selected.x)} step="1" phx-debounce="300" />
           </div>
           <div class="properties-panel__field">
             <label>Y</label>
-            <input type="number" name="y" value={round(@selected.y)} step="1" />
+            <input type="number" name="y" value={round(@selected.y)} step="1" phx-debounce="300" />
           </div>
         </div>
         <div class="properties-panel__row">
           <div class="properties-panel__field">
             <label>Width</label>
-            <input type="number" name="width" value={round(@selected.width)} step="1" min="20" />
+            <input
+              type="number"
+              name="width"
+              value={round(@selected.width)}
+              step="1"
+              min="20"
+              phx-debounce="300"
+            />
           </div>
           <div class="properties-panel__field">
             <label>Height</label>
-            <input type="number" name="height" value={round(@selected.height)} step="1" min="20" />
+            <input
+              type="number"
+              name="height"
+              value={round(@selected.height)}
+              step="1"
+              min="20"
+              phx-debounce="300"
+            />
           </div>
         </div>
       </form>
@@ -851,6 +881,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
               type="text"
               name={field}
               value={@selected.meta[field] || ""}
+              phx-debounce="300"
             />
           </div>
         </form>
@@ -919,7 +950,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         <input type="hidden" name="conn_id" value={@selected.id} />
         <div class="properties-panel__field">
           <label>Label</label>
-          <input type="text" name="label" value={@selected.label} />
+          <input type="text" name="label" value={@selected.label} phx-debounce="300" />
         </div>
         <div class="properties-panel__field">
           <label>Color</label>
@@ -1278,14 +1309,41 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   # --- Helpers ---
 
-  defp push_canvas(socket, %Canvas{} = canvas) do
-    history = History.push(socket.assigns.history, canvas)
+  # Rapid successive edits of the same field on the same object (per-
+  # keystroke/per-debounce property updates) coalesce into one undo step:
+  # within this window, a repeat of the same op key replaces the top
+  # history snapshot instead of appending a new one.
+  @history_coalesce_ms 2_000
 
-    assign(socket, history: history, canvas: history.present)
+  defp push_canvas(socket, canvas, op_key \\ nil)
+
+  defp push_canvas(socket, %Canvas{} = canvas, op_key) do
+    now = System.monotonic_time(:millisecond)
+
+    history =
+      case {op_key, socket.assigns.last_history_op} do
+        {key, {key, ts}} when not is_nil(key) and now - ts < @history_coalesce_ms ->
+          History.replace_top(socket.assigns.history, canvas)
+
+        _ ->
+          History.push(socket.assigns.history, canvas)
+      end
+
+    assign(socket,
+      history: history,
+      canvas: history.present,
+      last_history_op: op_key && {op_key, now}
+    )
     |> resolve_and_assign()
     |> register_elements()
     |> push_graph_data()
   end
+
+  # Coalescible ops carry {event, object-id, changed-field}; only real
+  # form change events have a `_target`, so typeahead picks and other
+  # programmatic updates never coalesce.
+  defp coalesce_key(event, id, %{"_target" => target}), do: {event, id, target}
+  defp coalesce_key(_event, _id, _params), do: nil
 
   defp update_canvas(socket, %Canvas{} = canvas) do
     history = %{socket.assigns.history | present: canvas}
@@ -1879,30 +1937,38 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_event("element:move", %{"id" => id, "dx" => dx, "dy" => dy}, socket) do
-    require_edit(socket, fn ->
-      selected_ids = socket.assigns.selected_ids
+    require_edit(
+      socket,
+      fn ->
+        selected_ids = socket.assigns.selected_ids
 
-      canvas =
-        if MapSet.member?(selected_ids, id) and MapSet.size(selected_ids) > 1 do
-          Canvas.move_elements(
-            socket.assigns.canvas,
-            MapSet.to_list(selected_ids),
-            dx / 1.0,
-            dy / 1.0
-          )
-        else
-          Canvas.move_element(socket.assigns.canvas, id, dx / 1.0, dy / 1.0)
-        end
+        canvas =
+          if MapSet.member?(selected_ids, id) and MapSet.size(selected_ids) > 1 do
+            Canvas.move_elements(
+              socket.assigns.canvas,
+              MapSet.to_list(selected_ids),
+              dx / 1.0,
+              dy / 1.0
+            )
+          else
+            Canvas.move_element(socket.assigns.canvas, id, dx / 1.0, dy / 1.0)
+          end
 
-      {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
-    end)
+        {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
+      end,
+      reset_element_id: id
+    )
   end
 
   def handle_event("element:resize", %{"id" => id, "width" => width, "height" => height}, socket) do
-    require_edit(socket, fn ->
-      canvas = Canvas.resize_element(socket.assigns.canvas, id, width / 1.0, height / 1.0)
-      {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
-    end)
+    require_edit(
+      socket,
+      fn ->
+        canvas = Canvas.resize_element(socket.assigns.canvas, id, width / 1.0, height / 1.0)
+        {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
+      end,
+      reset_element_id: id
+    )
   end
 
   def handle_event("element:nudge", %{"dx" => dx, "dy" => dy}, socket) do
@@ -2075,6 +2141,33 @@ defmodule TimelessCanvas.Web.CanvasLive do
      |> reset_available_series()}
   end
 
+  # Escape cascade: the client sends one generic "canvas:escape" and the
+  # server closes the topmost transient UI first — share overlay, then
+  # stream popover, then typeahead dropdown, then place/connect mode back
+  # to select — and only deselects when none of those are open.
+  def handle_event("canvas:escape", _params, socket) do
+    cond do
+      socket.assigns.show_share ->
+        {:noreply, assign(socket, show_share: false)}
+
+      socket.assigns.stream_popover != nil ->
+        {:noreply, assign(socket, stream_popover: nil)}
+
+      socket.assigns.ta_open != nil ->
+        {:noreply, assign(socket, ta_open: nil, ta_filter: "", ta_suggestions: [], ta_more: 0)}
+
+      socket.assigns.mode != :select ->
+        {:noreply, assign(socket, mode: :select, connect_from: nil)}
+
+      true ->
+        handle_event("canvas:deselect", %{}, socket)
+    end
+  end
+
+  def handle_event("view_only_toast:dismiss", _params, socket) do
+    {:noreply, assign(socket, show_view_only_toast: false)}
+  end
+
   # Rows are resolved by their content-derived entry id (see
   # DataQueries.put_entry_id/1), never by index: a live prepend between
   # the click and the handler shifts every index but leaves ids intact.
@@ -2228,8 +2321,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
     require_edit(socket, fn ->
       history = History.undo(socket.assigns.history)
 
+      # Never coalesce across an undo: a follow-up property edit must get
+      # its own history entry or the undone state would be lost.
       socket =
-        assign(socket, history: history, canvas: history.present, selected_ids: MapSet.new())
+        assign(socket,
+          history: history,
+          canvas: history.present,
+          selected_ids: MapSet.new(),
+          last_history_op: nil
+        )
         |> resolve_and_assign()
         |> register_elements()
         |> push_graph_data()
@@ -2244,7 +2344,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
       history = History.redo(socket.assigns.history)
 
       socket =
-        assign(socket, history: history, canvas: history.present, selected_ids: MapSet.new())
+        assign(socket,
+          history: history,
+          canvas: history.present,
+          selected_ids: MapSet.new(),
+          last_history_op: nil
+        )
         |> resolve_and_assign()
         |> register_elements()
         |> push_graph_data()
@@ -2467,7 +2572,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
         |> maybe_put_atom(:type, params["type"])
 
       canvas = Canvas.update_element(socket.assigns.canvas, id, attrs)
-      {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
+
+      {:noreply,
+       push_canvas(socket, canvas, coalesce_key("property:update_element", id, params))
+       |> schedule_autosave()}
     end)
   end
 
@@ -2509,7 +2617,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
       canvas =
         Canvas.update_element(socket.assigns.canvas, id, %{meta: new_meta, pins: new_pins})
 
-      socket = push_canvas(socket, canvas) |> schedule_autosave()
+      socket =
+        push_canvas(socket, canvas, coalesce_key("property:update_meta", id, params))
+        |> schedule_autosave()
+
       time = socket.assigns.timeline_time || DateTime.utc_now()
 
       case Map.get(socket.assigns.resolved_elements, id) do
@@ -2593,7 +2704,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
             history = History.new(canvas)
 
             socket =
-              assign(socket, history: history, canvas: canvas, selected_ids: MapSet.new())
+              assign(socket,
+                history: history,
+                canvas: canvas,
+                selected_ids: MapSet.new(),
+                last_history_op: nil
+              )
               |> resolve_and_assign()
               |> register_elements()
               |> push_graph_data()
@@ -2853,6 +2969,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  def handle_info(:clear_view_only_toast, socket) do
+    {:noreply, assign(socket, show_view_only_toast: false)}
+  end
+
   def handle_info(:debug_report, socket) do
     counts = socket.assigns.debug_counts
     render_stats = consume_render_stats()
@@ -2975,15 +3095,42 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   # --- Guards ---
 
+  @view_only_toast_ms 4_000
+
   # Denies while decode_failed?: any allowed edit would arm an autosave
   # that overwrites the stored blob we could not read.
-  defp require_edit(socket, fun) do
+  #
+  # Options:
+  #   * `:reset_element_id` — the denied event carried optimistic client
+  #     state (element:move / element:resize); push "canvas:reset-element"
+  #     so the hook clears the lingering transform/size.
+  defp require_edit(socket, fun, opts \\ []) do
     if socket.assigns.can_edit and not socket.assigns.decode_failed? do
       fun.()
     else
+      socket = maybe_view_only_notice(socket)
+
+      socket =
+        case Keyword.get(opts, :reset_element_id) do
+          nil -> socket
+          id -> push_event(socket, "canvas:reset-element", %{id: id})
+        end
+
       {:noreply, socket}
     end
   end
+
+  # First denied edit attempt per session (view-only case only — the
+  # decode-failed hold has its own banner) shows a brief auto-clearing
+  # toast.
+  defp maybe_view_only_notice(
+         %{assigns: %{can_edit: false, view_only_notice_shown: false}} = socket
+       ) do
+    Process.send_after(self(), :clear_view_only_toast, @view_only_toast_ms)
+    assign(socket, show_view_only_toast: true, view_only_notice_shown: true)
+  end
+
+  defp maybe_view_only_notice(socket), do: socket
 
   # --- Private helpers ---
 
@@ -3474,10 +3621,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
     resolved_el = VariableResolver.resolve_element(el, bindings)
     StatusManager.register_elements(socket.assigns.canvas_id, [resolved_el])
 
+    # Placement returns to select mode, matching place_typed_element.
+    # (Multi-place via shift-click would need the click event to carry the
+    # modifier — canvas:click only sends coordinates today, so consistency
+    # wins over multi-place.)
     socket =
       socket
       |> push_canvas(canvas)
-      |> assign(selected_ids: MapSet.new([el.id]))
+      |> assign(selected_ids: MapSet.new([el.id]), mode: :select)
       |> fetch_series_for_selected(el.id)
       |> schedule_autosave()
 

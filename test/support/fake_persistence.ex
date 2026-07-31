@@ -178,13 +178,17 @@ defmodule TimelessCanvas.Test.FakePersistence do
 
   @impl true
   def grant_access(canvas_id, user_id, role) do
-    entry = %{canvas_id: canvas_id, user_id: user_id, role: role, user: %{id: user_id}}
+    Agent.get_and_update(__MODULE__, fn state ->
+      # Use the seeded user when one matches so rendered access rows carry
+      # a real username; otherwise synthesize one.
+      user =
+        Enum.find_value(state.users, fn {_username, user} ->
+          if user.id == user_id, do: user
+        end) || %{id: user_id, username: "user-#{user_id}"}
 
-    Agent.update(__MODULE__, fn state ->
-      %{state | access: Map.put(state.access, {canvas_id, user_id}, entry)}
+      entry = %{canvas_id: canvas_id, user_id: user_id, role: role, user: user}
+      {{:ok, entry}, %{state | access: Map.put(state.access, {canvas_id, user_id}, entry)}}
     end)
-
-    {:ok, entry}
   end
 
   @impl true

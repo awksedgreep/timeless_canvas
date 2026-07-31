@@ -178,19 +178,41 @@ Status legend: `[x]` done · `[ ]` pending
       stored data and start fresh" button. Fresh-canvas shape fixed too:
       `decode(%{})` / `decode(nil)` now return `{:ok, Canvas.new()}` —
       only genuinely malformed data errors
-- [ ] Read-only: `data-can-edit` gates drag/resize in JS; server rejection pushes
-      an explicit reset (today viewers' ghost drags stick visually)
-- [ ] Keyboard scoping: bind shortcuts to the SVG, exempt `[tabindex]`/buttons
-      (today Backspace on the focused timeline deletes the selection); free
-      Ctrl+C/X/V when text is selected; Esc closes overlays/popovers/modes
+- [x] Read-only: `data-can-edit` (false while `decode_failed?` too) gates
+      element drag start, resize start, nudge/delete/cut/paste keys in the
+      hook (clicks/marquee/dblclick-expand stay — selection is view state;
+      read in `mounted()` + `updated()` since access can change);
+      belt-and-braces: a denied `element:move`/`element:resize` pushes
+      "canvas:reset-element" and the hook clears the lingering transform /
+      restores the pre-resize size via the abortDrag cleanup paths; first
+      denied edit per session shows an auto-clearing dismissable
+      "View-only canvas" toast next to the existing badge
+- [x] Keyboard scoping: document keydown (and the Space-pan handler) skip
+      when focus is inside `input/textarea/select/button/[contenteditable]/
+      [tabindex]` (timeline track); the SVG carries `tabindex="-1"` and is
+      focused on pointerdown so shortcuts re-scope to the canvas after
+      interaction; Ctrl+C/X only hijack with a canvas selection and a
+      collapsed text selection (Ctrl+V with collapsed text selection), so
+      copying log text works; Esc sends a generic "canvas:escape" and the
+      server cascades share overlay → stream popover → typeahead → exit
+      place/connect mode → deselect
 - [ ] Distinct error vs empty states per element body
 - [x] Stream popover resolves entries by id, not index (wrong-row race) —
       done as part of Phase 2b's stream-row rework (`stream:entry_click`
       resolves the content-derived entry id from `stream_data`)
 - [ ] "Go Live" button + persistent timestamp readout in historical mode
-- [ ] `phx-debounce` on property-panel inputs + coalesced history entries
-- [ ] Polish: middle-mouse pan, share-revoke confirm, consistent return-to-select
-      after placement, Shift+Arrow = large nudge
+- [x] `phx-debounce="300"` on the properties-panel text/number inputs and
+      the canvas-name rename input; history coalescing: same-op property
+      edits (`{event, element-id, _target}` key) within 2s replace the top
+      snapshot via new `History.replace_top/2` instead of appending (only
+      `property:update_element` / `property:update_meta` form changes;
+      typeahead picks carry no `_target` and never coalesce; undo/redo/load
+      reset the coalesce key so a burst never swallows an undone state)
+- [x] Polish: share-revoke `data-confirm`, host placement returns to select
+      mode like typed elements (multi-place dropped — `canvas:click` carries
+      no modifier state, so consistency won; middle-mouse pan was already
+      done in Phase 3), nudge swapped: Arrow = 1px fine, Shift+Arrow = grid
+      step (legend updated)
 - [ ] Multi-editor minimum: presence indicator + stale-write warning (no merging)
 - [x] Fix registration leak: Manager never unregisters elements on LiveView
       exit. Manager's element registry is now keyed `{canvas_id, element_id}`

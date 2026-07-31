@@ -60,6 +60,12 @@ body.tc-canvas-open {
   cursor: grabbing;
 }
 
+/* The SVG is programmatically focusable (tabindex="-1") so keyboard
+   shortcuts re-scope to the canvas after a pointerdown; no focus ring. */
+.canvas-svg:focus {
+  outline: none;
+}
+
 /* Grid */
 .canvas-grid {
   pointer-events: none;
@@ -476,6 +482,23 @@ body.tc-canvas-open {
 
 .canvas-decode-warning__btn:hover {
   background: rgba(239, 68, 68, 0.3);
+}
+
+/* View-only toast (first denied edit attempt; auto-clears, click dismisses) */
+.canvas-view-only-toast {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 6px 14px;
+  border-radius: 6px;
+  background: rgba(234, 179, 8, 0.15);
+  border: 1px solid rgba(234, 179, 8, 0.4);
+  color: #eab308;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 /* Variable Bar */
