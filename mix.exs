@@ -29,6 +29,7 @@ defmodule TimelessCanvas.MixProject do
   defp deps do
     [
       {:floki, ">= 0.30.0"},
+      {:lazy_html, ">= 0.1.0", only: :test},
       {:iconify_ex, "~> 0.7"},
       {:phoenix, "~> 1.8"},
       {:phoenix_ecto, "~> 4.5"},
