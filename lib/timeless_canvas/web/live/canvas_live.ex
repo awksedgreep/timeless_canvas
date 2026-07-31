@@ -39,6 +39,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
     text_series: "TextSeries"
   }
 
+  # Dropdown option lists must be bounded before they reach the DOM: a
+  # high-cardinality store (50K hosts observed) rendered 50K <option>
+  # nodes per select and morphdom spent 37s applying one patch (INP
+  # 33-46s, tab hung). The current selection is always kept reachable
+  # via select_options' current-value inclusion.
+  @max_dropdown_options 500
+
   @impl true
   def mount(%{"id" => id_str}, _session, socket) do
     current_user = TimelessCanvas.current_user(socket)
@@ -76,9 +83,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       breadcrumbs = persistence().breadcrumb_chain(canvas_id)
 
-      all_hosts = StatusManager.list_hosts()
+      all_hosts = StatusManager.list_hosts(limit: @max_dropdown_options)
       pin_hosts = cap_options(all_hosts)
-      pin_ifnames = cap_options(StatusManager.list_label_values("ifname"))
+
+      pin_ifnames =
+        cap_options(StatusManager.list_label_values("ifname", limit: @max_dropdown_options))
 
       place_pins = %{
         "host" => %{"mode" => "none", "value" => List.first(pin_hosts) || ""},
@@ -1261,13 +1270,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
       end
     end)
   end
-
-  # Dropdown option lists must be bounded before they reach the DOM: a
-  # high-cardinality store (50K hosts observed) rendered 50K <option>
-  # nodes per select and morphdom spent 37s applying one patch (INP
-  # 33-46s, tab hung). The current selection is always kept reachable
-  # via select_options' current-value inclusion.
-  @max_dropdown_options 500
 
   defp cap_options(nil), do: []
   defp cap_options(list) when is_list(list), do: Enum.take(list, @max_dropdown_options)
@@ -3372,7 +3374,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp refresh_pin_ifnames(socket) do
-    pin_ifnames = cap_options(StatusManager.list_label_values("ifname"))
+    pin_ifnames =
+      cap_options(StatusManager.list_label_values("ifname", limit: @max_dropdown_options))
+
     assign(socket, pin_ifnames: pin_ifnames)
   end
 
@@ -3490,7 +3494,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
         host = meta["host"] || meta["service_name"]
 
         if host && host != "" do
-          series = StatusManager.list_series_for_host(host)
+          # Stopgap cap until available_series is grouped/typeahead-bounded
+          # at the assign boundary (later Phase 1 task).
+          series = StatusManager.list_series_for_host(host, limit: 500)
           assign(socket, available_series: series)
         else
           assign(socket, available_series: [])

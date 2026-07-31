@@ -12,9 +12,20 @@ defmodule TimelessCanvas.Test.FakeDataSource do
 
   Canned values are stored in a public ETS table and cleared by `reset/0`
   (done automatically by `TimelessCanvas.ConnCase`).
+
+  Discovery callbacks (`list_hosts/2`, `list_label_values/3`,
+  `list_series_for_host/3`) apply `:filter` / `:limit` opts to the canned
+  list, so tests can program a full list and assert bounding.
+
+  The batch callbacks `statuses/2` and `statuses_at/3` default to mapping
+  each element to the canned `:status` / `:status_at` value; program
+  `:statuses` / `:statuses_at` with a full `%{id => status}` map to
+  override.
   """
 
   @behaviour TimelessCanvas.DataSource
+
+  alias TimelessCanvas.DataSource
 
   @table :timeless_canvas_fake_data_source
 
@@ -82,6 +93,22 @@ defmodule TimelessCanvas.Test.FakeDataSource do
   def status_at(_state, _element, _time), do: get(:status_at, :unknown)
 
   @impl true
+  def statuses(_state, elements) do
+    case get(:statuses, :default) do
+      :default -> Map.new(elements, &{&1.id, get(:status, :unknown)})
+      canned -> canned
+    end
+  end
+
+  @impl true
+  def statuses_at(_state, elements, _time) do
+    case get(:statuses_at, :default) do
+      :default -> Map.new(elements, &{&1.id, get(:status_at, :unknown)})
+      canned -> canned
+    end
+  end
+
+  @impl true
   def time_range(_state) do
     get(:time_range, :default) |> default_time_range()
   end
@@ -99,13 +126,20 @@ defmodule TimelessCanvas.Test.FakeDataSource do
   end
 
   @impl true
-  def list_series_for_host(_state, _host), do: get(:list_series_for_host, [])
+  def list_series_for_host(_state, _host, opts) do
+    get(:list_series_for_host, [])
+    |> DataSource.apply_query_opts(opts, fn {name, _labels} -> name end)
+  end
 
   @impl true
-  def list_hosts(_state), do: get(:list_hosts, [])
+  def list_hosts(_state, opts) do
+    get(:list_hosts, []) |> DataSource.apply_query_opts(opts)
+  end
 
   @impl true
-  def list_label_values(_state, _label_key), do: get(:list_label_values, [])
+  def list_label_values(_state, _label_key, opts) do
+    get(:list_label_values, []) |> DataSource.apply_query_opts(opts)
+  end
 
   @impl true
   def metric_metadata(_state, _metric_name), do: get(:metric_metadata, {:ok, nil})

@@ -9,7 +9,18 @@ defmodule TimelessCanvas.DataSource.Random do
 
   @behaviour TimelessCanvas.DataSource
 
+  alias TimelessCanvas.DataSource
+
   @statuses [:ok, :warning, :error, :unknown]
+
+  @demo_hosts for role <- ~w(web db cache worker), i <- 1..4, do: "#{role}-0#{i}"
+
+  @demo_metrics ~w(cpu_usage memory_usage disk_usage network_rx_bytes network_tx_bytes load_avg)
+
+  @demo_label_values %{
+    "ifname" => ~w(eth0 eth1 lo bond0),
+    "env" => ~w(prod staging dev)
+  }
 
   @impl true
   def init(_config), do: {:ok, %{}}
@@ -73,6 +84,25 @@ defmodule TimelessCanvas.DataSource.Random do
     now = DateTime.utc_now()
     one_hour_ago = DateTime.add(now, -3600, :second)
     {one_hour_ago, now}
+  end
+
+  @impl true
+  def list_hosts(_state, opts) do
+    DataSource.apply_query_opts(@demo_hosts, opts)
+  end
+
+  @impl true
+  def list_label_values(_state, label_key, opts) do
+    @demo_label_values
+    |> Map.get(label_key, [])
+    |> DataSource.apply_query_opts(opts)
+  end
+
+  @impl true
+  def list_series_for_host(_state, host, opts) do
+    @demo_metrics
+    |> Enum.map(&{&1, %{"host" => host}})
+    |> DataSource.apply_query_opts(opts, fn {name, _labels} -> name end)
   end
 
   @impl true

@@ -5,20 +5,31 @@ defmodule TimelessCanvas.DataSource.Manager do
   - Holds the active data source module + its state
   - Polls `status/2` for each tracked element on a configurable interval
   - Broadcasts status changes via `Phoenix.PubSub` on configurable topic
-  - Delegates time-travel queries to the data source
+
+  Read-only queries (`metric_range/5`, `list_hosts/1`, time-travel lookups,
+  etc.) execute in the **caller process**: the Manager publishes the data
+  source module, its state, and the registered-element map to a public ETS
+  table, and the query functions read from that table and call the data
+  source directly. Only registration (which mutates data-source state via
+  `subscribe/2` / `unsubscribe/2`) and the poll loop go through the
+  GenServer, so one slow scan no longer blocks every other client.
   """
 
   use GenServer
   require Logger
 
+  alias TimelessCanvas.DataSource
+
   @default_module TimelessCanvas.DataSource.Stub
   @default_poll_interval 10_000
   @debug_report_interval 30_000
 
+  @table :timeless_canvas_data_source
+
   def status_topic, do: "timeless_canvas:status"
   def metric_topic, do: "timeless_canvas:metrics"
 
-  # --- Client API ---
+  # --- Client API (GenServer-backed: mutates data-source state) ---
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
@@ -32,44 +43,186 @@ defmodule TimelessCanvas.DataSource.Manager do
     GenServer.cast(server, {:unregister_element, element_id})
   end
 
-  def statuses_at(time, server \\ __MODULE__) do
-    GenServer.call(server, {:statuses_at, time})
+  # --- Client API (caller-side: reads config from ETS, queries directly) ---
+
+  def statuses_at(time) do
+    case lookup_source() do
+      {:ok, module, ds_state} ->
+        elements = lookup_elements()
+
+        if function_exported?(module, :statuses_at, 3) do
+          module.statuses_at(ds_state, Map.values(elements), time)
+        else
+          Enum.reduce(elements, %{}, fn {id, element}, acc ->
+            Map.put(acc, id, module.status_at(ds_state, element, time))
+          end)
+        end
+
+      :error ->
+        %{}
+    end
   end
 
-  def metric_at(element_id, metric_name, time, server \\ __MODULE__) do
-    GenServer.call(server, {:metric_at, element_id, metric_name, time})
+  def metric_at(element_id, metric_name, time) do
+    with {:ok, module, ds_state} <- lookup_source(),
+         {:ok, element} <- lookup_element(element_id) do
+      module.metric_at(ds_state, element, metric_name, time)
+    else
+      _ -> :no_data
+    end
   end
 
-  def metric_range(element_id, metric_name, from, to, server \\ __MODULE__) do
-    GenServer.call(server, {:metric_range, element_id, metric_name, from, to}, 30_000)
+  def metric_range(element_id, metric_name, from, to) do
+    with {:ok, module, ds_state} <- lookup_source(),
+         {:ok, element} <- lookup_element(element_id) do
+      module.metric_range(ds_state, element, metric_name, from, to)
+    else
+      _ -> {:ok, []}
+    end
   end
 
-  def time_range(server \\ __MODULE__) do
-    GenServer.call(server, :time_range)
+  def time_range do
+    case lookup_source() do
+      {:ok, module, ds_state} -> module.time_range(ds_state)
+      :error -> :empty
+    end
   end
 
-  def data_density(from, to, buckets \\ 80, server \\ __MODULE__) do
-    GenServer.call(server, {:data_density, from, to, buckets}, 10_000)
+  def data_density(from, to, buckets \\ 80) do
+    case lookup_source() do
+      {:ok, module, ds_state} ->
+        if function_exported?(module, :event_density, 4) do
+          module.event_density(ds_state, from, to, buckets)
+        else
+          []
+        end
+
+      :error ->
+        []
+    end
   end
 
-  def list_series_for_host(host, server \\ __MODULE__) do
-    GenServer.call(server, {:list_series_for_host, host}, 10_000)
+  def list_series_for_host(host, opts \\ []) do
+    case lookup_source() do
+      {:ok, module, ds_state} ->
+        cond do
+          function_exported?(module, :list_series_for_host, 3) ->
+            module.list_series_for_host(ds_state, host, opts)
+
+          # Back-compat: pre-opts backends export the old arity; apply
+          # filter/limit here as a fallback.
+          function_exported?(module, :list_series_for_host, 2) ->
+            ds_state
+            |> module.list_series_for_host(host)
+            |> DataSource.apply_query_opts(opts, fn {name, _labels} -> name end)
+
+          true ->
+            []
+        end
+
+      :error ->
+        []
+    end
   end
 
-  def list_hosts(server \\ __MODULE__) do
-    GenServer.call(server, :list_hosts, 10_000)
+  def list_hosts(opts \\ []) do
+    case lookup_source() do
+      {:ok, module, ds_state} ->
+        cond do
+          function_exported?(module, :list_hosts, 2) ->
+            module.list_hosts(ds_state, opts)
+
+          function_exported?(module, :list_hosts, 1) ->
+            ds_state
+            |> module.list_hosts()
+            |> DataSource.apply_query_opts(opts)
+
+          true ->
+            []
+        end
+
+      :error ->
+        []
+    end
   end
 
-  def metric_metadata(metric_name, server \\ __MODULE__) do
-    GenServer.call(server, {:metric_metadata, metric_name}, 10_000)
+  def list_label_values(label_key, opts \\ []) do
+    case lookup_source() do
+      {:ok, module, ds_state} ->
+        cond do
+          function_exported?(module, :list_label_values, 3) ->
+            module.list_label_values(ds_state, label_key, opts)
+
+          function_exported?(module, :list_label_values, 2) ->
+            ds_state
+            |> module.list_label_values(label_key)
+            |> DataSource.apply_query_opts(opts)
+
+          true ->
+            []
+        end
+
+      :error ->
+        []
+    end
   end
 
-  def list_label_values(label_key, server \\ __MODULE__) do
-    GenServer.call(server, {:list_label_values, label_key}, 10_000)
+  def metric_metadata(metric_name) do
+    case lookup_source() do
+      {:ok, module, ds_state} ->
+        if function_exported?(module, :metric_metadata, 2) do
+          module.metric_metadata(ds_state, metric_name)
+        else
+          {:ok, nil}
+        end
+
+      :error ->
+        {:ok, nil}
+    end
   end
 
-  def text_metric_at(element_id, metric_name, time, server \\ __MODULE__) do
-    GenServer.call(server, {:text_metric_at, element_id, metric_name, time})
+  def text_metric_at(element_id, metric_name, time) do
+    with {:ok, module, ds_state} <- lookup_source(),
+         {:ok, element} <- lookup_element(element_id),
+         true <- function_exported?(module, :text_metric_at, 4) do
+      module.text_metric_at(ds_state, element, metric_name, time)
+    else
+      _ -> :no_data
+    end
+  end
+
+  # --- ETS helpers ---
+
+  defp lookup_source do
+    with tid when tid != :undefined <- :ets.whereis(@table),
+         [{:source, module, ds_state}] <- :ets.lookup(tid, :source) do
+      {:ok, module, ds_state}
+    else
+      _ -> :error
+    end
+  end
+
+  defp lookup_elements do
+    with tid when tid != :undefined <- :ets.whereis(@table),
+         [{:elements, elements}] <- :ets.lookup(tid, :elements) do
+      elements
+    else
+      _ -> %{}
+    end
+  end
+
+  defp lookup_element(element_id) do
+    Map.fetch(lookup_elements(), element_id)
+  end
+
+  defp publish_source(state) do
+    :ets.insert(@table, {:source, state.module, state.ds_state})
+    state
+  end
+
+  defp publish_elements(state) do
+    :ets.insert(@table, {:elements, state.elements})
+    state
   end
 
   # --- Server callbacks ---
@@ -85,6 +238,10 @@ defmodule TimelessCanvas.DataSource.Manager do
 
     case module.init(config) do
       {:ok, ds_state} ->
+        if :ets.whereis(@table) == :undefined do
+          :ets.new(@table, [:set, :public, :named_table, read_concurrency: true])
+        end
+
         state = %{
           module: module,
           ds_state: ds_state,
@@ -101,6 +258,10 @@ defmodule TimelessCanvas.DataSource.Manager do
             text_metrics_broadcast: 0
           }
         }
+
+        state
+        |> publish_source()
+        |> publish_elements()
 
         schedule_poll(poll_interval)
         schedule_debug_report()
@@ -124,113 +285,12 @@ defmodule TimelessCanvas.DataSource.Manager do
       |> Map.update!(:register_calls, &(&1 + 1))
       |> Map.put(:registered_elements, map_size(element_map))
 
-    {:reply, :ok, %{state | ds_state: ds_state, elements: element_map, debug: debug}}
-  end
+    state =
+      %{state | ds_state: ds_state, elements: element_map, debug: debug}
+      |> publish_source()
+      |> publish_elements()
 
-  @impl true
-  def handle_call({:statuses_at, time}, _from, state) do
-    statuses =
-      Enum.reduce(state.elements, %{}, fn {id, element}, acc ->
-        Map.put(acc, id, state.module.status_at(state.ds_state, element, time))
-      end)
-
-    {:reply, statuses, state}
-  end
-
-  def handle_call({:metric_at, element_id, metric_name, time}, _from, state) do
-    result =
-      case Map.get(state.elements, element_id) do
-        nil -> :no_data
-        element -> state.module.metric_at(state.ds_state, element, metric_name, time)
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:metric_range, element_id, metric_name, from, to}, _from, state) do
-    result =
-      case Map.get(state.elements, element_id) do
-        nil -> {:ok, []}
-        element -> state.module.metric_range(state.ds_state, element, metric_name, from, to)
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call(:time_range, _from, state) do
-    {:reply, state.module.time_range(state.ds_state), state}
-  end
-
-  def handle_call({:data_density, from, to, buckets}, _from, state) do
-    result =
-      if function_exported?(state.module, :event_density, 4) do
-        state.module.event_density(state.ds_state, from, to, buckets)
-      else
-        []
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:list_series_for_host, host}, _from, state) do
-    result =
-      if function_exported?(state.module, :list_series_for_host, 2) do
-        state.module.list_series_for_host(state.ds_state, host)
-      else
-        []
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call(:list_hosts, _from, state) do
-    result =
-      if function_exported?(state.module, :list_hosts, 1) do
-        state.module.list_hosts(state.ds_state)
-      else
-        []
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:list_label_values, label_key}, _from, state) do
-    result =
-      if function_exported?(state.module, :list_label_values, 2) do
-        state.module.list_label_values(state.ds_state, label_key)
-      else
-        []
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:metric_metadata, metric_name}, _from, state) do
-    result =
-      if function_exported?(state.module, :metric_metadata, 2) do
-        state.module.metric_metadata(state.ds_state, metric_name)
-      else
-        {:ok, nil}
-      end
-
-    {:reply, result, state}
-  end
-
-  def handle_call({:text_metric_at, element_id, metric_name, time}, _from, state) do
-    result =
-      case Map.get(state.elements, element_id) do
-        nil ->
-          :no_data
-
-        element ->
-          if function_exported?(state.module, :text_metric_at, 4) do
-            state.module.text_metric_at(state.ds_state, element, metric_name, time)
-          else
-            :no_data
-          end
-      end
-
-    {:reply, result, state}
+    {:reply, :ok, state}
   end
 
   @impl true
@@ -243,8 +303,12 @@ defmodule TimelessCanvas.DataSource.Manager do
         {:ok, ds_state} = state.module.unsubscribe(state.ds_state, element)
         last_statuses = Map.delete(state.last_statuses, element_id)
 
-        {:noreply,
-         %{state | ds_state: ds_state, elements: elements, last_statuses: last_statuses}}
+        state =
+          %{state | ds_state: ds_state, elements: elements, last_statuses: last_statuses}
+          |> publish_source()
+          |> publish_elements()
+
+        {:noreply, state}
     end
   end
 
@@ -312,9 +376,14 @@ defmodule TimelessCanvas.DataSource.Manager do
 
   defp poll_all(state) do
     pubsub = TimelessCanvas.pubsub()
+    statuses = poll_statuses(state)
 
     Enum.reduce(state.elements, state, fn {element_id, element}, acc ->
-      acc = maybe_broadcast_status(acc, element_id, state.module.status(acc.ds_state, element))
+      acc =
+        case Map.fetch(statuses, element_id) do
+          {:ok, status} -> maybe_broadcast_status(acc, element_id, status)
+          :error -> acc
+        end
 
       if element.type == :text_series do
         poll_text_metric(acc, element_id, element, pubsub)
@@ -322,6 +391,16 @@ defmodule TimelessCanvas.DataSource.Manager do
         acc
       end
     end)
+  end
+
+  defp poll_statuses(state) do
+    if function_exported?(state.module, :statuses, 2) do
+      state.module.statuses(state.ds_state, Map.values(state.elements))
+    else
+      Enum.reduce(state.elements, %{}, fn {element_id, element}, acc ->
+        Map.put(acc, element_id, state.module.status(state.ds_state, element))
+      end)
+    end
   end
 
   defp poll_text_metric(state, element_id, element, pubsub) do

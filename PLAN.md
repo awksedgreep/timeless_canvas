@@ -22,14 +22,18 @@ Status legend: `[x]` done · `[ ]` pending
 
 ## Phase 1 — Server-side performance (the 1M-series killers)
 
-- [ ] Bounded query contract on the `DataSource` behaviour:
-      `list_hosts(filter, limit)`, `list_label_values(label, filter, limit)`,
-      `list_series(metric, matchers, limit)`; implement in
+- [x] Bounded query contract on the `DataSource` behaviour:
+      `list_hosts(state, opts)`, `list_label_values(state, label, opts)`,
+      `list_series_for_host(state, host, opts)` with `:filter`/`:limit` opts,
+      plus optional batch `statuses/2` + `statuses_at/3`; Manager shims
+      old-arity backends (filter/limit applied in Elixir)
+- [ ] Implement the bounded contract in
       `timeless_stack/lib/timeless_stack/ui_data_source.ex` with ETS cache + TTL
       background refresh (today: N+1 full-store scans per call — `ui_data_source.ex:145-193`)
-- [ ] Execute queries in the caller process (config via ETS/persistent_term);
-      `DataSource.Manager` keeps only registration state (today every query from
-      every client serializes through one GenServer — `manager.ex:186-206`)
+- [x] Execute queries in the caller process (source module/state + element map
+      published to a public ETS table); `DataSource.Manager` keeps only
+      registration state + the poll loop (was: every query from every client
+      serialized through one GenServer — `manager.ex:186-206`)
 - [ ] Batch host status checks into one grouped logs query per tick
       (today: up to 2 log queries per host element per tick — `ui_data_source.ex:309-336`)
 - [ ] Cap `available_series` at the assign boundary + group by metric + typeahead
