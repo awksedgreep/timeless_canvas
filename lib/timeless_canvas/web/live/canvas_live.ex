@@ -17,7 +17,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
   alias TimelessCanvas.DataSource.Manager, as: StatusManager
   alias TimelessCanvas.IconCatalog
   alias TimelessCanvas.StreamManager
-  alias TimelessCanvas.MetricFormatter
   require Logger
 
   defp persistence, do: TimelessCanvas.persistence()
@@ -119,6 +118,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           timeline_range: 86_400,
           timeline_data_range: nil,
           graph_data: %{},
+          graph_push_cache: %{},
           text_data: %{},
           stream_data: stream_data,
           hosts_available?: false,
@@ -508,18 +508,19 @@ defmodule TimelessCanvas.Web.CanvasLive do
           selected={conn.id in @selected_ids}
         />
 
+        <%!-- Graph data (@graph_data / @expanded_graph_data) is
+             deliberately NOT referenced here: graph internals are pushed
+             as "graph:data" / "graph:expanded" events into
+             phx-update="ignore" containers, so a data tick produces zero
+             template diff. --%>
         <.canvas_element
           :if={!@profile_hide_canvas_scene}
           :for={element <- sorted_elements(@resolved_elements, @expanded_graph_id)}
           :key={element.id}
           element={element}
           selected={element.id in @selected_ids}
-          graph_points={graph_points_for(element, @graph_data)}
-          graph_data_points={graph_data_points_for(element, @graph_data)}
-          graph_value={graph_value_for(element, @graph_data, @metric_units)}
           stream_entries={stream_entries_for(element, @stream_data)}
           expanded_graph_id={@expanded_graph_id}
-          expanded_graph_data={@expanded_graph_data}
           metric_units={@metric_units}
           text_value={text_value_for(element, @text_data)}
         />
@@ -1232,6 +1233,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
     assign(socket, history: history, canvas: history.present)
     |> resolve_and_assign()
     |> register_elements()
+    |> push_graph_data()
   end
 
   defp update_canvas(socket, %Canvas{} = canvas) do
@@ -1240,6 +1242,47 @@ defmodule TimelessCanvas.Web.CanvasLive do
     assign(socket, history: history, canvas: canvas)
     |> resolve_and_assign()
     |> register_elements()
+    |> push_graph_data()
+  end
+
+  # Graph internals live in phx-update="ignore" containers and are
+  # delivered as push_events ("graph:data" for compact graphs,
+  # "graph:expanded" for the expanded one) instead of HEEx. This helper
+  # rebuilds the payload for every graph element from current assigns
+  # (data AND geometry, so element moves/resizes re-place the line) and
+  # pushes only the ones that changed since the last push. It is
+  # idempotent, so every path that touches graph data, element geometry,
+  # or expansion state simply calls it.
+  defp push_graph_data(socket) do
+    payloads = build_graph_payloads(socket.assigns)
+    cache = socket.assigns.graph_push_cache
+
+    socket =
+      Enum.reduce(payloads, socket, fn {id, payload}, acc ->
+        if Map.get(cache, id) == payload do
+          acc
+        else
+          event = if payload.kind == "expanded", do: "graph:expanded", else: "graph:data"
+          push_event(acc, event, payload)
+        end
+      end)
+
+    assign(socket, graph_push_cache: payloads)
+  end
+
+  defp build_graph_payloads(assigns) do
+    for {id, %Element{type: :graph} = el} <- assigns.resolved_elements, into: %{} do
+      unit = Map.get(assigns.metric_units, id)
+
+      payload =
+        if assigns.expanded_graph_id == id do
+          expanded_graph_payload(el, assigns.expanded_graph_data, unit)
+        else
+          compact_graph_payload(el, Map.get(assigns.graph_data, id, []), unit)
+        end
+
+      {id, payload}
+    end
   end
 
   defp register_elements(socket) do
@@ -1655,20 +1698,24 @@ defmodule TimelessCanvas.Web.CanvasLive do
       %{type: :graph} ->
         if socket.assigns.expanded_graph_id == id do
           {:noreply,
-           assign(socket,
+           socket
+           |> assign(
              expanded_graph_id: nil,
              expanded_graph_data: [],
              pre_expand_viewbox: nil
-           )}
+           )
+           |> push_graph_data()}
         else
           expanded_data = fetch_expanded_data(socket, id)
 
           socket =
-            assign(socket,
+            socket
+            |> assign(
               expanded_graph_id: id,
               expanded_graph_data: expanded_data,
               pre_expand_viewbox: socket.assigns.canvas.view_box
             )
+            |> push_graph_data()
 
           {:noreply, socket}
         end
@@ -1894,16 +1941,21 @@ defmodule TimelessCanvas.Web.CanvasLive do
      |> reset_available_series()}
   end
 
+  # Rows are resolved by their content-derived entry id (see
+  # DataQueries.put_entry_id/1), never by index: a live prepend between
+  # the click and the handler shifts every index but leaves ids intact.
   def handle_event(
         "stream:entry_click",
-        %{"element_id" => element_id, "index" => index, "type" => type},
+        %{"element_id" => element_id, "entry_id" => entry_id},
         socket
       ) do
     entries = Map.get(socket.assigns.stream_data, element_id, [])
-    entry = Enum.at(entries, index)
+    index = Enum.find_index(entries, fn entry -> Map.get(entry, :id) == entry_id end)
+    element = socket.assigns.canvas.elements[element_id]
 
-    if entry do
-      element = socket.assigns.canvas.elements[element_id]
+    if index && element do
+      entry = Enum.at(entries, index)
+      type = if element.type == :trace_stream, do: "trace", else: "log"
 
       popover = %{
         type: type,
@@ -1920,6 +1972,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("stream:close_popover", _params, socket) do
     {:noreply, assign(socket, stream_popover: nil)}
+  end
+
+  # Sent by the Canvas hook from reconnected(): ignored graph containers
+  # survive the reconnect patch but their contents (and the JS point
+  # cache) may be stale, so drop the diff cache and re-push everything.
+  def handle_event("graph:resync", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(graph_push_cache: %{})
+     |> push_graph_data()}
   end
 
   def handle_event("select_all", _params, socket) do
@@ -2031,6 +2093,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       socket =
         assign(socket, history: history, canvas: history.present, selected_ids: MapSet.new())
         |> resolve_and_assign()
+        |> push_graph_data()
 
       {:noreply, socket}
     end)
@@ -2043,6 +2106,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       socket =
         assign(socket, history: history, canvas: history.present, selected_ids: MapSet.new())
         |> resolve_and_assign()
+        |> push_graph_data()
 
       {:noreply, socket}
     end)
@@ -2339,6 +2403,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
               assign(socket, history: history, canvas: canvas, selected_ids: MapSet.new())
               |> resolve_and_assign()
               |> register_elements()
+              |> push_graph_data()
 
             {:noreply, socket}
 
@@ -2560,7 +2625,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
             assign(socket, expanded_graph_data: fetch_expanded_data(socket, expanded_id))
         end
 
-      {:noreply, socket}
+      # Deliver the tick as push_events; the diff cache inside
+      # push_graph_data limits the pushes to the changed elements.
+      {:noreply, push_graph_data(socket)}
     else
       {:noreply, socket}
     end
@@ -2680,6 +2747,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
         |> fill_stream_data_at(time)
       end
 
+    # Full graph snapshot to the client. This also covers reconnects:
+    # a reconnected LiveView is a fresh process with an empty push cache,
+    # so the snapshot re-populates the surviving (but stale) ignored
+    # containers.
+    socket = push_graph_data(socket)
+
     {:noreply, push_density_event(socket, data.density_buckets)}
   end
 
@@ -2740,120 +2813,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     result
   end
 
-  defp graph_points_for(%{type: :graph} = element, graph_data) do
-    {elapsed_us, result} =
-      :timer.tc(fn ->
-        case Map.get(graph_data, element.id) do
-          nil ->
-            ""
-
-          [] ->
-            ""
-
-          points ->
-            points = Enum.reverse(points)
-            {{first_ts, _}, {last_ts, _}} = {List.first(points), List.last(points)}
-            time_range = max(last_ts - first_ts, 1)
-
-            {_data_min, data_max} =
-              Enum.min_max_by(points, &elem(&1, 1))
-              |> then(fn {min, max} -> {elem(min, 1), elem(max, 1)} end)
-
-            meta = element.meta || %{}
-            min_val = graph_min_bound(meta, points)
-            max_val = parse_bound(meta["y_max"], data_max)
-            val_range = max(max_val - min_val, 0.1)
-            padding = 14
-
-            points
-            |> Enum.map(fn {ts, val} ->
-              x = element.x + (ts - first_ts) / time_range * element.width
-              clamped = max(min(val, max_val), min_val)
-
-              y =
-                element.y + padding +
-                  (1 - (clamped - min_val) / val_range) * (element.height - padding - 2)
-
-              "#{Float.round(x, 1)},#{Float.round(y, 1)}"
-            end)
-            |> Enum.join(" ")
-        end
-      end)
-
-    bump_render_stat(:graph_point_calls, 1)
-    bump_render_stat(:graph_point_time_us, elapsed_us)
-    result
-  end
-
-  defp graph_points_for(_element, _graph_data), do: ""
-
-  defp graph_data_points_for(%{type: :graph} = element, graph_data) do
-    Map.get(graph_data, element.id, [])
-  end
-
-  defp graph_data_points_for(_element, _graph_data), do: []
-
-  defp parse_bound(nil, fallback), do: fallback
-  defp parse_bound("", fallback), do: fallback
-
-  defp parse_bound(str, fallback) when is_binary(str) do
-    case Float.parse(str) do
-      {f, _} -> f
-      :error -> fallback
-    end
-  end
-
-  defp graph_min_bound(meta, points) do
-    {data_min, _data_max} =
-      Enum.min_max_by(points, &elem(&1, 1))
-      |> then(fn {min, max} -> {elem(min, 1), elem(max, 1)} end)
-
-    cond do
-      explicit_nonzero_bound?(meta["y_min"]) ->
-        parse_bound(meta["y_min"], data_min)
-
-      counter_series?(meta) ->
-        data_min
-
-      true ->
-        parse_bound(meta["y_min"], 0.0)
-    end
-  end
-
-  defp explicit_nonzero_bound?(nil), do: false
-  defp explicit_nonzero_bound?(""), do: false
-
-  defp explicit_nonzero_bound?(value) when is_binary(value) do
-    case Float.parse(value) do
-      {parsed, _} when parsed == 0.0 -> false
-      {_nonzero, _} -> true
-      :error -> false
-    end
-  end
-
-  defp counter_series?(meta) when is_map(meta) do
-    case Map.get(meta, "type") do
-      "counter32" -> true
-      "counter64" -> true
-      _ -> false
-    end
-  end
-
-  defp counter_series?(_meta), do: false
-
-  defp graph_value_for(%{type: :graph} = element, graph_data, metric_units) do
-    case Map.get(graph_data, element.id) do
-      [{_ts, val} | _] ->
-        unit = Map.get(metric_units, element.id)
-        MetricFormatter.format(val / 1.0, unit)
-
-      _ ->
-        nil
-    end
-  end
-
-  defp graph_value_for(_element, _graph_data, _metric_units), do: nil
-
   defp backfill_graph(socket, %{type: :graph} = el) do
     time = socket.assigns.timeline_time || DateTime.utc_now()
     span = socket.assigns.timeline_span
@@ -2861,7 +2820,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
     graph_data =
       Map.merge(socket.assigns.graph_data, query_graph_data(%{el.id => el}, time, span))
 
-    assign(socket, graph_data: graph_data)
+    socket
+    |> assign(graph_data: graph_data)
+    |> push_graph_data()
   end
 
   defp backfill_graph(socket, _el), do: socket
@@ -2886,14 +2847,17 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
         socket = assign(socket, graph_data: graph_data)
 
-        case socket.assigns.expanded_graph_id do
-          nil ->
-            socket
+        socket =
+          case socket.assigns.expanded_graph_id do
+            nil ->
+              socket
 
-          expanded_id ->
-            expanded_data = fetch_expanded_data(socket, expanded_id)
-            assign(socket, expanded_graph_data: expanded_data)
-        end
+            expanded_id ->
+              expanded_data = fetch_expanded_data(socket, expanded_id)
+              assign(socket, expanded_graph_data: expanded_data)
+          end
+
+        push_graph_data(socket)
       end
     )
   end

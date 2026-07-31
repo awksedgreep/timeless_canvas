@@ -72,9 +72,31 @@ const CanvasHook = {
     this.handleEvent("set-viewbox", ({ x, y, width, height }) => {
       this.setViewBox(x, y, width, height);
     });
+
+    // Graph internals are pushed by the server ("graph:data" for compact
+    // graphs, "graph:expanded" for the expanded one) and rendered into
+    // phx-update="ignore" containers; raw + scaled points are cached
+    // per element id for the hover tooltip (no per-mousemove parsing).
+    this.graphCache = new Map();
+    this.handleEvent("graph:data", (payload) => this.applyGraphData(payload));
+    this.handleEvent("graph:expanded", (payload) => this.applyGraphData(payload));
+  },
+
+  reconnected() {
+    // Ignored graph containers survive the reconnect patch but their
+    // contents (and our cache) may be stale; ask for a full snapshot.
+    this.pushEvent("graph:resync", {});
   },
 
   updated() {
+    // Drop cached graph data for elements no longer in the DOM.
+    if (this.graphCache) {
+      for (const id of Array.from(this.graphCache.keys())) {
+        if (!this.svg.querySelector(`[data-element-id="${id}"]`)) {
+          this.graphCache.delete(id);
+        }
+      }
+    }
     // Preserve JS-side viewBox across LiveView DOM patches.
     // LiveView will re-set the viewBox attribute from server state, which is
     // stale during panning/zooming. Re-apply the current JS viewBox immediately.
@@ -114,6 +136,7 @@ const CanvasHook = {
     document.removeEventListener("keydown", this._onKeyDown);
     document.removeEventListener("keydown", this._onSpaceDown);
     document.removeEventListener("keyup", this._onSpaceUp);
+    if (this.graphCache) this.graphCache.clear();
   },
 
   // --- Helpers ---
@@ -193,11 +216,19 @@ const CanvasHook = {
       }
     }
 
-    // Check if clicking a stream entry (log/trace row)
-    const streamRow = e.target.closest("[data-stream-entry]");
+    // Check if clicking a stream entry (log/trace row). Rows carry only
+    // a content-derived entry id; the server resolves it against its
+    // stream_data (id-based, so live prepends can't shift the target).
+    const streamRow = e.target.closest("[data-entry-id]");
     if (streamRow) {
-      const data = JSON.parse(streamRow.dataset.streamEntry);
-      this.pushEvent("stream:entry_click", data);
+      const entryId = parseInt(streamRow.dataset.entryId, 10);
+      const streamGroup = streamRow.closest("[data-element-id]");
+      if (streamGroup && !Number.isNaN(entryId)) {
+        this.pushEvent("stream:entry_click", {
+          element_id: streamGroup.dataset.elementId,
+          entry_id: entryId,
+        });
+      }
       this.dragging = { type: "stream_click" };
       return;
     }
@@ -739,6 +770,164 @@ const CanvasHook = {
     return { x: cx - rx, y: cy - ry, w: rx * 2, h: ry * 2 };
   },
 
+  // --- Graph data pushes (phx-update="ignore" regions) ---
+
+  applyGraphData(payload) {
+    if (!payload || !payload.id) return;
+    const containerId =
+      payload.kind === "expanded"
+        ? `graph-dyn-${payload.id}-expanded`
+        : `graph-dyn-${payload.id}`;
+    const container = document.getElementById(containerId);
+    // Tolerate pushes for elements that were removed (or whose expansion
+    // state flipped) between the server push and this callback.
+    if (!container) return;
+
+    this.renderGraphInternals(container, payload);
+
+    this.graphCache.set(payload.id, {
+      kind: payload.kind,
+      raw: payload.raw || [],
+      poly: this.parsePoints(payload.points),
+    });
+  },
+
+  parsePoints(str) {
+    if (!str) return [];
+    return str
+      .trim()
+      .split(/\s+/)
+      .filter((pair) => pair.includes(","))
+      .map((pair) => {
+        const [x, y] = pair.split(",");
+        return { x: parseFloat(x), y: parseFloat(y) };
+      });
+  },
+
+  svgNode(tag, attrs, text) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+    if (text != null) node.textContent = text;
+    return node;
+  },
+
+  // Rebuild the dynamic internals of one graph (gridlines, axis labels,
+  // area, line, current value). Wholesale rebuild is fine: payloads
+  // arrive at poll cadence, not per frame.
+  renderGraphInternals(container, p) {
+    const expanded = p.kind === "expanded";
+    const fontSize = expanded ? "8" : "6";
+    const dash = expanded ? "4 3" : "3 3";
+    const clip = expanded
+      ? `url(#graph-clip-${p.id})`
+      : `url(#graph-plot-clip-${p.id})`;
+
+    while (container.firstChild) container.removeChild(container.firstChild);
+
+    for (const g of p.grid || []) {
+      container.appendChild(
+        this.svgNode("line", {
+          x1: g.x1,
+          y1: g.y1,
+          x2: g.x2,
+          y2: g.y2,
+          stroke: "#1e293b",
+          "stroke-width": "0.5",
+          "stroke-dasharray": dash,
+        }),
+      );
+    }
+    for (const l of p.y_labels || []) {
+      container.appendChild(
+        this.svgNode(
+          "text",
+          {
+            x: l.x,
+            y: l.y,
+            "text-anchor": "end",
+            fill: "#64748b",
+            "font-size": fontSize,
+            "font-family": "monospace",
+          },
+          l.text,
+        ),
+      );
+    }
+    for (const l of p.x_labels || []) {
+      container.appendChild(
+        this.svgNode(
+          "text",
+          {
+            x: l.x,
+            y: l.y,
+            "text-anchor": "middle",
+            fill: "#64748b",
+            "font-size": fontSize,
+            "font-family": "monospace",
+          },
+          l.text,
+        ),
+      );
+    }
+    if (expanded && p.area) {
+      container.appendChild(
+        this.svgNode("polygon", {
+          points: p.area,
+          fill: p.color,
+          opacity: "0.12",
+          "clip-path": clip,
+        }),
+      );
+    }
+    if (p.points) {
+      container.appendChild(
+        this.svgNode("polyline", {
+          points: p.points,
+          fill: "none",
+          stroke: p.color,
+          "stroke-width": "1.5",
+          "stroke-linejoin": "round",
+          "stroke-linecap": "round",
+          class: "canvas-graph__line",
+          "clip-path": clip,
+        }),
+      );
+    }
+    if (expanded) {
+      // Legend current-value text (the legend chrome is server-rendered)
+      container.appendChild(
+        this.svgNode(
+          "text",
+          {
+            x: p.value_pos.x,
+            y: p.value_pos.y,
+            fill: "#e2e8f0",
+            "font-size": "7",
+            "font-family": "monospace",
+          },
+          p.value || "---",
+        ),
+      );
+    } else if (p.value != null) {
+      container.appendChild(
+        this.svgNode(
+          "text",
+          {
+            x: p.value_pos.x,
+            y: p.value_pos.y,
+            "text-anchor": "end",
+            class: "canvas-graph__title",
+            fill: p.color,
+            "font-size": "8",
+          },
+          p.value,
+        ),
+      );
+    }
+  },
+
   // --- Expanded Graph Tooltip ---
 
   onGraphHover(e) {
@@ -748,36 +937,21 @@ const CanvasHook = {
       return;
     }
 
-    const pointsJson = expandedGroup.getAttribute("data-points");
-    if (!pointsJson) return;
+    // Points are cached when the "graph:expanded" push arrives — no
+    // JSON/attribute parsing on mousemove.
+    const elGroup = expandedGroup.closest("[data-element-id]");
+    const cached = elGroup && this.graphCache.get(elGroup.dataset.elementId);
+    if (!cached || cached.kind !== "expanded") return;
 
-    let points;
-    try {
-      points = JSON.parse(pointsJson);
-    } catch {
-      return;
-    }
-    if (!points.length) return;
+    const { raw, poly } = cached;
+    if (raw.length === 0 || poly.length < 2) return;
 
     const svgPt = this.clientToSvg(e.clientX, e.clientY);
 
-    // Find the polyline to get plot bounds
-    const polyline = expandedGroup.querySelector(".canvas-graph__line");
-    if (!polyline) return;
-
-    const polyPoints = polyline
-      .getAttribute("points")
-      .trim()
-      .split(/\s+/)
-      .map((p) => {
-        const [x, y] = p.split(",").map(Number);
-        return { x, y };
-      });
-    if (polyPoints.length < 2) return;
-
-    const plotMinX = polyPoints[0].x;
-    const plotMaxX = polyPoints[polyPoints.length - 1].x;
+    const plotMinX = poly[0].x;
+    const plotMaxX = poly[poly.length - 1].x;
     const plotW = plotMaxX - plotMinX;
+    if (plotW <= 0) return;
 
     // Check if cursor is within plot X range
     if (svgPt.x < plotMinX || svgPt.x > plotMaxX) {
@@ -787,13 +961,18 @@ const CanvasHook = {
 
     // Find nearest point index by X fraction
     const frac = (svgPt.x - plotMinX) / plotW;
-    const idx = Math.round(frac * (polyPoints.length - 1));
-    const clampIdx = Math.max(0, Math.min(idx, polyPoints.length - 1));
-    const nearPt = polyPoints[clampIdx];
-    const dataPoint = points[clampIdx];
-    if (!nearPt || !dataPoint) return;
+    const idx = Math.round(frac * (poly.length - 1));
+    const clampIdx = Math.max(0, Math.min(idx, poly.length - 1));
+    const nearPt = poly[clampIdx];
+    const rawPoint = raw[clampIdx];
+    if (!nearPt || !rawPoint) return;
 
-    this.showTooltip(nearPt.x, nearPt.y, dataPoint, expandedGroup);
+    this.showTooltip(
+      nearPt.x,
+      nearPt.y,
+      { t: rawPoint[0], v: rawPoint[1] },
+      expandedGroup,
+    );
   },
 
   showTooltip(x, y, dataPoint, parentGroup) {

@@ -78,9 +78,22 @@ Status legend: `[x]` done · `[ ]` pending
       Manager's text-metric poll path (`poll_text_metric` +
       `{:element_text_metric, ...}` on the global metric topic) was removed —
       the poller's text_data diffs replace it end to end.
-- [ ] Client-side graph updates: `push_event` point deltas into a
+- [x] Client-side graph updates: `push_event` point deltas into a
       `phx-update="ignore"` region; remove per-render `Jason.encode!` data
-      attributes (`canvas_components.ex:539-689,203,289`)
+      attributes (`canvas_components.ex:539-689,203,289`).
+      Graph bodies now render only a static frame plus an empty ignored
+      `<g id="graph-dyn-{id}[-expanded]">`; all dynamic internals
+      (polyline, area, gridlines, axis labels, current value) are pushed
+      as `graph:data` / `graph:expanded` events built by
+      `compact_graph_payload/3` / `expanded_graph_payload/3` and rendered
+      by the Canvas hook, which also caches raw+scaled points per element
+      (tooltip no longer JSON-parses on mousemove). A diffing
+      `push_graph_data/1` helper is called from every writer of graph
+      data/geometry/expansion state; `handle_event("graph:resync")` (sent
+      from the hook's `reconnected()`) re-pushes the full snapshot.
+      Stream rows carry only a content-derived `data-entry-id` (stamped
+      in `DataQueries.put_entry_id/1` for both historical fills and
+      StreamManager live prepends) instead of a per-render JSON attribute.
 - [ ] Viewbox changes assign only `view_box`; register elements/streams only when
       membership changes; idempotent `StreamManager` registration (today every
       pan/zoom tears down and recreates all stream subscriptions — `canvas_live.ex:1156-1184`)
@@ -121,7 +134,9 @@ Status legend: `[x]` done · `[ ]` pending
       (today Backspace on the focused timeline deletes the selection); free
       Ctrl+C/X/V when text is selected; Esc closes overlays/popovers/modes
 - [ ] Distinct error vs empty states per element body
-- [ ] Stream popover resolves entries by id, not index (wrong-row race)
+- [x] Stream popover resolves entries by id, not index (wrong-row race) —
+      done as part of Phase 2b's stream-row rework (`stream:entry_click`
+      resolves the content-derived entry id from `stream_data`)
 - [ ] "Go Live" button + persistent timestamp readout in historical mode
 - [ ] `phx-debounce` on property-panel inputs + coalesced history entries
 - [ ] Polish: middle-mouse pan, share-revoke confirm, consistent return-to-select

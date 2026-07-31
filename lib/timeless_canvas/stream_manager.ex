@@ -82,29 +82,33 @@ defmodule TimelessCanvas.StreamManager do
 
   @impl true
   def handle_info({:stream_log_entry, element_id, entry}, state) do
-    entry_map = %{
-      timestamp: entry.timestamp,
-      level: entry.level,
-      message: entry.message,
-      metadata: entry.metadata
-    }
+    # Same shape (and therefore the same content-derived id) as the
+    # historical maps built in DataQueries.query_stream_data/3.
+    entry_map =
+      TimelessCanvas.DataQueries.put_entry_id(%{
+        timestamp: entry.timestamp,
+        level: entry.level,
+        message: entry.message,
+        metadata: entry.metadata
+      })
 
     state = buffer_and_broadcast(state, element_id, :stream_entry, entry_map)
     {:noreply, state}
   end
 
   def handle_info({:stream_trace_span, element_id, span}, state) do
-    span_map = %{
-      timestamp: Map.get(span, :start_time) || Map.get(span, :timestamp),
-      trace_id: span.trace_id,
-      span_id: span.span_id,
-      name: span.name,
-      kind: span.kind,
-      duration_ns: span.duration_ns,
-      status: span.status,
-      status_message: span.status_message,
-      service: get_service(span)
-    }
+    span_map =
+      TimelessCanvas.DataQueries.put_entry_id(%{
+        timestamp: Map.get(span, :start_time) || Map.get(span, :timestamp),
+        trace_id: span.trace_id,
+        span_id: span.span_id,
+        name: span.name,
+        kind: span.kind,
+        duration_ns: span.duration_ns,
+        status: span.status,
+        status_message: span.status_message,
+        service: get_service(span)
+      })
 
     state = buffer_and_broadcast(state, element_id, :stream_span, span_map)
     {:noreply, state}

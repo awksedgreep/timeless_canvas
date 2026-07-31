@@ -24,6 +24,20 @@ defmodule TimelessCanvas.DataQueries do
   def max_stream_entries, do: @max_stream_entries
 
   @doc """
+  Stamp a stable `:id` onto a stream entry map, derived from its content.
+
+  Historical fills (`query_stream_data/3`) and live prepends
+  (`TimelessCanvas.StreamManager`) build entry maps with the same keys,
+  so the same entry always gets the same id no matter which path
+  delivered it. Rows carry only this id in the DOM and
+  `stream:entry_click` resolves it against `stream_data`, which cannot
+  race live prepends the way the old index-based lookup did.
+  """
+  def put_entry_id(entry) when is_map(entry) do
+    Map.put(entry, :id, :erlang.phash2(entry))
+  end
+
+  @doc """
   Latest graph window for every graph-type element: `%{id => [{ts, val}]}`.
   """
   def query_graph_data(resolved_elements, time, span) do
@@ -272,12 +286,12 @@ defmodule TimelessCanvas.DataQueries do
         case backend.query(filters) do
           {:ok, %{entries: entries}} ->
             Enum.map(entries, fn e ->
-              %{
+              put_entry_id(%{
                 timestamp: e.timestamp,
                 level: e.level,
                 message: e.message,
                 metadata: e.metadata
-              }
+              })
             end)
 
           _ ->
@@ -302,7 +316,7 @@ defmodule TimelessCanvas.DataQueries do
         case backend.query(filters) do
           {:ok, %{entries: spans}} ->
             Enum.map(spans, fn s ->
-              %{
+              put_entry_id(%{
                 timestamp: Map.get(s, :start_time) || Map.get(s, :timestamp),
                 trace_id: s.trace_id,
                 span_id: s.span_id,
@@ -312,7 +326,7 @@ defmodule TimelessCanvas.DataQueries do
                 status: s.status,
                 status_message: s.status_message,
                 service: get_span_service(s)
-              }
+              })
             end)
 
           _ ->

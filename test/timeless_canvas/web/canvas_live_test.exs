@@ -6,7 +6,9 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
   alias TimelessCanvas.Canvas
   alias TimelessCanvas.Canvas.Serializer
   alias TimelessCanvas.CanvasPoller
+  alias TimelessCanvas.DataQueries
   alias TimelessCanvas.DataSource.Manager
+  alias TimelessCanvas.StreamManager
 
   defp encode(canvas) do
     # Simulate the JSON round trip a DB-backed record goes through
@@ -155,9 +157,23 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
 
       html = render_async(view)
 
-      # Badge gone, programmed graph data and hosts are in
+      # Badge gone; the graph frame renders an empty phx-update="ignore"
+      # container while the data itself arrives as a push_event — the
+      # rendered HTML never contains the point values.
       refute html =~ "Loading data"
-      assert html =~ "777"
+      refute html =~ "777"
+      assert html =~ ~s(id="graph-dyn-el-1")
+      assert html =~ ~s(phx-update="ignore")
+
+      assert_push_event(view, "graph:data", %{
+        id: "el-1",
+        kind: "compact",
+        value: "777",
+        points: points,
+        raw: [[_, 777.0], [_, 777.0]]
+      })
+
+      assert points =~ ","
 
       html = view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
       assert html =~ "host-a"
@@ -376,7 +392,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
   end
 
   describe "shared canvas poller" do
-    test "two viewers of one canvas both render poller graph updates", %{conn: conn, user: user} do
+    test "two viewers of one canvas both receive poller graph pushes", %{conn: conn, user: user} do
       # The poller reads :poll_interval from the data_source config at
       # start; shrink it for this test and restore afterwards.
       ds_config = Application.get_env(:timeless_canvas, :data_source)
@@ -413,14 +429,24 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       render_async(view_a)
       render_async(view_b)
 
-      assert render(view_a) =~ "777"
-      assert render(view_b) =~ "777"
+      assert_push_event(view_a, "graph:data", %{id: "el-1", value: "777"}, 1_000)
+      assert_push_event(view_b, "graph:data", %{id: "el-1", value: "777"}, 1_000)
 
-      # New live data: one poller tick fans the diff out to both views.
+      graph_html_before = view_a |> element(~s([data-element-id="el-1"])) |> render()
+      refute graph_html_before =~ "777"
+
+      # New live data: one poller tick fans the diff out to both views
+      # as push_events.
       FakeDataSource.put(:metric_range, {:ok, [{now_ms - 60_000, 888.0}, {now_ms, 888.0}]})
 
-      assert eventually(fn -> render(view_a) =~ "888" end)
-      assert eventually(fn -> render(view_b) =~ "888" end)
+      assert_push_event(view_a, "graph:data", %{id: "el-1", value: "888"}, 2_000)
+      assert_push_event(view_b, "graph:data", %{id: "el-1", value: "888"}, 2_000)
+
+      # Render-path regression: the data tick reached the client purely
+      # as a push — the rendered graph markup (including the ignored
+      # container) is byte-for-byte unchanged.
+      assert view_a |> element(~s([data-element-id="el-1"])) |> render() ==
+               graph_html_before
     end
 
     test "status broadcasts on one canvas's topic do not reach another canvas", %{
@@ -495,6 +521,188 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       true ->
         Process.sleep(25)
         do_eventually(fun, deadline)
+    end
+  end
+
+  describe "client-side graph pushes" do
+    defp seed_graph_canvas(user, value) do
+      now_ms = System.system_time(:millisecond)
+      FakeDataSource.put(:metric_range, {:ok, [{now_ms - 60_000, value}, {now_ms, value}]})
+
+      {canvas, el} =
+        Canvas.add_element(Canvas.new(), %{
+          type: :graph,
+          x: 100.0,
+          y: 100.0,
+          label: "cpu graph",
+          meta: %{"host" => "web-1", "metric_name" => "cpu_usage"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: encode(canvas)})
+      {record, el, now_ms}
+    end
+
+    test "a timeline scrub re-pushes graph data", %{conn: conn, user: user} do
+      {record, el, now_ms} = seed_graph_canvas(user, 111.0)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+      assert_push_event(view, "graph:data", %{id: "el-1", value: "111"}, 1_000)
+
+      # Different data at the scrubbed time
+      FakeDataSource.put(
+        :metric_range,
+        {:ok, [{now_ms - 660_000, 222.0}, {now_ms - 600_000, 222.0}]}
+      )
+
+      render_hook(view, "timeline:change", %{"time" => now_ms - 600_000})
+
+      assert_push_event(view, "graph:data", %{id: id, kind: "compact", value: "222"})
+      assert id == el.id
+    end
+
+    test "expanding a graph pushes graph:expanded; collapsing restores graph:data", %{
+      conn: conn,
+      user: user
+    } do
+      {record, _el, _now_ms} = seed_graph_canvas(user, 333.0)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+      assert_push_event(view, "graph:data", %{id: "el-1", value: "333"}, 1_000)
+
+      html = render_hook(view, "element:dblclick", %{"id" => "el-1"})
+      assert html =~ ~s(id="graph-dyn-el-1-expanded")
+
+      assert_push_event(view, "graph:expanded", %{
+        id: "el-1",
+        kind: "expanded",
+        value: "333",
+        points: points,
+        area: area,
+        raw: raw
+      })
+
+      assert points =~ ","
+      assert area =~ ","
+      assert [[_, 333.0], [_, 333.0]] = raw
+
+      html = render_hook(view, "element:dblclick", %{"id" => "el-1"})
+      refute html =~ "graph-dyn-el-1-expanded"
+      assert_push_event(view, "graph:data", %{id: "el-1", kind: "compact", value: "333"})
+    end
+
+    test "graph:resync re-pushes the full snapshot", %{conn: conn, user: user} do
+      {record, _el, _now_ms} = seed_graph_canvas(user, 444.0)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+      assert_push_event(view, "graph:data", %{id: "el-1", value: "444"}, 1_000)
+
+      # The hook sends graph:resync from reconnected(); the server must
+      # answer with a full snapshot even though nothing changed.
+      render_hook(view, "graph:resync", %{})
+
+      assert_push_event(view, "graph:data", %{id: "el-1", value: "444"})
+    end
+  end
+
+  describe "stream entry popovers" do
+    defp seed_log_stream_canvas(user) do
+      {canvas, el} =
+        Canvas.add_element(Canvas.new(snap_to_grid: false), %{
+          type: :log_stream,
+          x: 100.0,
+          y: 100.0,
+          label: "logs",
+          meta: %{}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: encode(canvas)})
+      {record, el}
+    end
+
+    defp log_entry(message, level \\ :info) do
+      DataQueries.put_entry_id(%{
+        timestamp: System.system_time(:millisecond),
+        level: level,
+        message: message,
+        metadata: %{}
+      })
+    end
+
+    defp prepend_entry(element_id, entry) do
+      Phoenix.PubSub.broadcast(
+        TimelessCanvas.TestPubSub,
+        StreamManager.topic(),
+        {:stream_entry, element_id, entry}
+      )
+    end
+
+    defp popover_message(view) do
+      case :sys.get_state(view.pid).socket.assigns.stream_popover do
+        %{entry: entry} -> entry.message
+        nil -> nil
+      end
+    end
+
+    test "rows carry entry ids and clicks resolve by id, surviving live prepends", %{
+      conn: conn,
+      user: user
+    } do
+      {record, el} = seed_log_stream_canvas(user)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      first = log_entry("first-entry")
+      prepend_entry(el.id, first)
+
+      html = render(view)
+      assert html =~ "first-entry"
+      assert html =~ ~s(data-entry-id="#{first.id}")
+      refute html =~ "data-stream-entry"
+
+      html =
+        render_hook(view, "stream:entry_click", %{
+          "element_id" => el.id,
+          "entry_id" => first.id
+        })
+
+      assert html =~ "stream-popover"
+      assert popover_message(view) == "first-entry"
+
+      # A live prepend shifts every row index; the id-based lookup must
+      # still resolve the originally clicked entry (the old index-based
+      # code would have shown "second-entry" here).
+      second = log_entry("second-entry", :error)
+      prepend_entry(el.id, second)
+      assert render(view) =~ "second-entry"
+
+      render_hook(view, "stream:entry_click", %{
+        "element_id" => el.id,
+        "entry_id" => first.id
+      })
+
+      assert popover_message(view) == "first-entry"
+    end
+
+    test "clicking an unknown entry id is a no-op", %{conn: conn, user: user} do
+      {record, el} = seed_log_stream_canvas(user)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      prepend_entry(el.id, log_entry("only-entry"))
+      render(view)
+
+      render_hook(view, "stream:entry_click", %{
+        "element_id" => el.id,
+        "entry_id" => 123_456_789
+      })
+
+      assert popover_message(view) == nil
+      refute render(view) =~ "stream-popover"
     end
   end
 

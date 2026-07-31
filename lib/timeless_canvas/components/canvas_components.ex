@@ -10,12 +10,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   attr(:element, Element, required: true)
   attr(:selected, :boolean, default: false)
-  attr(:graph_points, :string, default: "")
-  attr(:graph_data_points, :list, default: [])
-  attr(:graph_value, :string, default: nil)
   attr(:stream_entries, :list, default: [])
   attr(:expanded_graph_id, :string, default: nil)
-  attr(:expanded_graph_data, :list, default: [])
   attr(:metric_units, :map, default: %{})
   attr(:text_value, :string, default: nil)
 
@@ -47,12 +43,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         >
           <.element_body
             element={@element}
-            graph_points={@graph_points}
-            graph_data_points={@graph_data_points}
-            graph_value={@graph_value}
             stream_entries={@stream_entries}
             is_expanded={@is_expanded}
-            expanded_graph_data={@expanded_graph_data}
             render_w={@render_w}
             render_h={@render_h}
             metric_units={@metric_units}
@@ -200,7 +192,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             height="14"
             fill="transparent"
             class="canvas-stream-row"
-            data-stream-entry={Jason.encode!(%{element_id: @element.id, index: i, type: "log"})}
+            data-entry-id={Map.get(entry, :id)}
           />
           <text
             x={@element.x + 4}
@@ -286,7 +278,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             height="14"
             fill="transparent"
             class="canvas-stream-row"
-            data-stream-entry={Jason.encode!(%{element_id: @element.id, index: i, type: "trace"})}
+            data-entry-id={Map.get(span, :id)}
           />
           <text
             x={@element.x + 4}
@@ -326,7 +318,6 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     {elapsed_us, result} =
       :timer.tc(fn ->
         metric_name = Map.get(assigns.element.meta, "metric_name", "metric")
-        unit = Map.get(assigns.metric_units, assigns.element.id)
 
         graph_title =
           case assigns.element.label do
@@ -335,198 +326,44 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             label -> "#{label} | #{metric_name}"
           end
 
-        pad_left = 50
-        pad_right = 10
-        pad_top = 30
-        pad_bottom = 20
-        w = assigns.render_w
-        h = assigns.render_h
-        plot_x = assigns.element.x + pad_left
-        plot_y = assigns.element.y + pad_top
-        plot_w = w - pad_left - pad_right
-        plot_h = h - pad_top - pad_bottom
-
-        points = Enum.reverse(assigns.expanded_graph_data)
-        meta = assigns.element.meta
-
-        {min_val, max_val, y_ticks, polyline_points, area_points, tooltip_data, current_val} =
-          if points != [] do
-            {min_p, max_p} = Enum.min_max_by(points, &elem(&1, 1))
-            data_min = elem(min_p, 1)
-            data_max = elem(max_p, 1)
-            raw_min = graph_bound_min(meta, data_min)
-            raw_max = parse_graph_bound(meta["y_max"], data_max)
-            val_range = max(raw_max - raw_min, 0.001)
-            padded_min = raw_min - val_range * 0.05
-            padded_max = raw_max + val_range * 0.05
-            padded_range = padded_max - padded_min
-
-            ticks = y_axis_ticks(raw_min, raw_max)
-            count = length(points)
-
-            poly =
-              points
-              |> Enum.with_index()
-              |> Enum.map(fn {{_ts, val}, i} ->
-                clamped = max(min(val, raw_max), raw_min)
-                x = plot_x + i / max(count - 1, 1) * plot_w
-                y = plot_y + (1 - (clamped - padded_min) / padded_range) * plot_h
-                {Float.round(x, 1), Float.round(y, 1)}
-              end)
-
-            polyline_str = Enum.map_join(poly, " ", fn {x, y} -> "#{x},#{y}" end)
-
-            {first_x, _} = List.first(poly)
-            {last_x, _} = List.last(poly)
-            bottom_y = plot_y + plot_h
-            area_str = polyline_str <> " #{last_x},#{bottom_y} #{first_x},#{bottom_y}"
-
-            tooltip =
-              Enum.map(points, fn {ts, val} ->
-                t_ms =
-                  case ts do
-                    %DateTime{} -> DateTime.to_unix(ts, :millisecond)
-                    ms when is_integer(ms) -> ms
-                    _ -> 0
-                  end
-
-                %{"t" => t_ms, "v" => val}
-              end)
-
-            {_ts, cur} = List.last(points)
-
-            {padded_min, padded_max, ticks, polyline_str, area_str, tooltip,
-             MetricFormatter.format(cur / 1.0, unit)}
-          else
-            {0, 1, [0.0, 0.25, 0.5, 0.75, 1.0], "", "", [], nil}
-          end
-
-        x_ticks =
-          if points != [] do
-            {first_ts, _} = List.first(points)
-            {last_ts, _} = List.last(points)
-            x_axis_ticks(first_ts, last_ts)
-          else
-            []
-          end
-
-        val_range = max(max_val - min_val, 0.001)
-
-        assigns =
-          assign(assigns,
-            graph_title: graph_title,
-            metric_name: metric_name,
-            unit: unit,
-            plot_x: plot_x,
-            plot_y: plot_y,
-            plot_w: plot_w,
-            plot_h: plot_h,
-            min_val: min_val,
-            max_val: max_val,
-            val_range: val_range,
-            y_ticks: y_ticks,
-            x_ticks: x_ticks,
-            polyline_points: polyline_points,
-            area_points: area_points,
-            tooltip_data: Jason.encode!(tooltip_data),
-            current_val: current_val
-          )
+        assigns = assign(assigns, graph_title: graph_title)
 
         ~H"""
-        <g data-expanded="true" data-points={@tooltip_data}>
-        <rect
-        x={@element.x}
-        y={@element.y}
-        width={@render_w}
-        height={@render_h}
-        rx="6"
-        ry="6"
-        fill="#0c1222"
-        class="canvas-element__body"
-        />
-        <clipPath id={"graph-clip-#{@element.id}"}>
-        <rect x={@element.x} y={@element.y} width={@render_w} height={@render_h} rx="6" />
-        </clipPath>
-
-        <%!-- Gridlines --%>
-        <line
-        :for={tick <- @y_ticks}
-        x1={@plot_x}
-        y1={@plot_y + (1 - (tick - @min_val) / @val_range) * @plot_h}
-        x2={@plot_x + @plot_w}
-        y2={@plot_y + (1 - (tick - @min_val) / @val_range) * @plot_h}
-        stroke="#1e293b"
-        stroke-width="0.5"
-        stroke-dasharray="4 3"
-        />
-
-        <%!-- Y-axis labels --%>
-        <text
-        :for={tick <- @y_ticks}
-        x={@plot_x - 4}
-        y={@plot_y + (1 - (tick - @min_val) / @val_range) * @plot_h + 3}
-        text-anchor="end"
-        fill="#64748b"
-        font-size="8"
-        font-family="monospace"
-        >
-        {MetricFormatter.format(tick / 1.0, @unit)}
-        </text>
-
-        <%!-- X-axis labels --%>
-        <text
-        :for={{ts, frac} <- @x_ticks}
-        x={@plot_x + frac * @plot_w}
-        y={@plot_y + @plot_h + 14}
-        text-anchor="middle"
-        fill="#64748b"
-        font-size="8"
-        font-family="monospace"
-        >
-        {format_time(ts)}
-        </text>
-
-        <%!-- Area fill --%>
-        <polygon
-        :if={@area_points != ""}
-        points={@area_points}
-        fill={@element.color}
-        opacity="0.12"
-        clip-path={"url(#graph-clip-#{@element.id})"}
-        />
-
-        <%!-- Graph line --%>
-        <polyline
-        :if={@polyline_points != ""}
-        points={@polyline_points}
-        fill="none"
-        stroke={@element.color}
-        stroke-width="1.5"
-        stroke-linejoin="round"
-        stroke-linecap="round"
-        class="canvas-graph__line"
-        clip-path={"url(#graph-clip-#{@element.id})"}
-        />
-
-        <%!-- Title --%>
-        <text
-        x={@element.x + 8}
-        y={@element.y + 14}
-        fill="#94a3b8"
-        font-size="10"
-        clip-path={"url(#graph-clip-#{@element.id})"}
-        >
-        {@graph_title}
-        </text>
-
-        <%!-- Legend --%>
-        <g transform={"translate(#{@element.x + @render_w - 8}, #{@element.y + 10})"}>
-        <rect x="-60" y="-6" width="60" height="12" rx="3" fill="#1e293b" opacity="0.8" />
-        <rect x="-56" y="-2" width="8" height="4" rx="1" fill={@element.color} />
-        <text x="-44" y="3" fill="#e2e8f0" font-size="7" font-family="monospace">
-          {@current_val || "---"}
-        </text>
-        </g>
+        <g data-expanded="true">
+          <rect
+            x={@element.x}
+            y={@element.y}
+            width={@render_w}
+            height={@render_h}
+            rx="6"
+            ry="6"
+            fill="#0c1222"
+            class="canvas-element__body"
+          />
+          <clipPath id={"graph-clip-#{@element.id}"}>
+            <rect x={@element.x} y={@element.y} width={@render_w} height={@render_h} rx="6" />
+          </clipPath>
+          <%!-- Legend chrome; the current-value text inside it is pushed
+               with the rest of the dynamic internals below. --%>
+          <g transform={"translate(#{@element.x + @render_w - 8}, #{@element.y + 10})"}>
+            <rect x="-60" y="-6" width="60" height="12" rx="3" fill="#1e293b" opacity="0.8" />
+            <rect x="-56" y="-2" width="8" height="4" rx="1" fill={@element.color} />
+          </g>
+          <%!-- Dynamic internals (gridlines, axis labels, area, line,
+               current value): rendered client-side by the Canvas hook from
+               "graph:expanded" push_event payloads (expanded_graph_payload/3);
+               LiveView never patches this subtree, so data ticks produce
+               zero template diff. --%>
+          <g id={"graph-dyn-#{@element.id}-expanded"} phx-update="ignore"></g>
+          <text
+            x={@element.x + 8}
+            y={@element.y + 14}
+            fill="#94a3b8"
+            font-size="10"
+            clip-path={"url(#graph-clip-#{@element.id})"}
+          >
+            {@graph_title}
+          </text>
         </g>
         """
       end)
@@ -551,22 +388,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
         graph_title = if unit, do: "#{base_title} (#{unit})", else: base_title
         graph_icon = IconCatalog.graph_icon_name(assigns.element)
-        points = Enum.reverse(assigns.graph_data_points)
-        meta = assigns.element.meta
-
-        {plot_x, plot_y, plot_w, plot_h, min_val, max_val, val_range, y_ticks, x_ticks,
-         polyline_points} =
-          compact_graph_geometry(assigns.element, points, meta)
-
-        y_tick_labels =
-          Enum.map(y_ticks, fn tick ->
-            {tick, MetricFormatter.format(tick / 1.0, unit)}
-          end)
-
-        x_tick_labels =
-          Enum.map(x_ticks, fn {ts, frac} ->
-            {format_time(ts), frac}
-          end)
+        {plot_x, plot_y, plot_w, plot_h} = compact_plot_box(assigns.element)
 
         assigns =
           assign(assigns,
@@ -576,13 +398,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             plot_x: plot_x,
             plot_y: plot_y,
             plot_w: plot_w,
-            plot_h: plot_h,
-            min_val: min_val,
-            max_val: max_val,
-            val_range: val_range,
-            y_tick_labels: y_tick_labels,
-            x_tick_labels: x_tick_labels,
-            polyline_points: polyline_points
+            plot_h: plot_h
           )
 
         ~H"""
@@ -599,49 +415,12 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         <clipPath id={"graph-plot-clip-#{@element.id}"}>
           <rect x={@plot_x} y={@plot_y} width={@plot_w} height={@plot_h} rx="2" />
         </clipPath>
-        <line
-          :for={{tick, _label} <- @y_tick_labels}
-          x1={@plot_x}
-          y1={@plot_y + (1 - (tick - @min_val) / @val_range) * @plot_h}
-          x2={@plot_x + @plot_w}
-          y2={@plot_y + (1 - (tick - @min_val) / @val_range) * @plot_h}
-          stroke="#1e293b"
-          stroke-width="0.5"
-          stroke-dasharray="3 3"
-        />
-        <text
-          :for={{tick, label} <- @y_tick_labels}
-          x={@plot_x - 3}
-          y={compact_y_tick_label_y(tick, @plot_y, @plot_h, @min_val, @val_range)}
-          text-anchor="end"
-          fill="#64748b"
-          font-size="6"
-          font-family="monospace"
-        >
-          {label}
-        </text>
-        <text
-          :for={{label, frac} <- @x_tick_labels}
-          x={compact_x_tick_label_x(frac, @plot_x, @plot_w)}
-          y={@element.y + @element.height - 2}
-          text-anchor="middle"
-          fill="#64748b"
-          font-size="6"
-          font-family="monospace"
-        >
-          {label}
-        </text>
-        <polyline
-          :if={@graph_points != ""}
-          points={@polyline_points}
-          fill="none"
-          stroke={@element.color}
-          stroke-width="1.5"
-          stroke-linejoin="round"
-          stroke-linecap="round"
-          class="canvas-graph__line"
-          clip-path={"url(#graph-plot-clip-#{@element.id})"}
-        />
+        <%!-- Dynamic internals (gridlines, axis labels, line, current
+             value): rendered client-side by the Canvas hook from
+             "graph:data" push_event payloads (compact_graph_payload/3);
+             LiveView never patches this subtree, so data ticks produce
+             zero template diff. --%>
+        <g id={"graph-dyn-#{@element.id}"} phx-update="ignore"></g>
         <clipPath id={"graph-clip-#{@element.id}"}>
           <rect x={@element.x} y={@element.y} width={@element.width} height={@element.height} />
         </clipPath>
@@ -668,17 +447,6 @@ defmodule TimelessCanvas.Components.CanvasComponents do
           clip-path={"url(#graph-clip-#{@element.id})"}
         >
           {@graph_title}
-        </text>
-        <text
-          :if={@graph_value}
-          x={@element.x + @element.width - 18}
-          y={@element.y + 10}
-          text-anchor="end"
-          class="canvas-graph__title"
-          fill={@element.color}
-          font-size="8"
-        >
-          {@graph_value}
         </text>
         """
       end)
@@ -1348,6 +1116,191 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   defp span_status_label(:error), do: "ERR"
   defp span_status_label(_), do: "---"
 
+  # --- Graph push payloads ---
+  #
+  # Graph internals are no longer rendered through HEEx: the compact and
+  # expanded graph bodies only ship a static frame plus an empty
+  # phx-update="ignore" container, and CanvasLive pushes these payloads
+  # ("graph:data" / "graph:expanded") for the Canvas JS hook to render.
+  # All scaling math stays here, next to the geometry helpers it shares
+  # with the old server-rendered path.
+
+  @doc """
+  `push_event("graph:data", ...)` payload for a compact graph element.
+
+  `points_newest_first` is the element's entry in the `graph_data`
+  assign (newest point first, as produced by `DataQueries`).
+  """
+  def compact_graph_payload(element, points_newest_first, unit) do
+    points = Enum.reverse(points_newest_first)
+    meta = element.meta || %{}
+
+    {plot_x, plot_y, plot_w, plot_h, min_val, _max_val, val_range, y_ticks, x_ticks,
+     polyline_points} = compact_graph_geometry(element, points, meta)
+
+    grid =
+      Enum.map(y_ticks, fn tick ->
+        y = plot_y + (1 - (tick - min_val) / val_range) * plot_h
+        %{x1: plot_x, y1: y, x2: plot_x + plot_w, y2: y}
+      end)
+
+    y_labels =
+      Enum.map(y_ticks, fn tick ->
+        %{
+          x: plot_x - 3,
+          y: compact_y_tick_label_y(tick, plot_y, plot_h, min_val, val_range),
+          text: MetricFormatter.format(tick / 1.0, unit)
+        }
+      end)
+
+    x_labels =
+      Enum.map(x_ticks, fn {ts, frac} ->
+        %{
+          x: compact_x_tick_label_x(frac, plot_x, plot_w),
+          y: element.y + element.height - 2,
+          text: format_time(ts)
+        }
+      end)
+
+    value =
+      case points_newest_first do
+        [{_ts, val} | _] -> MetricFormatter.format(val / 1.0, unit)
+        _ -> nil
+      end
+
+    %{
+      id: element.id,
+      kind: "compact",
+      color: element.color,
+      points: polyline_points,
+      raw: raw_points(points),
+      grid: grid,
+      y_labels: y_labels,
+      x_labels: x_labels,
+      value: value,
+      value_pos: %{x: element.x + element.width - 18, y: element.y + 10}
+    }
+  end
+
+  @doc """
+  `push_event("graph:expanded", ...)` payload for the expanded graph.
+
+  `points_newest_first` is the `expanded_graph_data` assign (newest
+  point first). Mirrors the geometry the expanded body used to render
+  server-side, at 2x element size.
+  """
+  def expanded_graph_payload(element, points_newest_first, unit) do
+    render_w = element.width * 2
+    render_h = element.height * 2
+    pad_left = 50
+    pad_right = 10
+    pad_top = 30
+    pad_bottom = 20
+    plot_x = element.x + pad_left
+    plot_y = element.y + pad_top
+    plot_w = render_w - pad_left - pad_right
+    plot_h = render_h - pad_top - pad_bottom
+
+    points = Enum.reverse(points_newest_first)
+    meta = element.meta || %{}
+
+    {min_val, max_val, y_ticks, polyline_str, area_str, current_val} =
+      if points != [] do
+        {min_p, max_p} = Enum.min_max_by(points, &elem(&1, 1))
+        data_min = elem(min_p, 1)
+        data_max = elem(max_p, 1)
+        raw_min = graph_bound_min(meta, data_min)
+        raw_max = parse_graph_bound(meta["y_max"], data_max)
+        val_range = max(raw_max - raw_min, 0.001)
+        padded_min = raw_min - val_range * 0.05
+        padded_max = raw_max + val_range * 0.05
+        padded_range = padded_max - padded_min
+
+        ticks = y_axis_ticks(raw_min, raw_max)
+        count = length(points)
+
+        poly =
+          points
+          |> Enum.with_index()
+          |> Enum.map(fn {{_ts, val}, i} ->
+            clamped = max(min(val, raw_max), raw_min)
+            x = plot_x + i / max(count - 1, 1) * plot_w
+            y = plot_y + (1 - (clamped - padded_min) / padded_range) * plot_h
+            {Float.round(x, 1), Float.round(y, 1)}
+          end)
+
+        polyline_str = Enum.map_join(poly, " ", fn {x, y} -> "#{x},#{y}" end)
+
+        {first_x, _} = List.first(poly)
+        {last_x, _} = List.last(poly)
+        bottom_y = plot_y + plot_h
+        area_str = polyline_str <> " #{last_x},#{bottom_y} #{first_x},#{bottom_y}"
+
+        {_ts, cur} = List.last(points)
+
+        {padded_min, padded_max, ticks, polyline_str, area_str,
+         MetricFormatter.format(cur / 1.0, unit)}
+      else
+        {0, 1, [0.0, 0.25, 0.5, 0.75, 1.0], "", "", nil}
+      end
+
+    x_ticks =
+      if points != [] do
+        {first_ts, _} = List.first(points)
+        {last_ts, _} = List.last(points)
+        x_axis_ticks(first_ts, last_ts)
+      else
+        []
+      end
+
+    val_range = max(max_val - min_val, 0.001)
+
+    grid =
+      Enum.map(y_ticks, fn tick ->
+        y = plot_y + (1 - (tick - min_val) / val_range) * plot_h
+        %{x1: plot_x, y1: y, x2: plot_x + plot_w, y2: y}
+      end)
+
+    y_labels =
+      Enum.map(y_ticks, fn tick ->
+        %{
+          x: plot_x - 4,
+          y: plot_y + (1 - (tick - min_val) / val_range) * plot_h + 3,
+          text: MetricFormatter.format(tick / 1.0, unit)
+        }
+      end)
+
+    x_labels =
+      Enum.map(x_ticks, fn {ts, frac} ->
+        %{x: plot_x + frac * plot_w, y: plot_y + plot_h + 14, text: format_time(ts)}
+      end)
+
+    %{
+      id: element.id,
+      kind: "expanded",
+      color: element.color,
+      points: polyline_str,
+      area: area_str,
+      raw: raw_points(points),
+      grid: grid,
+      y_labels: y_labels,
+      x_labels: x_labels,
+      value: current_val,
+      # Absolute coordinates of the legend value text (the legend chrome
+      # itself is server-rendered).
+      value_pos: %{x: element.x + render_w - 52, y: element.y + 13}
+    }
+  end
+
+  # JSON-safe [[unix_ms, value], ...] for the JS tooltip cache.
+  defp raw_points(points_asc) do
+    Enum.map(points_asc, fn {ts, val} -> [ts_to_ms(ts), val] end)
+  end
+
+  defp ts_to_ms(%DateTime{} = dt), do: DateTime.to_unix(dt, :millisecond)
+  defp ts_to_ms(ms) when is_integer(ms), do: ms
+  defp ts_to_ms(_), do: 0
+
   # --- Graph detail helpers ---
 
   defp format_time(ts) do
@@ -1416,20 +1369,20 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     end
   end
 
+  # Plot box shared by the static clipPath (HEEx) and the pushed
+  # geometry (compact_graph_payload/3).
+  defp compact_plot_box(element) do
+    {element.x + 28, element.y + 20, max(element.width - 32, 1), max(element.height - 34, 1)}
+  end
+
   defp compact_graph_geometry(element, [], _meta) do
-    plot_x = element.x + 28
-    plot_y = element.y + 20
-    plot_w = max(element.width - 32, 1)
-    plot_h = max(element.height - 34, 1)
+    {plot_x, plot_y, plot_w, plot_h} = compact_plot_box(element)
 
     {plot_x, plot_y, plot_w, plot_h, 0.0, 1.0, 1.0, [], [], ""}
   end
 
   defp compact_graph_geometry(element, points, meta) do
-    plot_x = element.x + 28
-    plot_y = element.y + 20
-    plot_w = max(element.width - 32, 1)
-    plot_h = max(element.height - 34, 1)
+    {plot_x, plot_y, plot_w, plot_h} = compact_plot_box(element)
 
     {min_p, max_p} = Enum.min_max_by(points, &elem(&1, 1))
     data_min = elem(min_p, 1)
