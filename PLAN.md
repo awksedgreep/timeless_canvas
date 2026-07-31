@@ -94,11 +94,29 @@ Status legend: `[x]` done · `[ ]` pending
       Stream rows carry only a content-derived `data-entry-id` (stamped
       in `DataQueries.put_entry_id/1` for both historical fills and
       StreamManager live prepends) instead of a per-render JSON attribute.
-- [ ] Viewbox changes assign only `view_box`; register elements/streams only when
-      membership changes; idempotent `StreamManager` registration (today every
-      pan/zoom tears down and recreates all stream subscriptions — `canvas_live.ex:1156-1184`)
-- [ ] Batch stream broadcasts (~250ms windows) instead of per-log-line on a
-      global topic (`stream_manager.ex:167-185`)
+- [x] Viewbox changes assign only `view_box`; register elements/streams only when
+      membership changes; idempotent `StreamManager` registration (was: every
+      pan/zoom tore down and recreated all stream subscriptions — `canvas_live.ex:1156-1184`).
+      Pan/zoom/center/fit go through a new `update_viewbox/2` fast path
+      (assigns `canvas`/`history.present` only — no VariableResolver, no
+      registration, no graph re-push; history-bypass semantics preserved).
+      All other mutations keep `resolve_and_assign` but `register_elements/1`
+      now diffs a registration fingerprint (`%{element_id => {type, resolved
+      meta}}`) and skips Manager/StreamManager/poller re-registration when it
+      is unchanged (moves, resizes, label edits, z-order, statuses).
+      `StreamManager.register_log_stream/register_trace_stream` are idempotent:
+      identical opts + live subscription task = no-op; only changed opts (or a
+      dead task) kill+respawn the backend subscription.
+- [x] Batch stream broadcasts (~250ms windows) instead of per-log-line on a
+      global topic (`stream_manager.ex:167-185`). StreamManager registrations
+      now carry a `canvas_id` and broadcast on per-canvas
+      `stream_topic(canvas_id)`; entries accumulate per element for
+      `:stream_batch_ms` (app env, default 250ms) and flush as one
+      `{:stream_entries, id, [entries]}` / `{:stream_spans, id, [spans]}`
+      message (newest first), with an immediate flush at 50 pending entries.
+      CanvasLive subscribes per-canvas and merges entry lists (still dropped
+      outside `:live` timeline mode). Test support adds a subscribe-counting
+      `FakeStreamBackend` that can emit live entries/spans.
 
 ## Phase 3 — Browser/input fixes (independent of 1-2)
 

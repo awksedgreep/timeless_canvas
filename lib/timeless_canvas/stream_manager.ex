@@ -2,16 +2,35 @@ defmodule TimelessCanvas.StreamManager do
   @moduledoc """
   GenServer that manages live log and trace stream subscriptions.
 
-  Each canvas element of type :log_stream or :trace_stream registers here.
-  A dedicated Task per element subscribes via the configured stream backend,
-  then forwards messages to this GenServer for buffering and PubSub broadcast.
+  Each canvas element of type :log_stream or :trace_stream registers here
+  under the canvas it belongs to. A dedicated Task per element subscribes
+  via the configured stream backend, then forwards messages to this
+  GenServer for buffering and PubSub broadcast.
+
+  Registration is idempotent: re-registering an element with the same
+  backend opts while its subscription task is alive is a no-op (the
+  existing subscription is kept). Only a change in opts — or a dead task —
+  tears the subscription down and re-subscribes.
+
+  Broadcasts are batched per element and go out on the per-canvas
+  `stream_topic/1`: entries accumulate for `:stream_batch_ms`
+  (app env, default 250ms) and are then published as one
+
+      {:stream_entries, element_id, [entry, ...]}   # log streams
+      {:stream_spans, element_id, [span, ...]}      # trace streams
+
+  message per element per window, newest entry first. A window is flushed
+  early when it reaches 50 pending entries (backpressure cap).
   """
 
   use GenServer
 
   @max_buffer 50
+  @flush_cap 50
+  @default_batch_ms 250
 
-  def topic, do: "timeless_canvas:streams"
+  @doc "Per-canvas PubSub topic carrying batched stream broadcasts."
+  def stream_topic(canvas_id), do: "timeless_canvas:canvas:#{canvas_id}:streams"
 
   # --- Client API ---
 
@@ -19,12 +38,12 @@ defmodule TimelessCanvas.StreamManager do
     GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
   end
 
-  def register_log_stream(element_id, opts \\ [], server \\ __MODULE__) do
-    GenServer.call(server, {:register, :log, element_id, opts})
+  def register_log_stream(canvas_id, element_id, opts \\ [], server \\ __MODULE__) do
+    GenServer.call(server, {:register, :log, canvas_id, element_id, opts})
   end
 
-  def register_trace_stream(element_id, opts \\ [], server \\ __MODULE__) do
-    GenServer.call(server, {:register, :trace, element_id, opts})
+  def register_trace_stream(canvas_id, element_id, opts \\ [], server \\ __MODULE__) do
+    GenServer.call(server, {:register, :trace, canvas_id, element_id, opts})
   end
 
   def unregister_stream(element_id, server \\ __MODULE__) do
@@ -38,30 +57,33 @@ defmodule TimelessCanvas.StreamManager do
   # --- Server callbacks ---
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     Process.flag(:trap_exit, true)
-    {:ok, %{subscriptions: %{}}}
+    {:ok, %{subscriptions: %{}, batch_ms: opts[:batch_ms]}}
   end
 
   @impl true
-  def handle_call({:register, type, element_id, opts}, _from, state) do
+  def handle_call({:register, type, canvas_id, element_id, opts}, _from, state) do
     case stream_backend(type) do
       nil ->
         {:reply, :ok, state}
 
       backend ->
-        state = do_unregister(state, element_id)
+        case state.subscriptions[element_id] do
+          %{type: ^type, opts: ^opts, task_pid: pid} = sub when is_pid(pid) ->
+            if Process.alive?(pid) do
+              # Identical live registration: keep the subscription, just
+              # track the (possibly different) canvas for broadcasts.
+              {:reply, :ok,
+               put_in(state, [:subscriptions, element_id], %{sub | canvas_id: canvas_id})}
+            else
+              {:reply, :ok,
+               respawn_subscription(state, backend, type, canvas_id, element_id, opts)}
+            end
 
-        manager = self()
-
-        task_pid =
-          spawn_link(fn ->
-            subscribe_and_forward(backend, type, element_id, opts, manager)
-          end)
-
-        sub = %{type: type, task_pid: task_pid, buffer: [], opts: opts}
-        state = put_in(state, [:subscriptions, element_id], sub)
-        {:reply, :ok, state}
+          _ ->
+            {:reply, :ok, respawn_subscription(state, backend, type, canvas_id, element_id, opts)}
+        end
     end
   end
 
@@ -92,8 +114,7 @@ defmodule TimelessCanvas.StreamManager do
         metadata: entry.metadata
       })
 
-    state = buffer_and_broadcast(state, element_id, :stream_entry, entry_map)
-    {:noreply, state}
+    {:noreply, buffer_entry(state, element_id, entry_map)}
   end
 
   def handle_info({:stream_trace_span, element_id, span}, state) do
@@ -110,14 +131,18 @@ defmodule TimelessCanvas.StreamManager do
         service: get_service(span)
       })
 
-    state = buffer_and_broadcast(state, element_id, :stream_span, span_map)
-    {:noreply, state}
+    {:noreply, buffer_entry(state, element_id, span_map)}
+  end
+
+  def handle_info({:flush, element_id}, state) do
+    {:noreply, flush_pending(state, element_id)}
   end
 
   def handle_info({:EXIT, pid, _reason}, state) do
     state =
       case Enum.find(state.subscriptions, fn {_id, sub} -> sub.task_pid == pid end) do
-        {element_id, _sub} ->
+        {element_id, sub} ->
+          cancel_flush_timer(sub)
           %{state | subscriptions: Map.delete(state.subscriptions, element_id)}
 
         nil ->
@@ -136,16 +161,42 @@ defmodule TimelessCanvas.StreamManager do
     Keyword.get(backends, type) || backends[type]
   end
 
+  defp respawn_subscription(state, backend, type, canvas_id, element_id, opts) do
+    state = do_unregister(state, element_id)
+    manager = self()
+
+    task_pid =
+      spawn_link(fn ->
+        subscribe_and_forward(backend, type, element_id, opts, manager)
+      end)
+
+    sub = %{
+      type: type,
+      canvas_id: canvas_id,
+      task_pid: task_pid,
+      buffer: [],
+      opts: opts,
+      pending: [],
+      flush_timer: nil
+    }
+
+    put_in(state, [:subscriptions, element_id], sub)
+  end
+
   defp do_unregister(state, element_id) do
     case Map.pop(state.subscriptions, element_id) do
       {nil, _subs} ->
         state
 
       {sub, subs} ->
+        cancel_flush_timer(sub)
         if Process.alive?(sub.task_pid), do: Process.exit(sub.task_pid, :shutdown)
         %{state | subscriptions: subs}
     end
   end
+
+  defp cancel_flush_timer(%{flush_timer: nil}), do: :ok
+  defp cancel_flush_timer(%{flush_timer: timer}), do: Process.cancel_timer(timer)
 
   defp subscribe_and_forward(backend, type, element_id, opts, manager) do
     backend.subscribe(opts)
@@ -168,24 +219,55 @@ defmodule TimelessCanvas.StreamManager do
     end
   end
 
-  defp buffer_and_broadcast(state, element_id, msg_type, entry_map) do
+  defp buffer_entry(state, element_id, entry_map) do
     case get_in(state, [:subscriptions, element_id]) do
       nil ->
         state
 
       sub ->
         buffer = Enum.take([entry_map | sub.buffer], @max_buffer)
-        sub = %{sub | buffer: buffer}
+        pending = [entry_map | sub.pending]
+        sub = %{sub | buffer: buffer, pending: pending}
         state = put_in(state, [:subscriptions, element_id], sub)
+
+        cond do
+          length(pending) >= @flush_cap ->
+            flush_pending(state, element_id)
+
+          sub.flush_timer == nil ->
+            timer = Process.send_after(self(), {:flush, element_id}, batch_ms(state))
+            put_in(state, [:subscriptions, element_id, :flush_timer], timer)
+
+          true ->
+            state
+        end
+    end
+  end
+
+  defp flush_pending(state, element_id) do
+    case get_in(state, [:subscriptions, element_id]) do
+      nil ->
+        state
+
+      %{pending: []} = sub ->
+        put_in(state, [:subscriptions, element_id], %{sub | flush_timer: nil})
+
+      sub ->
+        cancel_flush_timer(sub)
+        msg_type = if sub.type == :log, do: :stream_entries, else: :stream_spans
 
         Phoenix.PubSub.broadcast(
           TimelessCanvas.pubsub(),
-          topic(),
-          {msg_type, element_id, entry_map}
+          stream_topic(sub.canvas_id),
+          {msg_type, element_id, sub.pending}
         )
 
-        state
+        put_in(state, [:subscriptions, element_id], %{sub | pending: [], flush_timer: nil})
     end
+  end
+
+  defp batch_ms(state) do
+    state.batch_ms || Application.get_env(:timeless_canvas, :stream_batch_ms, @default_batch_ms)
   end
 
   defp get_service(span) do

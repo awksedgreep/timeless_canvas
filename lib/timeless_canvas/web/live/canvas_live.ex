@@ -62,7 +62,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       if connected?(socket) do
         Phoenix.PubSub.subscribe(pubsub(), StatusManager.status_topic(canvas_id))
-        Phoenix.PubSub.subscribe(pubsub(), StreamManager.topic())
+        Phoenix.PubSub.subscribe(pubsub(), StreamManager.stream_topic(canvas_id))
         Phoenix.PubSub.subscribe(pubsub(), CanvasPoller.data_topic(canvas_id))
       end
 
@@ -86,7 +86,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       stream_data =
         if connected?(socket) and map_size(canvas.elements) > 0 do
           StatusManager.register_elements(canvas_id, Map.values(resolved_elements))
-          register_stream_elements(resolved_elements)
+          register_stream_elements(canvas_id, resolved_elements)
         else
           %{}
         end
@@ -139,6 +139,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           stream_popover: nil,
           metric_units: %{},
           resolved_elements: resolved_elements,
+          registration_fingerprint: registration_fingerprint(resolved_elements),
           show_add_variable: false,
           debug_counts: %{
             status_msgs: 0,
@@ -1245,6 +1246,17 @@ defmodule TimelessCanvas.Web.CanvasLive do
     |> push_graph_data()
   end
 
+  # Fast path for pan/zoom/center/fit: only `canvas.view_box` changed, so
+  # skip variable resolution, Manager/StreamManager/poller registration,
+  # and graph re-pushes (graph payloads are element-geometry based, not
+  # viewbox based). History semantics match update_canvas/2: the present
+  # is replaced in place, no history entry is pushed.
+  defp update_viewbox(socket, %ViewBox{} = view_box) do
+    canvas = %{socket.assigns.canvas | view_box: view_box}
+    history = %{socket.assigns.history | present: canvas}
+    assign(socket, history: history, canvas: canvas)
+  end
+
   # Graph internals live in phx-update="ignore" containers and are
   # delivered as push_events ("graph:data" for compact graphs,
   # "graph:expanded" for the expanded one) instead of HEEx. This helper
@@ -1285,24 +1297,45 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  # Re-register with the Manager / StreamManager / poller only when the
+  # resolved element set changed in a way registration cares about (see
+  # registration_fingerprint/1); label edits, moves, resizes, z-order and
+  # status changes leave the fingerprint identical and skip all of it.
   defp register_elements(socket) do
     resolved = socket.assigns.resolved_elements
-    StatusManager.register_elements(socket.assigns.canvas_id, Map.values(resolved))
+    fingerprint = registration_fingerprint(resolved)
 
-    if connected?(socket) do
-      CanvasPoller.update_elements(socket.assigns.canvas_id, resolved,
-        span: socket.assigns.timeline_span
-      )
-    end
+    if fingerprint == socket.assigns.registration_fingerprint do
+      socket
+    else
+      StatusManager.register_elements(socket.assigns.canvas_id, Map.values(resolved))
 
-    stream_data =
-      if connected?(socket) and map_size(resolved) > 0 do
-        register_stream_elements(resolved)
-      else
-        %{}
+      if connected?(socket) do
+        CanvasPoller.update_elements(socket.assigns.canvas_id, resolved,
+          span: socket.assigns.timeline_span
+        )
       end
 
-    assign(socket, stream_data: Map.merge(socket.assigns.stream_data, stream_data))
+      stream_data =
+        if connected?(socket) and map_size(resolved) > 0 do
+          register_stream_elements(socket.assigns.canvas_id, resolved)
+        else
+          %{}
+        end
+
+      assign(socket,
+        registration_fingerprint: fingerprint,
+        stream_data: Map.merge(socket.assigns.stream_data, stream_data)
+      )
+    end
+  end
+
+  # The subset of the resolved element set that registration depends on:
+  # Manager subscriptions, stream-backend opts, and poller queries are all
+  # driven by element ids, types, and (resolved) meta. Geometry, labels,
+  # colors, z-order, and status are irrelevant to them.
+  defp registration_fingerprint(resolved_elements) do
+    Map.new(resolved_elements, fn {id, el} -> {id, {el.type, el.meta}} end)
   end
 
   defp resolve_and_assign(socket) do
@@ -1500,7 +1533,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   @impl true
   def handle_event("canvas:pan", %{"dx" => dx, "dy" => dy}, socket) do
     canvas = Canvas.pan(socket.assigns.canvas, dx, dy)
-    {:noreply, update_canvas(socket, canvas)}
+    {:noreply, update_viewbox(socket, canvas.view_box)}
   end
 
   def handle_event(
@@ -1517,8 +1550,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
     vb = clamp_view_box(requested_vb)
 
-    canvas = %{socket.assigns.canvas | view_box: vb}
-    {:noreply, update_canvas(socket, canvas)}
+    {:noreply, update_viewbox(socket, vb)}
   end
 
   def handle_event("zoom_reset", _params, socket) do
@@ -1535,11 +1567,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
         height: target_h
       })
 
-    canvas = %{socket.assigns.canvas | view_box: new_vb}
-
     socket =
       socket
-      |> update_canvas(canvas)
+      |> update_viewbox(new_vb)
       |> push_event("set-viewbox", %{
         x: new_vb.min_x,
         y: new_vb.min_y,
@@ -1561,11 +1591,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
       height: vb.height
     }
 
-    canvas = %{socket.assigns.canvas | view_box: new_vb}
-
     socket =
       socket
-      |> update_canvas(canvas)
+      |> update_viewbox(new_vb)
       |> push_event("set-viewbox", %{
         x: new_vb.min_x,
         y: new_vb.min_y,
@@ -1612,11 +1640,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
         height: fit_h
       }
 
-      canvas = %{socket.assigns.canvas | view_box: new_vb}
-
       socket =
         socket
-        |> update_canvas(canvas)
+        |> update_viewbox(new_vb)
         |> push_event("set-viewbox", %{
           x: new_vb.min_x,
           y: new_vb.min_y,
@@ -2156,10 +2182,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
         case type do
           :log_stream ->
-            StreamManager.register_log_stream(el.id, build_log_opts(meta))
+            StreamManager.register_log_stream(
+              socket.assigns.canvas_id,
+              el.id,
+              build_log_opts(meta)
+            )
 
           :trace_stream ->
-            StreamManager.register_trace_stream(el.id, build_trace_opts(meta))
+            StreamManager.register_trace_stream(
+              socket.assigns.canvas_id,
+              el.id,
+              build_trace_opts(meta)
+            )
         end
 
         {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
@@ -2345,10 +2379,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       case Map.get(socket.assigns.resolved_elements, id) do
         %{type: :log_stream} = resolved ->
-          StreamManager.register_log_stream(id, build_log_opts(resolved.meta))
+          StreamManager.register_log_stream(
+            socket.assigns.canvas_id,
+            id,
+            build_log_opts(resolved.meta)
+          )
 
         %{type: :trace_stream} = resolved ->
-          StreamManager.register_trace_stream(id, build_trace_opts(resolved.meta))
+          StreamManager.register_trace_stream(
+            socket.assigns.canvas_id,
+            id,
+            build_trace_opts(resolved.meta)
+          )
 
         _ ->
           :ok
@@ -2633,41 +2675,21 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
-  def handle_info({:stream_entry, element_id, entry_map}, socket) do
+  # Batched per-canvas stream broadcasts from the StreamManager: one
+  # message per element per batch window, entries newest-first (matching
+  # the prepend order of the old per-entry broadcasts). Live entries are
+  # still dropped while scrubbed into historical mode.
+  def handle_info({:stream_entries, element_id, new_entries}, socket) do
     socket =
       update(socket, :debug_counts, &Map.update!(&1, :stream_entry_msgs, fn n -> n + 1 end))
 
-    if @profile_skip_stream_updates do
-      {:noreply, socket}
-    else
-      if socket.assigns.timeline_mode == :live do
-        stream_data = socket.assigns.stream_data
-        entries = Map.get(stream_data, element_id, [])
-        entries = Enum.take([entry_map | entries], DataQueries.max_stream_entries())
-        stream_data = Map.put(stream_data, element_id, entries)
-        {:noreply, assign(socket, stream_data: stream_data)}
-      else
-        {:noreply, socket}
-      end
-    end
+    merge_stream_entries(socket, element_id, new_entries)
   end
 
-  def handle_info({:stream_span, element_id, span_map}, socket) do
+  def handle_info({:stream_spans, element_id, new_spans}, socket) do
     socket = update(socket, :debug_counts, &Map.update!(&1, :stream_span_msgs, fn n -> n + 1 end))
 
-    if @profile_skip_stream_updates do
-      {:noreply, socket}
-    else
-      if socket.assigns.timeline_mode == :live do
-        stream_data = socket.assigns.stream_data
-        entries = Map.get(stream_data, element_id, [])
-        entries = Enum.take([span_map | entries], DataQueries.max_stream_entries())
-        stream_data = Map.put(stream_data, element_id, entries)
-        {:noreply, assign(socket, stream_data: stream_data)}
-      else
-        {:noreply, socket}
-      end
-    end
+    merge_stream_entries(socket, element_id, new_spans)
   end
 
   def handle_info(:autosave, socket) do
@@ -2706,6 +2728,17 @@ defmodule TimelessCanvas.Web.CanvasLive do
        stream_span_msgs: 0
      })
      |> schedule_debug_report()}
+  end
+
+  defp merge_stream_entries(socket, element_id, new_entries) do
+    if @profile_skip_stream_updates or socket.assigns.timeline_mode != :live do
+      {:noreply, socket}
+    else
+      stream_data = socket.assigns.stream_data
+      entries = Map.get(stream_data, element_id, [])
+      entries = Enum.take(new_entries ++ entries, DataQueries.max_stream_entries())
+      {:noreply, assign(socket, stream_data: Map.put(stream_data, element_id, entries))}
+    end
   end
 
   # --- Async initial data load ---
@@ -3226,17 +3259,17 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp stream_entries_for(_element, _stream_data), do: []
 
-  defp register_stream_elements(elements) do
+  defp register_stream_elements(canvas_id, elements) do
     Enum.reduce(elements, %{}, fn {_id, el}, acc ->
       case el.type do
         :log_stream ->
           opts = build_log_opts(el.meta)
-          StreamManager.register_log_stream(el.id, opts)
+          StreamManager.register_log_stream(canvas_id, el.id, opts)
           Map.put(acc, el.id, StreamManager.get_buffer(el.id))
 
         :trace_stream ->
           opts = build_trace_opts(el.meta)
-          StreamManager.register_trace_stream(el.id, opts)
+          StreamManager.register_trace_stream(canvas_id, el.id, opts)
           Map.put(acc, el.id, StreamManager.get_buffer(el.id))
 
         _ ->

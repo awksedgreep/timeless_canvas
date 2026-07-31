@@ -9,6 +9,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
   alias TimelessCanvas.DataQueries
   alias TimelessCanvas.DataSource.Manager
   alias TimelessCanvas.StreamManager
+  alias TimelessCanvas.Test.FakeStreamBackend
 
   defp encode(canvas) do
     # Simulate the JSON round trip a DB-backed record goes through
@@ -631,11 +632,11 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       })
     end
 
-    defp prepend_entry(element_id, entry) do
+    defp prepend_entry(canvas_id, element_id, entry) do
       Phoenix.PubSub.broadcast(
         TimelessCanvas.TestPubSub,
-        StreamManager.topic(),
-        {:stream_entry, element_id, entry}
+        StreamManager.stream_topic(canvas_id),
+        {:stream_entries, element_id, [entry]}
       )
     end
 
@@ -656,7 +657,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       render_async(view)
 
       first = log_entry("first-entry")
-      prepend_entry(el.id, first)
+      prepend_entry(record.id, el.id, first)
 
       html = render(view)
       assert html =~ "first-entry"
@@ -676,7 +677,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       # still resolve the originally clicked entry (the old index-based
       # code would have shown "second-entry" here).
       second = log_entry("second-entry", :error)
-      prepend_entry(el.id, second)
+      prepend_entry(record.id, el.id, second)
       assert render(view) =~ "second-entry"
 
       render_hook(view, "stream:entry_click", %{
@@ -693,7 +694,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
       render_async(view)
 
-      prepend_entry(el.id, log_entry("only-entry"))
+      prepend_entry(record.id, el.id, log_entry("only-entry"))
       render(view)
 
       render_hook(view, "stream:entry_click", %{
@@ -703,6 +704,123 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
 
       assert popover_message(view) == nil
       refute render(view) =~ "stream-popover"
+    end
+  end
+
+  describe "stream registration and viewbox fast path" do
+    defp with_fake_stream_backends do
+      previous = Application.get_env(:timeless_canvas, :stream_backends)
+
+      Application.put_env(:timeless_canvas, :stream_backends,
+        log: FakeStreamBackend,
+        trace: FakeStreamBackend
+      )
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:timeless_canvas, :stream_backends)
+          value -> Application.put_env(:timeless_canvas, :stream_backends, value)
+        end
+      end)
+
+      FakeStreamBackend.reset()
+      :ok
+    end
+
+    defp seed_registered_stream_canvas(user) do
+      {canvas, el} =
+        Canvas.add_element(Canvas.new(snap_to_grid: false), %{
+          type: :log_stream,
+          x: 100.0,
+          y: 100.0,
+          label: "logs",
+          meta: %{"host" => "web-1"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: encode(canvas)})
+      on_exit(fn -> StreamManager.unregister_stream(el.id) end)
+      {record, el}
+    end
+
+    test "canvas:pan changes only the viewbox: no re-registration, no graph push", %{
+      conn: conn,
+      user: user
+    } do
+      with_fake_stream_backends()
+      {record, _el} = seed_registered_stream_canvas(user)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+      assert eventually(fn -> FakeStreamBackend.subscribe_count() == 1 end)
+
+      vb_before = :sys.get_state(view.pid).socket.assigns.canvas.view_box
+      fingerprint_before = :sys.get_state(view.pid).socket.assigns.registration_fingerprint
+
+      render_hook(view, "canvas:pan", %{"dx" => 25, "dy" => -10})
+
+      assigns = :sys.get_state(view.pid).socket.assigns
+      assert assigns.canvas.view_box.min_x == vb_before.min_x + 25
+      assert assigns.canvas.view_box.min_y == vb_before.min_y - 10
+      assert assigns.registration_fingerprint == fingerprint_before
+
+      # No backend re-subscription and no graph payload push from the pan.
+      Process.sleep(50)
+      assert FakeStreamBackend.subscribe_count() == 1
+      refute_push_event(view, "graph:data", %{}, 0)
+    end
+
+    test "geometry-only mutations skip re-registration; meta changes re-register", %{
+      conn: conn,
+      user: user
+    } do
+      with_fake_stream_backends()
+      {record, el} = seed_registered_stream_canvas(user)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+      assert eventually(fn -> FakeStreamBackend.subscribe_count() == 1 end)
+
+      # A move goes through push_canvas but leaves the registration
+      # fingerprint ({type, meta} per element) unchanged.
+      render_hook(view, "element:move", %{"id" => el.id, "dx" => 30, "dy" => 0})
+      Process.sleep(50)
+      assert FakeStreamBackend.subscribe_count() == 1
+
+      # A meta change that alters the backend opts must re-subscribe.
+      # ("level" rather than "host": decode derives a literal host *pin*
+      # from meta, so a host meta edit does not change the resolved host.)
+      render_hook(view, "property:update_meta", %{"element_id" => el.id, "level" => "error"})
+      assert eventually(fn -> FakeStreamBackend.subscribe_count() == 2 end)
+
+      # Re-registration replaced, not duplicated, the subscription: the
+      # opts now carry the level filter.
+      assert eventually(fn ->
+               live_subscriber_opts =
+                 for {pid, opts} <- FakeStreamBackend.subscribers(), Process.alive?(pid), do: opts
+
+               live_subscriber_opts == [[level: :error, metadata: %{"host" => "web-1"}]]
+             end)
+    end
+
+    test "live entries render end to end through the batched path", %{conn: conn, user: user} do
+      with_fake_stream_backends()
+      Application.put_env(:timeless_canvas, :stream_batch_ms, 20)
+      on_exit(fn -> Application.delete_env(:timeless_canvas, :stream_batch_ms) end)
+
+      {record, _el} = seed_registered_stream_canvas(user)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+      assert eventually(fn -> FakeStreamBackend.subscribe_count() == 1 end)
+
+      FakeStreamBackend.emit_log(%{
+        timestamp: System.system_time(:millisecond),
+        level: :info,
+        message: "live-batched-entry",
+        metadata: %{}
+      })
+
+      assert eventually(fn -> render(view) =~ "live-batched-entry" end)
     end
   end
 
