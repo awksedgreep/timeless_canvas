@@ -569,7 +569,8 @@ body.tc-canvas-open {
 /* Variable Bar */
 .canvas-var-bar {
   position: absolute;
-  top: 52px;
+  /* Clear the toolbar's bottom edge (~54px) with a little breathing room */
+  top: 62px;
   left: 12px;
   display: flex;
   flex-wrap: wrap;
@@ -647,6 +648,35 @@ body.tc-canvas-open {
 }
 
 /* Zoom Indicator */
+.canvas-shortcut-legend {
+  position: absolute;
+  top: 64px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-family: monospace;
+  font-size: 11px;
+  opacity: 0.18;
+  pointer-events: none;
+  user-select: none;
+  z-index: 5;
+}
+
+.canvas-shortcut-legend__row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.canvas-shortcut-legend__keys {
+  color: #cbd5e1;
+}
+
+.canvas-shortcut-legend__action {
+  color: #4ade80;
+}
+
 .canvas-zoom-indicator {
   position: absolute;
   bottom: 56px;

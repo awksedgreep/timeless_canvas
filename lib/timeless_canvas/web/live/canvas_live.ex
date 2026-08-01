@@ -590,8 +590,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
           class="canvas-grid"
         />
 
-        <.shortcut_legend :if={!@profile_hide_canvas_scene} view_box={@canvas.view_box} />
-
         <.canvas_connection
           :if={!@profile_hide_canvas_scene}
           :for={{_id, conn} <- @canvas.connections}
@@ -620,6 +618,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
         <.stream_popover :if={!@profile_hide_canvas_scene && @stream_popover} popover={@stream_popover} />
       </svg>
+
+      <.shortcut_legend :if={!@profile_hide_canvas_scene} />
 
       <.properties_panel
         :if={!@profile_hide_properties_panel}
@@ -710,29 +710,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
     {"Double-click", "Expand graph"}
   ]
 
+  # HTML overlay pinned to the container (not the SVG), so it neither
+  # moves with canvas pan/zoom nor scales with the viewBox.
   defp shortcut_legend(assigns) do
-    vb = assigns.view_box
-    base_x = vb.min_x + vb.width - 10
-    base_y = vb.min_y + 14
-    scale = vb.width / 1200
-
-    assigns = assign(assigns, base_x: base_x, base_y: base_y, scale: scale, shortcuts: @shortcuts)
+    assigns = assign(assigns, shortcuts: @shortcuts)
 
     ~H"""
-    <g pointer-events="none" opacity="0.18">
-      <text
-        :for={{shortcut, i} <- Enum.with_index(@shortcuts)}
-        x={@base_x}
-        y={@base_y + i * 16 * @scale}
-        text-anchor="end"
-        fill="#94a3b8"
-        font-size={11 * @scale}
-        font-family="monospace"
-      >
-        <tspan fill="#cbd5e1">{elem(shortcut, 0)}</tspan>
-        <tspan dx={5 * @scale} fill="#4ade80">{elem(shortcut, 1)}</tspan>
-      </text>
-    </g>
+    <div class="canvas-shortcut-legend">
+      <div :for={shortcut <- @shortcuts} class="canvas-shortcut-legend__row">
+        <span class="canvas-shortcut-legend__keys">{elem(shortcut, 0)}</span>
+        <span class="canvas-shortcut-legend__action">{elem(shortcut, 1)}</span>
+      </div>
+    </div>
     """
   end
 
