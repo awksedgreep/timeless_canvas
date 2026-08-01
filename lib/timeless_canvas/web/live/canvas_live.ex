@@ -16,6 +16,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   alias TimelessCanvas.DataQueries
   alias TimelessCanvas.DataSource.Manager, as: StatusManager
   alias TimelessCanvas.IconCatalog
+  alias TimelessCanvas.Presence
   alias TimelessCanvas.StreamManager
   require Logger
 
@@ -64,6 +65,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
         Phoenix.PubSub.subscribe(pubsub(), StatusManager.status_topic(canvas_id))
         Phoenix.PubSub.subscribe(pubsub(), StreamManager.stream_topic(canvas_id))
         Phoenix.PubSub.subscribe(pubsub(), CanvasPoller.data_topic(canvas_id))
+
+        # Editor presence: track this viewer and watch for others' diffs.
+        Phoenix.PubSub.subscribe(pubsub(), Presence.topic(canvas_id))
+
+        {:ok, _} =
+          Presence.track(self(), Presence.topic(canvas_id), to_string(current_user.id), %{
+            name: user_display_name(current_user)
+          })
       end
 
       # A decode failure renders an empty canvas but flags it: editing is
@@ -121,6 +130,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
           decode_failed?: decode_failed?,
           save_state: :saved,
           autosave_failures: 0,
+          record_updated_at: Map.get(record, :updated_at),
+          stale_write_warning: false,
+          presence_others:
+            if(connected?(socket),
+              do: presence_others(canvas_id, current_user.id),
+              else: []
+            ),
           can_edit: can_edit,
           is_owner: is_owner,
           show_share: false,
@@ -286,6 +302,20 @@ defmodule TimelessCanvas.Web.CanvasLive do
         >
           Data load failed
         </span>
+        <span
+          :if={@presence_others != []}
+          class="canvas-toolbar__presence"
+          title={"Also viewing: " <> Enum.map_join(@presence_others, ", ", & &1.name)}
+        >
+          <span class="canvas-toolbar__presence-label">Also viewing:</span>
+          <span
+            :for={other <- @presence_others}
+            class="canvas-toolbar__presence-chip"
+            title={other.name}
+          >
+            {presence_initial(other.name)}
+          </span>
+        </span>
         <button
           phx-click="toggle_mode"
           phx-value-mode="select"
@@ -437,6 +467,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
           class={"canvas-toolbar__btn#{if @show_share, do: " canvas-toolbar__btn--active", else: ""}"}
         >
           Share
+        </button>
+      </div>
+
+      <div :if={@stale_write_warning} class="canvas-stale-warning" role="alert">
+        <span class="canvas-stale-warning__text">
+          Another editor saved changes to this canvas — their changes may be overwritten.
+        </span>
+        <button phx-click="stale_warning:dismiss" class="canvas-stale-warning__btn">
+          Dismiss
         </button>
       </div>
 
@@ -1644,11 +1683,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # Failures re-arm the timer with a longer delay so transient DB
   # outages self-heal, up to @max_autosave_failures consecutive misses.
   defp attempt_save(socket) do
+    socket = detect_stale_write(socket)
     data = Serializer.encode(socket.assigns.canvas)
 
     case safe_update_canvas_data(socket.assigns.canvas_id, data) do
-      {:ok, _} ->
-        assign(socket, save_state: :saved, autosave_failures: 0)
+      {:ok, record} ->
+        assign(socket,
+          save_state: :saved,
+          autosave_failures: 0,
+          record_updated_at: Map.get(record, :updated_at, socket.assigns.record_updated_at)
+        )
 
       {:error, reason} ->
         failures = socket.assigns.autosave_failures + 1
@@ -1667,6 +1711,32 @@ defmodule TimelessCanvas.Web.CanvasLive do
           socket
         end
     end
+  end
+
+  # Multi-editor scope is last-write-wins (no merging) — but never a
+  # silent clobber: if the record's updated_at moved since our last
+  # successful write, another editor saved in between. We still save,
+  # and raise the (dismissable) warning banner once per detection.
+  defp detect_stale_write(socket) do
+    last_seen = socket.assigns.record_updated_at
+
+    case persistence().get_canvas(socket.assigns.canvas_id) do
+      {:ok, %{updated_at: updated_at}}
+      when not is_nil(last_seen) and updated_at != last_seen ->
+        Logger.warning(
+          "[canvas] concurrent save detected on canvas #{socket.assigns.canvas_id} — " <>
+            "overwriting (last-write-wins)"
+        )
+
+        assign(socket, stale_write_warning: true, record_updated_at: updated_at)
+
+      _ ->
+        socket
+    end
+  rescue
+    # A broken persistence layer must not block the save path; the write
+    # itself will surface the failure through save_state.
+    _exception -> socket
   end
 
   defp safe_update_canvas_data(canvas_id, data) do
@@ -2166,6 +2236,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("view_only_toast:dismiss", _params, socket) do
     {:noreply, assign(socket, show_view_only_toast: false)}
+  end
+
+  def handle_event("stale_warning:dismiss", _params, socket) do
+    {:noreply, assign(socket, stale_write_warning: false)}
   end
 
   # Rows are resolved by their content-derived entry id (see
@@ -2728,11 +2802,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # --- Timeline event handlers ---
 
   def handle_event("timeline:go_live", _params, socket) do
+    now = DateTime.utc_now()
+
     {:noreply,
      socket
      |> assign(timeline_mode: :live, timeline_time: nil)
      |> refresh_data_range()
-     |> fill_graph_data_at(DateTime.utc_now())
+     |> fill_graph_data_at(now)
+     |> fill_text_data_at(now)
+     |> fill_stream_data_at(now)
      |> push_slider_update()
      |> push_density_update()}
   end
@@ -2882,9 +2960,37 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  # --- Presence helpers ---
+
+  defp user_display_name(user) do
+    case Map.get(user, :username) do
+      name when is_binary(name) and name != "" -> name
+      _ -> "user ##{user.id}"
+    end
+  end
+
+  defp presence_others(canvas_id, user_id) do
+    me = to_string(user_id)
+
+    canvas_id
+    |> Presence.users()
+    |> Enum.reject(&(&1.id == me))
+  end
+
+  defp presence_initial(name) do
+    name |> String.first() |> to_string() |> String.upcase()
+  end
+
   # --- Info handlers ---
 
   @impl true
+  def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff"}, socket) do
+    {:noreply,
+     assign(socket,
+       presence_others: presence_others(socket.assigns.canvas_id, socket.assigns.user_id)
+     )}
+  end
+
   def handle_info({:element_status, element_id, status}, socket) do
     socket = update(socket, :debug_counts, &Map.update!(&1, :status_msgs, fn n -> n + 1 end))
 
@@ -3007,8 +3113,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
       {:noreply, socket}
     else
       stream_data = socket.assigns.stream_data
-      entries = Map.get(stream_data, element_id, [])
-      entries = Enum.take(new_entries ++ entries, DataQueries.max_stream_entries())
+
+      # A live entry arriving clears a prior backend-error state — the
+      # stream is demonstrably flowing again.
+      entries =
+        case Map.get(stream_data, element_id, []) do
+          :error -> new_entries
+          existing -> new_entries ++ existing
+        end
+        |> Enum.take(DataQueries.max_stream_entries())
+
       {:noreply, assign(socket, stream_data: Map.put(stream_data, element_id, entries))}
     end
   end
@@ -3555,6 +3669,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp text_value_for(%{type: :text_series} = element, text_data) do
     case Map.get(text_data, element.id) do
       {_ts, val} -> val
+      :error -> :error
       _ -> nil
     end
   end
@@ -3563,8 +3678,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp stream_entries_for(%{type: type} = element, stream_data)
        when type in [:log_stream, :trace_stream] do
-    max_rows = max(floor((element.height - 24) / 14), 1)
-    Enum.take(Map.get(stream_data, element.id, []), max_rows)
+    case Map.get(stream_data, element.id, []) do
+      # Backend query failure: rendered as a distinct error state.
+      :error ->
+        :error
+
+      entries ->
+        max_rows = max(floor((element.height - 24) / 14), 1)
+        Enum.take(entries, max_rows)
+    end
   end
 
   defp stream_entries_for(_element, _stream_data), do: []

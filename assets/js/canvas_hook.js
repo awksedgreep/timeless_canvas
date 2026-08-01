@@ -1227,6 +1227,29 @@ const CanvasHook = {
         }),
       );
     }
+    // Distinct empty vs error states: a down backend ("data unavailable",
+    // muted warning) must not render identically to an empty series
+    // ("no data"). Styled like the axis labels; recovers automatically
+    // when a later payload arrives with status "ok".
+    if ((p.status === "error" || p.status === "empty") && p.status_pos) {
+      const isError = p.status === "error";
+      container.appendChild(
+        this.svgNode(
+          "text",
+          {
+            x: p.status_pos.x,
+            y: p.status_pos.y,
+            "text-anchor": "middle",
+            fill: isError ? "#f59e0b" : "#475569",
+            opacity: isError ? "0.8" : "1",
+            "font-size": fontSize,
+            "font-family": "monospace",
+            class: isError ? "canvas-graph__status-error" : "canvas-graph__status-empty",
+          },
+          isError ? "data unavailable" : "no data",
+        ),
+      );
+    }
     if (expanded) {
       // Legend current-value text (the legend chrome is server-rendered)
       container.appendChild(

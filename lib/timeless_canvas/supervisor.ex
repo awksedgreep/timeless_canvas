@@ -1,9 +1,12 @@
 defmodule TimelessCanvas.Supervisor do
   @moduledoc """
   Convenience supervisor that starts the DataSource.Manager, StreamManager,
-  and the per-canvas poller infrastructure (registry + dynamic supervisor).
+  the editor presence tracker, and the per-canvas poller infrastructure
+  (registry + dynamic supervisor).
 
-  Add to your application's supervision tree:
+  Add to your application's supervision tree (after your PubSub — the
+  presence tracker connects to the pubsub configured under
+  `config :timeless_canvas, pubsub: ...`):
 
       {TimelessCanvas.Supervisor, []}
   """
@@ -20,7 +23,9 @@ defmodule TimelessCanvas.Supervisor do
       {Registry, keys: :unique, name: TimelessCanvas.CanvasRegistry},
       {DynamicSupervisor, name: TimelessCanvas.PollerSupervisor, strategy: :one_for_one},
       TimelessCanvas.DataSource.Manager,
-      TimelessCanvas.StreamManager
+      TimelessCanvas.StreamManager,
+      # Reads the consumer-configured pubsub at start, like everything else.
+      {TimelessCanvas.Presence, pubsub_server: TimelessCanvas.pubsub()}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

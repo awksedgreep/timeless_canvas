@@ -38,7 +38,13 @@ defmodule TimelessCanvas.DataQueries do
   end
 
   @doc """
-  Latest graph window for every graph-type element: `%{id => [{ts, val}]}`.
+  Latest graph window for every graph-type element:
+  `%{id => [{ts, val}] | :error}`.
+
+  A backend query error is distinguishable from "no data": the element
+  maps to `:error` instead of `[]`, so a down backend does not render
+  identically to an empty series. A later successful query replaces the
+  `:error` entry, so the state recovers on its own.
   """
   def query_graph_data(canvas_id, resolved_elements, time, span) do
     from = DateTime.add(time, -span, :second)
@@ -50,7 +56,8 @@ defmodule TimelessCanvas.DataQueries do
 
       points =
         case Manager.metric_range(canvas_id, id, metric_name, from, time) do
-          {:ok, pts} when pts != [] -> downsample(pts, @max_graph_points)
+          {:ok, pts} -> downsample(pts, @max_graph_points)
+          {:error, _reason} -> :error
           _ -> []
         end
 
@@ -60,7 +67,8 @@ defmodule TimelessCanvas.DataQueries do
 
   @doc """
   Text metric values for every text_series element:
-  `%{id => {unix_ms, value}}`. Elements without data are omitted.
+  `%{id => {unix_ms, value} | :error}`. Elements without data are omitted;
+  elements whose query errored map to `:error` (see `query_graph_data/4`).
   """
   def query_text_data(canvas_id, resolved_elements, time) do
     resolved_elements
@@ -70,6 +78,7 @@ defmodule TimelessCanvas.DataQueries do
 
       case Manager.text_metric_at(canvas_id, id, metric_name, time) do
         {:ok, value} -> {id, {DateTime.to_unix(time, :millisecond), value}}
+        {:error, _reason} -> {id, :error}
         :no_data -> :skip
       end
     end)
@@ -77,7 +86,9 @@ defmodule TimelessCanvas.DataQueries do
 
   @doc """
   Historical stream entries for every log/trace stream element:
-  `%{id => [entry_map]}`.
+  `%{id => [entry_map] | :error}`. A backend query error maps the element
+  to `:error` (distinct from an empty backfill); a missing backend maps
+  to `[]` (nothing to query is not an error).
   """
   def query_stream_data(resolved_elements, time, span) do
     from = DateTime.add(time, -span, :second)
@@ -91,7 +102,8 @@ defmodule TimelessCanvas.DataQueries do
   end
 
   @doc """
-  High-resolution point list for one expanded graph element.
+  High-resolution point list for one expanded graph element (`:error`
+  when the backend query fails, mirroring `query_graph_data/4`).
   """
   def query_expanded_data(canvas_id, resolved_elements, element_id, time, span) do
     case Map.get(resolved_elements, element_id) do
@@ -100,7 +112,8 @@ defmodule TimelessCanvas.DataQueries do
         from = DateTime.add(time, -span, :second)
 
         case Manager.metric_range(canvas_id, element_id, metric_name, from, time) do
-          {:ok, pts} when pts != [] -> downsample(pts, @max_graph_points_expanded)
+          {:ok, pts} -> downsample(pts, @max_graph_points_expanded)
+          {:error, _reason} -> :error
           _ -> []
         end
 
@@ -295,7 +308,7 @@ defmodule TimelessCanvas.DataQueries do
             end)
 
           _ ->
-            []
+            :error
         end
     end
   end
@@ -330,7 +343,7 @@ defmodule TimelessCanvas.DataQueries do
             end)
 
           _ ->
-            []
+            :error
         end
     end
   end

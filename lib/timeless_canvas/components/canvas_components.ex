@@ -12,10 +12,12 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   attr(:element, Element, required: true)
   attr(:selected, :boolean, default: false)
-  attr(:stream_entries, :list, default: [])
+  # [entry_map] | :error (backend query failure — rendered distinctly)
+  attr(:stream_entries, :any, default: [])
   attr(:expanded_graph_id, :string, default: nil)
   attr(:metric_units, :map, default: %{})
-  attr(:text_value, :string, default: nil)
+  # value | nil (no data) | :error (backend query failure)
+  attr(:text_value, :any, default: nil)
 
   def canvas_element(assigns) do
     {elapsed_us, result} =
@@ -158,10 +160,12 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             label -> "#{label} | #{level_filter}"
           end
 
+        stream_error? = assigns.stream_entries == :error
+        entries = if stream_error?, do: [], else: assigns.stream_entries
         max_rows = max(floor((assigns.element.height - 24) / 14), 1)
-        rows = Enum.take(assigns.stream_entries, max_rows)
+        rows = Enum.take(entries, max_rows)
 
-        assigns = assign(assigns, log_title: log_title, rows: rows)
+        assigns = assign(assigns, log_title: log_title, rows: rows, stream_error?: stream_error?)
 
         ~H"""
         <rect
@@ -209,7 +213,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
           </text>
         </g>
         <text
-          :if={@rows == []}
+          :if={@rows == [] && !@stream_error?}
           x={@element.x + @element.width / 2}
           y={@element.y + @element.height / 2 + 4}
           text-anchor="middle"
@@ -217,6 +221,17 @@ defmodule TimelessCanvas.Components.CanvasComponents do
           font-size="9"
         >
           Waiting for logs...
+        </text>
+        <text
+          :if={@stream_error?}
+          x={@element.x + @element.width / 2}
+          y={@element.y + @element.height / 2 + 4}
+          text-anchor="middle"
+          fill="#f59e0b"
+          opacity="0.8"
+          font-size="9"
+        >
+          log backend unavailable
         </text>
         """
       end)
@@ -238,10 +253,13 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             label -> "#{label} | #{service_filter}"
           end
 
+        stream_error? = assigns.stream_entries == :error
+        entries = if stream_error?, do: [], else: assigns.stream_entries
         max_rows = max(floor((assigns.element.height - 24) / 14), 1)
-        rows = Enum.take(assigns.stream_entries, max_rows)
+        rows = Enum.take(entries, max_rows)
 
-        assigns = assign(assigns, trace_title: trace_title, rows: rows)
+        assigns =
+          assign(assigns, trace_title: trace_title, rows: rows, stream_error?: stream_error?)
 
         ~H"""
         <rect
@@ -299,7 +317,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
           </text>
         </g>
         <text
-          :if={@rows == []}
+          :if={@rows == [] && !@stream_error?}
           x={@element.x + @element.width / 2}
           y={@element.y + @element.height / 2 + 4}
           text-anchor="middle"
@@ -307,6 +325,17 @@ defmodule TimelessCanvas.Components.CanvasComponents do
           font-size="9"
         >
           Waiting for traces...
+        </text>
+        <text
+          :if={@stream_error?}
+          x={@element.x + @element.width / 2}
+          y={@element.y + @element.height / 2 + 4}
+          text-anchor="middle"
+          fill="#f59e0b"
+          opacity="0.8"
+          font-size="9"
+        >
+          trace backend unavailable
         </text>
         """
       end)
@@ -390,13 +419,21 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
         graph_title = if unit, do: "#{base_title} (#{unit})", else: base_title
         graph_icon = IconCatalog.graph_icon_name(assigns.element)
+
+        # The pushed current-value text is right-aligned at x + width - 18;
+        # truncate the title to leave it ~8 chars of room instead of
+        # overlapping (both render at font-size 8, ~4.8px per char).
+        title_offset = if graph_icon, do: 32, else: 4
+        title_budget = compact_title_budget(assigns.element.width, title_offset)
+        graph_title = truncate_text(graph_title, title_budget)
+
         {plot_x, plot_y, plot_w, plot_h} = compact_plot_box(assigns.element)
 
         assigns =
           assign(assigns,
             graph_title: graph_title,
             graph_icon: graph_icon,
-            graph_title_x: assigns.element.x + if(graph_icon, do: 32, else: 4),
+            graph_title_x: assigns.element.x + title_offset,
             plot_x: plot_x,
             plot_y: plot_y,
             plot_w: plot_w,
@@ -468,8 +505,22 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         label -> "#{label} | #{metric_name}"
       end
 
-    display_value = assigns.text_value || "\u2014"
-    assigns = assign(assigns, title: title, display_value: display_value)
+    # nil = no data (em dash); :error = backend query failure (distinct
+    # muted warning so a down backend never masquerades as "no data").
+    {display_value, value_fill, value_size} =
+      case assigns.text_value do
+        :error -> {"data unavailable", "#f59e0b", 9}
+        nil -> {"\u2014", assigns.element.color, 12}
+        value -> {value, assigns.element.color, 12}
+      end
+
+    assigns =
+      assign(assigns,
+        title: title,
+        display_value: display_value,
+        value_fill: value_fill,
+        value_size: value_size
+      )
 
     ~H"""
     <rect
@@ -493,7 +544,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       x={@element.x + @element.width / 2}
       y={@element.y + @element.height / 2 + 4}
       text-anchor="middle" dominant-baseline="central"
-      fill={@element.color} font-size="12"
+      fill={@value_fill} font-size={@value_size}
       clip-path={"url(#text-series-clip-#{@element.id})"}
     >
       {@display_value}
@@ -1146,10 +1197,14 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   @doc """
   `push_event("graph:data", ...)` payload for a compact graph element.
 
-  `points_newest_first` is the element's entry in the `graph_data`
-  assign (newest point first, as produced by `DataQueries`).
+  `graph_data` is the element's entry in the `graph_data` assign: a
+  point list (newest first, as produced by `DataQueries`) or `:error`
+  when the backend query failed. The payload carries an additive
+  `status` field ("ok" | "empty" | "error") plus a `status_pos` so the
+  client hook can draw a distinct "no data" / "data unavailable" state.
   """
-  def compact_graph_payload(element, points_newest_first, unit) do
+  def compact_graph_payload(element, graph_data, unit) do
+    {status, points_newest_first} = graph_data_status(graph_data)
     points = Enum.reverse(points_newest_first)
     meta = element.meta || %{}
 
@@ -1190,6 +1245,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       id: element.id,
       kind: "compact",
       color: element.color,
+      status: status,
+      status_pos: %{x: plot_x + plot_w / 2, y: plot_y + plot_h / 2 + 2},
       points: polyline_points,
       raw: raw_points(points),
       grid: grid,
@@ -1203,11 +1260,12 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   @doc """
   `push_event("graph:expanded", ...)` payload for the expanded graph.
 
-  `points_newest_first` is the `expanded_graph_data` assign (newest
-  point first). Mirrors the geometry the expanded body used to render
-  server-side, at 2x element size.
+  `graph_data` is the `expanded_graph_data` assign (newest point first,
+  or `:error` — see `compact_graph_payload/3`). Mirrors the geometry the
+  expanded body used to render server-side, at 2x element size.
   """
-  def expanded_graph_payload(element, points_newest_first, unit) do
+  def expanded_graph_payload(element, graph_data, unit) do
+    {status, points_newest_first} = graph_data_status(graph_data)
     render_w = element.width * 2
     render_h = element.height * 2
     pad_left = 50
@@ -1297,6 +1355,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       id: element.id,
       kind: "expanded",
       color: element.color,
+      status: status,
+      status_pos: %{x: plot_x + plot_w / 2, y: plot_y + plot_h / 2},
       points: polyline_str,
       area: area_str,
       raw: raw_points(points),
@@ -1308,6 +1368,26 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       # itself is server-rendered).
       value_pos: %{x: element.x + render_w - 52, y: element.y + 13}
     }
+  end
+
+  # Split the graph_data assign shape into {status, point_list}: a down
+  # backend (:error) and an empty series ([]) must render distinctly.
+  defp graph_data_status(:error), do: {"error", []}
+  defp graph_data_status([]), do: {"empty", []}
+  defp graph_data_status(points) when is_list(points), do: {"ok", points}
+
+  # ~4.8px per char at font-size 8 monospace; reserve 56px on the right
+  # for the pushed current-value text (~8 chars + its 18px inset).
+  defp compact_title_budget(width, title_offset) do
+    max(trunc((width - title_offset - 56) / 4.8), 4)
+  end
+
+  defp truncate_text(text, max_chars) do
+    if String.length(text) > max_chars do
+      String.slice(text, 0, max(max_chars - 1, 1)) <> "…"
+    else
+      text
+    end
   end
 
   # JSON-safe [[unix_ms, value], ...] for the JS tooltip cache.
@@ -1508,7 +1588,10 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         window_ratio: min(window_ratio, 1.0),
         is_live: is_live,
         track_start: format_track_ts(slider_min),
-        track_end: format_track_ts(slider_max)
+        track_end: format_track_ts(slider_max),
+        # Persistent readout of the viewed (window-center) time while
+        # scrubbed into history — same instant the drag bubble shows.
+        historical_readout: if(!is_live, do: format_readout_ts(window_center_ms))
       )
 
     ~H"""
@@ -1541,8 +1624,30 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       <span class="timeline-bar__time timeline-bar__time--end" title="Latest time in track">
         {@track_end}
       </span>
+
+      <span
+        :if={@timeline_mode == :historical}
+        class="timeline-bar__readout"
+        title="Currently viewed time"
+      >
+        {@historical_readout}
+      </span>
+      <button
+        :if={@timeline_mode == :historical}
+        phx-click="timeline:go_live"
+        class="timeline-bar__go-live"
+        title="Return to live data"
+      >
+        Go Live
+      </button>
     </div>
     """
+  end
+
+  defp format_readout_ts(ms) do
+    ms
+    |> DateTime.from_unix!(:millisecond)
+    |> Calendar.strftime("%b %-d %H:%M:%S")
   end
 
   defp format_track_ts(ms) do

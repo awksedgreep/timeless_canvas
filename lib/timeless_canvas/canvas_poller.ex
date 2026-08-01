@@ -206,10 +206,12 @@ defmodule TimelessCanvas.CanvasPoller do
           do: {id, points}
 
     # Text results are stamped with the query time, so diff on the value
-    # alone — otherwise every tick would look changed.
+    # alone — otherwise every tick would look changed. Entries may also be
+    # `:error` (backend failure), which must broadcast on transition too so
+    # viewers can show — and later clear — the error state.
     changed_text =
-      for {id, {_ts, value} = stamped} <- text_data,
-          Map.get(state.last_text_values, id, :no_value) != value,
+      for {id, stamped} <- text_data,
+          Map.get(state.last_text_values, id, :no_value) != text_diff_value(stamped),
           into: %{},
           do: {id, stamped}
 
@@ -221,7 +223,8 @@ defmodule TimelessCanvas.CanvasPoller do
       )
     end
 
-    changed_text_values = Map.new(changed_text, fn {id, {_ts, value}} -> {id, value} end)
+    changed_text_values =
+      Map.new(changed_text, fn {id, stamped} -> {id, text_diff_value(stamped)} end)
 
     %{
       state
@@ -229,4 +232,7 @@ defmodule TimelessCanvas.CanvasPoller do
         last_text_values: Map.merge(state.last_text_values, changed_text_values)
     }
   end
+
+  defp text_diff_value({_ts, value}), do: value
+  defp text_diff_value(:error), do: :error
 end

@@ -484,6 +484,71 @@ body.tc-canvas-open {
   background: rgba(239, 68, 68, 0.3);
 }
 
+/* Stale-write warning banner (another editor saved; last-write-wins) */
+.canvas-stale-warning {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.4);
+  color: #facc15;
+  font-size: 12px;
+  max-width: 90%;
+}
+
+.canvas-stale-warning__btn {
+  background: rgba(234, 179, 8, 0.2);
+  border: 1px solid rgba(234, 179, 8, 0.5);
+  color: #eab308;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.canvas-stale-warning__btn:hover {
+  background: rgba(234, 179, 8, 0.3);
+}
+
+/* Editor presence (toolbar chips, shown when others view this canvas) */
+.canvas-toolbar__presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 4px;
+}
+
+.canvas-toolbar__presence-label {
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  white-space: nowrap;
+}
+
+.canvas-toolbar__presence-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(99, 102, 241, 0.25);
+  border: 1px solid rgba(99, 102, 241, 0.5);
+  color: #a5b4fc;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: default;
+}
+
 /* View-only toast (first denied edit attempt; auto-clears, click dismisses) */
 .canvas-view-only-toast {
   position: absolute;
@@ -1018,6 +1083,39 @@ body.tc-canvas-open {
 
 .timeline-bar__time--end {
   text-align: right;
+}
+
+/* Persistent viewed-time readout while scrubbed into history */
+.timeline-bar__readout {
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 12px;
+  color: #93c5fd;
+  white-space: nowrap;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(74, 158, 255, 0.12);
+  border: 1px solid rgba(74, 158, 255, 0.3);
+}
+
+/* Return-to-live button (historical mode only) */
+.timeline-bar__go-live {
+  margin-left: 6px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: rgba(34, 197, 94, 0.15);
+  border: 1px solid rgba(34, 197, 94, 0.45);
+  color: #22c55e;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.timeline-bar__go-live:hover {
+  background: rgba(34, 197, 94, 0.25);
 }
 
 /* Graph Element */

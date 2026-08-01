@@ -196,11 +196,26 @@ Status legend: `[x]` done · `[ ]` pending
       copying log text works; Esc sends a generic "canvas:escape" and the
       server cascades share overlay → stream popover → typeahead → exit
       place/connect mode → deselect
-- [ ] Distinct error vs empty states per element body
+- [x] Distinct error vs empty states per element body — `DataQueries` now
+      maps backend query failures to `:error` per element (graph, expanded
+      graph, text_series, log/trace streams) instead of collapsing them to
+      `[]`; graph push payloads carry an additive `status: "ok"|"empty"|
+      "error"` + `status_pos` and the Canvas hook draws "no data" /
+      "data unavailable" in the ignored container; stream bodies render
+      "log/trace backend unavailable" distinct from "Waiting for logs…";
+      text_series shows "data unavailable" instead of the em dash. Error
+      states recover through the normal data flow (poller diffs treat
+      `:error` as a value transition; a live stream entry clears a prior
+      stream error)
 - [x] Stream popover resolves entries by id, not index (wrong-row race) —
       done as part of Phase 2b's stream-row rework (`stream:entry_click`
       resolves the content-derived entry id from `stream_data`)
-- [ ] "Go Live" button + persistent timestamp readout in historical mode
+- [x] "Go Live" button + persistent timestamp readout in historical mode —
+      both render in the timeline bar only while `timeline_mode ==
+      :historical`; the readout shows the window-center time in the drag
+      bubble's format ("Jul 30 22:14:05"), the button fires the existing
+      `timeline:go_live` (which now also refreshes text + stream data so
+      no historical values linger after returning to live)
 - [x] `phx-debounce="300"` on the properties-panel text/number inputs and
       the canvas-name rename input; history coalescing: same-op property
       edits (`{event, element-id, _target}` key) within 2s replace the top
@@ -213,7 +228,20 @@ Status legend: `[x]` done · `[ ]` pending
       no modifier state, so consistency won; middle-mouse pan was already
       done in Phase 3), nudge swapped: Arrow = 1px fine, Shift+Arrow = grid
       step (legend updated)
-- [ ] Multi-editor minimum: presence indicator + stale-write warning (no merging)
+- [x] Multi-editor minimum: presence indicator + stale-write warning (no
+      merging). `TimelessCanvas.Presence` (Phoenix.Presence, pubsub from
+      `TimelessCanvas.pubsub()` at supervisor start) added to
+      `TimelessCanvas.Supervisor`; each connected CanvasLive tracks on a
+      per-canvas topic and renders "Also viewing:" initial-chips for other
+      users. Stale writes: `record_updated_at` tracked from mount and after
+      every successful save; each save first re-reads the record and, if
+      another editor's write moved `updated_at`, still saves
+      (last-write-wins per agreed scope) but raises a dismissable
+      "Another editor saved changes…" banner once per detection. Found in
+      browser verification and fixed here too: long compact-graph titles
+      overlapped the pushed current-value text — titles are now
+      server-truncated with an ellipsis to a per-width char budget that
+      reserves ~8 chars for the value
 - [x] Fix registration leak: Manager never unregisters elements on LiveView
       exit. Manager's element registry is now keyed `{canvas_id, element_id}`
       (element-scoped queries — `metric_range`, `metric_at`,

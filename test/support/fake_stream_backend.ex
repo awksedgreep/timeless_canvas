@@ -44,7 +44,26 @@ defmodule TimelessCanvas.Test.FakeStreamBackend do
   end
 
   @impl true
-  def query(_filters), do: {:ok, %{entries: []}}
+  def query(_filters) do
+    ensure_table!()
+
+    case :ets.lookup(@table, :query_result) do
+      [{:query_result, result} | _] -> result
+      [] -> {:ok, %{entries: []}}
+    end
+  end
+
+  @doc """
+  Program the result of `query/1` — e.g. `{:error, :backend_down}` to
+  exercise the stream error state. `reset/0` restores the default
+  `{:ok, %{entries: []}}`.
+  """
+  def set_query_result(result) do
+    ensure_table!()
+    :ets.delete(@table, :query_result)
+    :ets.insert(@table, {:query_result, result})
+    :ok
+  end
 
   @doc "Total number of subscribe/1 calls since the last reset."
   def subscribe_count do

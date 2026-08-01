@@ -105,10 +105,12 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       html = render_async(view)
       refute html =~ "Loading data"
       refute html =~ "Data load failed"
-      # NOTE (known issue, do not pin as correct): query errors currently
-      # render identically to no-data, so we only assert that mount does not
-      # crash.
       assert html =~ "cpu graph"
+
+      # Since Phase 4c the error is distinguishable from "no data": the
+      # graph payload carries status "error" (rendered client-side as
+      # "data unavailable").
+      assert_push_event(view, "graph:data", %{id: "el-1", status: "error"}, 1_000)
     end
 
     test "programmed hosts are discoverable in place mode", %{conn: conn, user: user} do
