@@ -261,8 +261,8 @@ defmodule TimelessCanvas.CanvasTest do
 
     test "zoom/4 scales the view box" do
       canvas = Canvas.zoom(bare_canvas(), 600.0, 400.0, 0.5)
-      assert canvas.view_box.width == 600.0
-      assert canvas.view_box.height == 400.0
+      assert canvas.view_box.width == 1080.0
+      assert canvas.view_box.height == 720.0
     end
   end
 end

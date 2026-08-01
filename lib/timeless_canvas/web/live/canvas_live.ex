@@ -211,9 +211,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
-  @base_viewbox_width 1200.0
+  @base_viewbox_width 2160.0
   @min_zoom_percent 10
-  @max_zoom_percent 190
+  # 350% of the 2160 base ≈ the same absolute zoom-in reach as the old
+  # 190% of the 1200 base
+  @max_zoom_percent 350
   @debug_report_interval 30_000
   @profile_skip_stream_updates false
 

@@ -108,8 +108,8 @@ defmodule TimelessCanvas.Canvas.Serializer do
     %ViewBox{
       min_x: (data["min_x"] || 0.0) / 1.0,
       min_y: (data["min_y"] || 0.0) / 1.0,
-      width: (data["width"] || 1200.0) / 1.0,
-      height: (data["height"] || 800.0) / 1.0
+      width: (data["width"] || 2160.0) / 1.0,
+      height: (data["height"] || 1440.0) / 1.0
     }
   end
 

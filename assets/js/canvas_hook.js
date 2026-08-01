@@ -9,9 +9,9 @@
  */
 const CanvasHook = {
   mounted() {
-    this.baseViewBoxWidth = 1200;
+    this.baseViewBoxWidth = 2160;
     this.minZoomPercent = 10;
-    this.maxZoomPercent = 190;
+    this.maxZoomPercent = 350;
     this.svg = this.el;
     this.dragging = null; // null | {type: "pan"|"element"|"handle"|"marquee", ...}
     this.startClient = null; // {x, y} in client pixels

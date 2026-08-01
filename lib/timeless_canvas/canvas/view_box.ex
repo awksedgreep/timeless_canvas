@@ -4,7 +4,10 @@ defmodule TimelessCanvas.Canvas.ViewBox do
   Handles pan and zoom math in SVG coordinate space.
   """
 
-  defstruct min_x: 0.0, min_y: 0.0, width: 1200.0, height: 800.0
+  # Default visible area = 100% zoom. Rebased from 1200x800 so the old
+  # ~55% zoom level is the new starting point (dense default tuned for
+  # large displays; users zoom in from here).
+  defstruct min_x: 0.0, min_y: 0.0, width: 2160.0, height: 1440.0
 
   @type t :: %__MODULE__{
           min_x: float(),

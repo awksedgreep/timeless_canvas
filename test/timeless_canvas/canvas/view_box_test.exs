@@ -7,13 +7,13 @@ defmodule TimelessCanvas.Canvas.ViewBoxTest do
     vb = %ViewBox{}
     assert vb.min_x == 0.0
     assert vb.min_y == 0.0
-    assert vb.width == 1200.0
-    assert vb.height == 800.0
+    assert vb.width == 2160.0
+    assert vb.height == 1440.0
   end
 
   describe "to_string/1" do
     test "formats the SVG viewBox attribute" do
-      assert ViewBox.to_string(%ViewBox{}) == "0.0 0.0 1200.0 800.0"
+      assert ViewBox.to_string(%ViewBox{}) == "0.0 0.0 2160.0 1440.0"
     end
 
     test "compacts decimals" do
@@ -27,14 +27,15 @@ defmodule TimelessCanvas.Canvas.ViewBoxTest do
       vb = ViewBox.pan(%ViewBox{}, 100.0, -40.0)
       assert vb.min_x == 100.0
       assert vb.min_y == -40.0
-      assert vb.width == 1200.0
-      assert vb.height == 800.0
+      assert vb.width == 2160.0
+      assert vb.height == 1440.0
     end
   end
 
   describe "zoom/4" do
     test "factor < 1 zooms in around the given point" do
-      vb = ViewBox.zoom(%ViewBox{}, 600.0, 400.0, 0.5)
+      base = %ViewBox{min_x: 0.0, min_y: 0.0, width: 1200.0, height: 800.0}
+      vb = ViewBox.zoom(base, 600.0, 400.0, 0.5)
       assert vb.width == 600.0
       assert vb.height == 400.0
       assert vb.min_x == 300.0
@@ -42,7 +43,8 @@ defmodule TimelessCanvas.Canvas.ViewBoxTest do
     end
 
     test "factor > 1 zooms out around the given point" do
-      vb = ViewBox.zoom(%ViewBox{}, 0.0, 0.0, 2.0)
+      base = %ViewBox{min_x: 0.0, min_y: 0.0, width: 1200.0, height: 800.0}
+      vb = ViewBox.zoom(base, 0.0, 0.0, 2.0)
       assert vb.width == 2400.0
       assert vb.height == 1600.0
       assert vb.min_x == 0.0
