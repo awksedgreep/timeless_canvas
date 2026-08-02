@@ -306,8 +306,8 @@ Status legend: `[x]` done · `[ ]` pending
 
 ## Phase 6 — Release hygiene
 
-- [ ] Tag release; bump `timeless_ui` pin (currently v0.4.10) and pin
-      `timeless_stack` to a tag (currently untagged ref)
+- [x] Tag v0.5.0; bump `timeless_ui` pin (was v0.4.10) and pin
+      `timeless_stack` to the tag (was untagged ref)
 
 ## Sequencing
 
