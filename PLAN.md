@@ -402,14 +402,23 @@ v0.5.0 until then.
       StreamSource, Persistence), config reference — needed only if the
       library goes to hex.pm rather than github pins.
 
+## Product direction (decided 2026-08-02)
+
+Single-org / vertical depth over multi-tenancy. The product model is
+"everyone in the org sees the dashboards" (New Relic-style), and separate
+installs cover isolation needs. Consequences:
+
+- Per-canvas permission micromanagement is a NON-goal. The two access
+  items below stay unfixed by design, not by neglect.
+- If the org-visibility model is ever formalized, the cheap expression is
+  a policy default (e.g. `config :timeless_canvas, :default_access,
+  :org_view | :org_edit | :private`) rather than richer ACLs — the
+  current owner/admin/access-row Policy already degrades gracefully.
+
 ## Noted for the future
 
-- Live-session access revocation does not propagate (can_edit computed at
-  mount; persistence layer does not re-authorize writes). Acknowledged,
-  deliberately deferred.
-- Access grants do not cascade to child canvases: a shared editor of a
-  parent gets access-denied when opening its sub-canvases (grants are
-  per-record). Same family as the revocation item above.
+- (Deprioritized per direction above) Live-session access revocation does
+  not propagate; access grants do not cascade to child canvases.
 - Watch: first nightly WebKit E2E run; chromium visual-regression golden
   may need one regeneration from Ubuntu font rendering.
 - StreamManager subscriptions keyed by bare element id (same-id elements
