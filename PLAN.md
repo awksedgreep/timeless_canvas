@@ -316,3 +316,65 @@ independent and can interleave. Phase 5 after 3 (it verifies the input fixes).
 
 Agreed scope limits: multi-editor = presence + warning only (no CRDT);
 accessibility = basics (aria-labels, focusable elements) only.
+
+---
+
+# Post-v0.5.0 Release Hardening
+
+Changes land on main and ship with the next tag (v0.5.1). Consumers stay on
+v0.5.0 until then.
+
+## Phase 7 — Hardening batch
+
+- [ ] Sub-canvas lifecycle: create the child canvas record LAZILY on first
+      navigation (double-click) instead of eagerly at placement, so
+      place/undo churn stops leaking orphaned records
+      (`place_typed_element` creates via `create_child_canvas` today).
+      Deleting the element leaves an existing child record intact
+      (discoverable/deletable from the canvas list) — document that choice.
+- [ ] Gate the profiling instrumentation (`[canvas-prof]` logs, `:timer.tc`
+      wrappers in `canvas_components.ex` / `canvas_live.ex` /
+      `manager.ex` debug reports) behind
+      `config :timeless_canvas, :profiling, false` (persistent_term-cached
+      check; report timers not even scheduled when off; default off).
+- [ ] Autosave retry: cancel any armed timer before arming a new one so
+      overlapping timers can't double-count toward the failure cap.
+- [ ] Delete dead `moveElementVisual` from canvas_hook.js.
+- [ ] Resolve the stale `priv/static/timeless_canvas.css` copy: delete it
+      if nothing references it (grep consumers), else regenerate + document.
+
+## Phase 8 — Load benchmark
+
+- [ ] `bench/canvas_bench.exs` (mix run): seeded canvases at N =
+      25/100/300 elements with programmable FakeDataSource; measure and
+      print p50/p95 for: mount-to-first-render, connected mount incl.
+      initial async data, one poller tick fan-out (1 and 10 subscribed
+      viewer processes), timeline scrub round-trip, push_graph_data diff
+      pass, undo/redo, and per-socket memory (`:erlang.process_info`)
+      including the 50-snapshot history at each N.
+- [ ] Record baseline numbers in bench/BASELINE.md (machine-noted);
+      re-run instructions in the file header.
+- [ ] Optional CI tripwire: nightly job runs the bench and fails on >2x
+      regression vs recorded baseline (soft — log-only at first).
+
+## Pending product decisions (not scheduled)
+
+- [ ] Touch-device support: two-finger pinch zoom via pointer events
+      (Safari gesture events cover trackpads only), touch E2E coverage.
+      Do if phone/tablet dashboards are a use case.
+- [ ] Accessibility pass: keyboard-navigable elements, aria-labels on
+      icon-only buttons, screen-reader landmarks.
+- [ ] Hexdocs/publishing: behaviour implementation guides (DataSource,
+      StreamSource, Persistence), config reference — needed only if the
+      library goes to hex.pm rather than github pins.
+
+## Noted for the future
+
+- Live-session access revocation does not propagate (can_edit computed at
+  mount; persistence layer does not re-authorize writes). Acknowledged,
+  deliberately deferred.
+- Watch: first nightly WebKit E2E run; chromium visual-regression golden
+  may need one regeneration from Ubuntu font rendering.
+- StreamManager subscriptions keyed by bare element id (same-id elements
+  on two canvases collide) — revisit if multi-canvas stream use grows.
+- timeless_ui password-change flow returns to its own form (separate repo).
