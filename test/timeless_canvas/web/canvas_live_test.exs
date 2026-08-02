@@ -933,7 +933,8 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       {:ok, view, html} = live(conn, "/canvas/#{record.id}")
 
       assert has_element?(view, ~s([data-element-id="#{el.id}"]))
-      assert html =~ ~s(href="/images/logo.svg")
+      # The Timeless mark is an embedded data URI, not a host-app asset
+      assert html =~ ~s(href="data:image/svg+xml,)
     end
 
     test "an unknown icon renders without crashing the view", %{conn: conn, user: user} do

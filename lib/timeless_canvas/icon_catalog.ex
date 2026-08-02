@@ -5,6 +5,11 @@ defmodule TimelessCanvas.IconCatalog do
 
   alias TimelessCanvas.Canvas.Element
 
+  # The Timeless infinity mark (same path as the toolbar logo), embedded
+  # as a data URI so it renders without depending on host-app assets.
+  @timeless_logo_svg ~S(<svg xmlns="http://www.w3.org/2000/svg" width="28" height="16" viewBox="0 0 28 16" fill="none"><path d="M8 2C4.5 2 2 4.7 2 8s2.5 6 6 6c2.2 0 4-1.2 5.5-3L14 10.5l.5.5c1.5 1.8 3.3 3 5.5 3 3.5 0 6-2.7 6-6s-2.5-6-6-6c-2.2 0-4 1.2-5.5 3L14 5.5 13.5 5C12 3.2 10.2 2 8 2z" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>)
+  @timeless_icon "data:image/svg+xml," <> URI.encode(@timeless_logo_svg, &URI.char_unreserved?/1)
+
   @service_icons %{
     "apache" => "logos:apache",
     "httpd" => "logos:apache",
@@ -29,9 +34,7 @@ defmodule TimelessCanvas.IconCatalog do
   }
 
   @semantic_icons %{
-    # Icons starting with "/" are served directly from the host app's
-    # static assets instead of going through Iconify.
-    "timeless" => "/images/logo.svg",
+    "timeless" => @timeless_icon,
     "cpu" => "heroicons:cpu-chip-solid",
     "memory" => "heroicons:server-stack-solid",
     "disk" => "heroicons:circle-stack-solid",

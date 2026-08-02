@@ -1020,8 +1020,9 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   # @iconify/json npm assets aren't installed; that must never take the
   # LiveView down. Failures are cached as nil (logged once per icon) and
   # the element renders without an icon.
-  # Direct static paths (e.g. "/images/logo.svg") bypass Iconify entirely.
+  # Direct static paths ("/...") and data URIs bypass Iconify entirely.
   defp icon_image_src("/" <> _ = path), do: path
+  defp icon_image_src("data:" <> _ = src), do: src
 
   defp icon_image_src(icon) do
     key = {__MODULE__, :icon_image_src, icon}
