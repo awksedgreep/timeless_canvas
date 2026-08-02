@@ -62,10 +62,10 @@ defmodule TimelessCanvas.IconCatalog do
     "rhel" => "logos:redhat-icon",
     "redhat" => "logos:redhat-icon",
     "red hat" => "logos:redhat-icon",
-    "rocky" => "logos:rockylinux-icon",
-    "rockylinux" => "logos:rockylinux-icon",
-    "alma" => "logos:almalinux-icon",
-    "almalinux" => "logos:almalinux-icon",
+    "rocky" => "logos:rocky-linux",
+    "rockylinux" => "logos:rocky-linux",
+    "alma" => "simple-icons:almalinux",
+    "almalinux" => "simple-icons:almalinux",
     "windows" => "logos:microsoft-windows-icon"
   }
 

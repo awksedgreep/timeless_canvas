@@ -50,8 +50,8 @@ defmodule TimelessCanvas.Test.Icons do
     logos:ubuntu
     logos:apple
     logos:redhat-icon
-    logos:rockylinux-icon
-    logos:almalinux-icon
+    logos:rocky-linux
+    simple-icons:almalinux
     logos:microsoft-windows-icon
   )
 
