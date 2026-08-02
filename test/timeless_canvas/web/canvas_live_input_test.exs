@@ -359,6 +359,79 @@ defmodule TimelessCanvas.Web.CanvasLiveInputTest do
       assert assigns(view).canvas.elements[el.id].label == "orig"
     end
 
+    test "interleaved edits across two elements never coalesce", %{conn: conn, user: user} do
+      {canvas, el_a} =
+        Canvas.add_element(Canvas.new(snap_to_grid: false), %{x: 100.0, y: 100.0, label: "a0"})
+
+      {canvas, el_b} = Canvas.add_element(canvas, %{x: 300.0, y: 100.0, label: "b0"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: encode(canvas)})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      # A, then B, then A again — all same-field edits inside the
+      # coalesce window, but the op key carries the element id, so the
+      # interleave must produce three history entries, not one or two.
+      render_hook(view, "property:update_element", %{
+        "element_id" => el_a.id,
+        "label" => "a1",
+        "_target" => ["label"]
+      })
+
+      render_hook(view, "property:update_element", %{
+        "element_id" => el_b.id,
+        "label" => "b1",
+        "_target" => ["label"]
+      })
+
+      render_hook(view, "property:update_element", %{
+        "element_id" => el_a.id,
+        "label" => "a2",
+        "_target" => ["label"]
+      })
+
+      a = assigns(view)
+      assert length(a.history.past) == 3
+
+      # One undo lands on the state after B's edit: A back to a1, B at b1.
+      render_hook(view, "canvas:undo", %{})
+      a = assigns(view)
+      assert a.canvas.elements[el_a.id].label == "a1"
+      assert a.canvas.elements[el_b.id].label == "b1"
+    end
+
+    test "a debounced meta edit arriving after the element was deleted is a no-op", %{
+      conn: conn,
+      user: user
+    } do
+      {data, el} =
+        canvas_with_element(%{
+          x: 100.0,
+          y: 100.0,
+          label: "victim",
+          type: :server,
+          meta: %{"host" => "web-1"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      render_hook(view, "element:select", %{"id" => el.id})
+      render_hook(view, "delete_selected", %{})
+      refute Map.has_key?(assigns(view).canvas.elements, el.id)
+
+      # The 300ms-debounced meta input can flush after the delete click;
+      # the stale event must not crash the LiveView.
+      render_hook(view, "property:update_meta", %{
+        "element_id" => el.id,
+        "host" => "late-edit",
+        "_target" => ["host"]
+      })
+
+      assert Process.alive?(view.pid)
+      refute Map.has_key?(assigns(view).canvas.elements, el.id)
+    end
+
     test "a typeahead-applied meta change (no _target) does not coalesce", %{
       conn: conn,
       user: user

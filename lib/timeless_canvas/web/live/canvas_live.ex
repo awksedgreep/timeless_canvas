@@ -2350,15 +2350,20 @@ defmodule TimelessCanvas.Web.CanvasLive do
       {:noreply, assign(socket, renaming: false)}
     else
       case persistence().rename_canvas(socket.assigns.canvas_id, socket.assigns.user_id, name) do
-        {:ok, _} ->
+        {:ok, record} ->
           breadcrumbs = persistence().breadcrumb_chain(socket.assigns.canvas_id)
 
+          # The rename bumped the record's updated_at; track it so the
+          # next autosave's stale-write check doesn't mistake our own
+          # rename for another editor's save.
           {:noreply,
            assign(socket,
              canvas_name: name,
              renaming: false,
              page_title: name,
-             breadcrumbs: breadcrumbs
+             breadcrumbs: breadcrumbs,
+             record_updated_at:
+               Map.get(record || %{}, :updated_at, socket.assigns.record_updated_at)
            )}
 
         {:error, _} ->
@@ -2646,73 +2651,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("property:update_meta", %{"element_id" => id} = params, socket) do
     require_edit(socket, fn ->
-      old_meta = socket.assigns.canvas.elements[id].meta
-      old_type = socket.assigns.canvas.elements[id].type
-      base_fields = Element.meta_fields(socket.assigns.canvas.elements[id].type)
-      var_fields = Map.keys(socket.assigns.canvas.variables) |> Enum.reject(&(&1 in base_fields))
-      meta_fields = base_fields ++ var_fields
+      case Map.get(socket.assigns.canvas.elements, id) do
+        nil ->
+          # A debounced form event can flush after its element was
+          # deleted (or after an undo removed it); the stale edit must
+          # not crash the view.
+          {:noreply, socket}
 
-      new_meta =
-        Enum.reduce(meta_fields, old_meta, fn field, meta ->
-          case params[field] do
-            nil -> meta
-            "" -> Map.delete(meta, field)
-            val -> Map.put(meta, field, val)
-          end
-        end)
-        |> maybe_apply_graph_series(old_meta, params["graph_series"])
-
-      # Pins override meta at resolution time (and Serializer.decode derives
-      # them for every persisted element), so an edited host/ifname field must
-      # update its pin too or the edit is silently inert after a reload.
-      new_pins =
-        Enum.reduce(
-          Element.pin_dimensions(),
-          socket.assigns.canvas.elements[id].pins,
-          fn dim_atom, pins ->
-            dim = Atom.to_string(dim_atom)
-
-            case params[dim] do
-              nil -> pins
-              val -> Map.put(pins, dim, Element.derive_pin(val))
-            end
-          end
-        )
-
-      canvas =
-        Canvas.update_element(socket.assigns.canvas, id, %{meta: new_meta, pins: new_pins})
-
-      socket =
-        push_canvas(socket, canvas, coalesce_key("property:update_meta", id, params))
-        |> schedule_autosave()
-
-      time = socket.assigns.timeline_time || DateTime.utc_now()
-
-      case Map.get(socket.assigns.resolved_elements, id) do
-        %{type: :log_stream} = resolved ->
-          StreamManager.register_log_stream(
-            socket.assigns.canvas_id,
-            id,
-            build_log_opts(resolved.meta)
-          )
-
-        %{type: :trace_stream} = resolved ->
-          StreamManager.register_trace_stream(
-            socket.assigns.canvas_id,
-            id,
-            build_trace_opts(resolved.meta)
-          )
-
-        _ ->
-          :ok
+        element ->
+          update_element_meta(socket, element, params)
       end
-
-      socket =
-        socket
-        |> maybe_refresh_selected_series(id, old_meta, new_meta)
-        |> maybe_refresh_element_data(id, old_type, time)
-
-      {:noreply, socket}
     end)
   end
 
@@ -2795,8 +2743,17 @@ defmodule TimelessCanvas.Web.CanvasLive do
   def handle_event("timeline:go_live", _params, socket) do
     now = DateTime.utc_now()
 
+    # Element statuses were rewritten by statuses_at/2 while scrubbing,
+    # and the Manager only broadcasts status *transitions* (which it
+    # diffs against its own live view of the world) — so returning to
+    # live must refresh statuses itself or a scrubbed-in status sticks
+    # until the next real transition.
+    statuses = StatusManager.statuses_at(socket.assigns.canvas_id, now)
+    canvas = apply_statuses(socket.assigns.canvas, statuses)
+
     {:noreply,
      socket
+     |> update_canvas(canvas)
      |> assign(timeline_mode: :live, timeline_time: nil)
      |> refresh_data_range()
      |> fill_graph_data_at(now)
@@ -2894,6 +2851,77 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_event("timeline:change", _params, socket) do
+    {:noreply, socket}
+  end
+
+  defp update_element_meta(socket, element, params) do
+    id = element.id
+    old_meta = element.meta
+    old_type = element.type
+    base_fields = Element.meta_fields(element.type)
+    var_fields = Map.keys(socket.assigns.canvas.variables) |> Enum.reject(&(&1 in base_fields))
+    meta_fields = base_fields ++ var_fields
+
+    new_meta =
+      Enum.reduce(meta_fields, old_meta, fn field, meta ->
+        case params[field] do
+          nil -> meta
+          "" -> Map.delete(meta, field)
+          val -> Map.put(meta, field, val)
+        end
+      end)
+      |> maybe_apply_graph_series(old_meta, params["graph_series"])
+
+    # Pins override meta at resolution time (and Serializer.decode derives
+    # them for every persisted element), so an edited host/ifname field must
+    # update its pin too or the edit is silently inert after a reload.
+    new_pins =
+      Enum.reduce(
+        Element.pin_dimensions(),
+        element.pins,
+        fn dim_atom, pins ->
+          dim = Atom.to_string(dim_atom)
+
+          case params[dim] do
+            nil -> pins
+            val -> Map.put(pins, dim, Element.derive_pin(val))
+          end
+        end
+      )
+
+    canvas =
+      Canvas.update_element(socket.assigns.canvas, id, %{meta: new_meta, pins: new_pins})
+
+    socket =
+      push_canvas(socket, canvas, coalesce_key("property:update_meta", id, params))
+      |> schedule_autosave()
+
+    time = socket.assigns.timeline_time || DateTime.utc_now()
+
+    case Map.get(socket.assigns.resolved_elements, id) do
+      %{type: :log_stream} = resolved ->
+        StreamManager.register_log_stream(
+          socket.assigns.canvas_id,
+          id,
+          build_log_opts(resolved.meta)
+        )
+
+      %{type: :trace_stream} = resolved ->
+        StreamManager.register_trace_stream(
+          socket.assigns.canvas_id,
+          id,
+          build_trace_opts(resolved.meta)
+        )
+
+      _ ->
+        :ok
+    end
+
+    socket =
+      socket
+      |> maybe_refresh_selected_series(id, old_meta, new_meta)
+      |> maybe_refresh_element_data(id, old_type, time)
+
     {:noreply, socket}
   end
 
@@ -3865,17 +3893,23 @@ defmodule TimelessCanvas.Web.CanvasLive do
     Map.put(map, key, val / 1.0)
   end
 
+  # Clamp to the same width bounds the JS hook enforces (clampZoomWidth):
+  # base_width * 100 / max_zoom .. base_width * 100 / min_zoom. The width
+  # must be clamped directly — round-tripping through the *rounded*
+  # zoom_percentage/1 quantized every in-range viewbox to an integer
+  # zoom percentage, so the stored viewbox silently drifted from the one
+  # the client pushed.
   defp clamp_view_box(%ViewBox{} = vb) do
-    zoomed_width =
-      @base_viewbox_width * 100.0 /
-        min(max(zoom_percentage(vb), @min_zoom_percent), @max_zoom_percent)
+    min_width = @base_viewbox_width * 100.0 / @max_zoom_percent
+    max_width = @base_viewbox_width * 100.0 / @min_zoom_percent
 
-    scale = zoomed_width / vb.width
+    width = vb.width |> max(min_width) |> min(max_width)
+    scale = width / vb.width
 
     %ViewBox{
       min_x: vb.min_x,
       min_y: vb.min_y,
-      width: zoomed_width,
+      width: width,
       height: vb.height * scale
     }
   end

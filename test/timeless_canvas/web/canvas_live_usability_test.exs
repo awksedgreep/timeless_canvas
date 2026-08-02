@@ -253,6 +253,43 @@ defmodule TimelessCanvas.Web.CanvasLiveUsabilityTest do
       refute html =~ "Go Live"
       refute html =~ "timeline-bar__readout"
     end
+
+    test "returning to live refreshes statuses left over from the scrub", %{
+      conn: conn,
+      user: user
+    } do
+      {canvas, el} =
+        Canvas.add_element(Canvas.new(snap_to_grid: false), %{
+          x: 100.0,
+          y: 100.0,
+          label: "web-1",
+          type: :server,
+          meta: %{"host" => "web-1"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: encode(canvas)})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      # Scrub into a window where the host was down.
+      FakeDataSource.put(:status_at, :error)
+      center_ms = System.system_time(:millisecond) - 600_000
+      render_hook(view, "timeline:change", %{"time" => center_ms})
+
+      assert :sys.get_state(view.pid).socket.assigns.canvas.elements[el.id].status == :error
+
+      # Back to live, where the host is healthy. The Manager only
+      # broadcasts status *changes*, and it never saw the scrub — so
+      # go_live must refresh statuses itself or the stale :error sticks
+      # until the next real transition.
+      FakeDataSource.put(:status_at, :ok)
+      view |> element(~s{button[phx-click="timeline:go_live"]}) |> render_click()
+
+      a = :sys.get_state(view.pid).socket.assigns
+      assert a.timeline_mode == :live
+      assert a.canvas.elements[el.id].status == :ok
+    end
   end
 
   describe "compact graph title truncation" do
@@ -356,6 +393,35 @@ defmodule TimelessCanvas.Web.CanvasLiveUsabilityTest do
 
       render_hook(view, "element:move", %{"id" => el.id, "dx" => 1, "dy" => 0})
       assert eventually(fn -> saved_elements(record.id)[el.id]["x"] == 142.0 end)
+      refute render(view) =~ "Another editor saved"
+    end
+
+    test "renaming your own canvas does not raise the stale-write warning", %{
+      conn: conn,
+      user: user
+    } do
+      with_fast_autosave()
+
+      {canvas, el} =
+        Canvas.add_element(Canvas.new(snap_to_grid: false), %{
+          x: 100.0,
+          y: 100.0,
+          label: "renameable"
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: encode(canvas)})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      # Rename bumps the record's updated_at; that's our own write, not
+      # another editor's, so the next autosave must not warn about it.
+      view |> element("span.canvas-toolbar__name") |> render_click()
+      view |> form("form.canvas-toolbar__name-form") |> render_submit(%{name: "Renamed"})
+      assert render(view) =~ "Renamed"
+
+      render_hook(view, "element:move", %{"id" => el.id, "dx" => 41, "dy" => 0})
+      assert eventually(fn -> saved_elements(record.id)[el.id]["x"] == 141.0 end)
       refute render(view) =~ "Another editor saved"
     end
   end

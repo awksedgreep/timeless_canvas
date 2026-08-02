@@ -608,6 +608,95 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
 
       assert_push_event(view, "graph:data", %{id: "el-1", value: "444"})
     end
+
+    test "moving a graph re-pushes its payload at the new geometry", %{conn: conn, user: user} do
+      {record, el, _now_ms} = seed_graph_canvas(user, 555.0)
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      assert_push_event(
+        view,
+        "graph:data",
+        %{id: "el-1", value: "555", value_pos: %{x: x_before}},
+        1_000
+      )
+
+      # Payload geometry is element-based (absolute coordinates), so the
+      # push cache must see a moved graph as changed and re-push it —
+      # otherwise the ignored container keeps drawing at the old spot.
+      render_hook(view, "element:move", %{"id" => el.id, "dx" => 40, "dy" => 0})
+
+      assert_push_event(view, "graph:data", %{id: "el-1", value: "555", value_pos: %{x: x_after}})
+      assert x_after == x_before + 40
+
+      # Undo of the move restores the old geometry and re-pushes again.
+      render_hook(view, "canvas:undo", %{})
+
+      assert_push_event(view, "graph:data", %{id: "el-1", value: "555", value_pos: %{x: x_undone}})
+
+      assert x_undone == x_before
+    end
+  end
+
+  describe "viewbox zoom clamping" do
+    defp view_box(view), do: :sys.get_state(view.pid).socket.assigns.canvas.view_box
+
+    test "an in-range canvas:zoom viewbox is stored exactly as pushed", %{conn: conn, user: user} do
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      # 2050 is within the 10%–350% zoom bounds but is not an integer
+      # zoom percentage; the server must not quantize it (the JS hook
+      # keeps its own viewbox at 2050 and quantizing causes drift).
+      render_hook(view, "canvas:zoom", %{
+        "min_x" => 10,
+        "min_y" => 20,
+        "width" => 2050,
+        "height" => 1366.7
+      })
+
+      vb = view_box(view)
+      assert vb.min_x == 10.0
+      assert vb.min_y == 20.0
+      assert vb.width == 2050.0
+      assert vb.height == 1366.7
+    end
+
+    test "out-of-range zooms clamp to the same bounds the JS hook uses", %{
+      conn: conn,
+      user: user
+    } do
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      # Far below 10% zoom: clamps to base_width * 100 / 10 = 21600,
+      # scaling the height to preserve the pushed aspect ratio.
+      render_hook(view, "canvas:zoom", %{
+        "min_x" => 0,
+        "min_y" => 0,
+        "width" => 100_000,
+        "height" => 50_000
+      })
+
+      vb = view_box(view)
+      assert vb.width == 21_600.0
+      assert vb.height == 10_800.0
+
+      # Far above 350% zoom: clamps to base_width * 100 / 350.
+      render_hook(view, "canvas:zoom", %{
+        "min_x" => 0,
+        "min_y" => 0,
+        "width" => 100,
+        "height" => 50
+      })
+
+      vb = view_box(view)
+      assert_in_delta vb.width, 2160 * 100 / 350, 0.0001
+      assert_in_delta vb.height, vb.width / 2, 0.0001
+    end
   end
 
   describe "stream entry popovers" do

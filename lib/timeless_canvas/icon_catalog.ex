@@ -239,10 +239,24 @@ defmodule TimelessCanvas.IconCatalog do
   defp separator_char?(char) when char in [?_, ?-, ?., ?\s, ?\t, ?\n, ?\r], do: true
   defp separator_char?(_char), do: false
 
+  # Match alias keys against whole (separator-normalized) words, never
+  # bare substrings: "cpu_temp" → ["cpu", "temp"] still matches "cpu",
+  # but "diskless" must not match "disk" nor "cachet" match "cache".
+  # Multi-word keys ("mac os", "red hat") match as a contiguous word run.
   defp scan_aliases(text, map) do
+    words = String.split(text, " ", trim: true)
+
     Enum.find_value(map, fn {key, icon} ->
-      if String.contains?(text, key), do: icon, else: nil
+      if contains_word_run?(words, String.split(key, " ", trim: true)), do: icon, else: nil
     end)
+  end
+
+  defp contains_word_run?(_words, []), do: false
+
+  defp contains_word_run?(words, key_words) do
+    words
+    |> Enum.chunk_every(length(key_words), 1, :discard)
+    |> Enum.any?(&(&1 == key_words))
   end
 
   defp maybe_put(map, _key, nil), do: map
