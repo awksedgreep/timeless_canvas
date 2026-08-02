@@ -62,6 +62,11 @@ defmodule TimelessCanvas.Test.FakePersistence do
     Agent.update(__MODULE__, &Map.put(&1, :update_error, error))
   end
 
+  @doc "All stored canvas records, for test assertions on record counts."
+  def all_canvases do
+    Agent.get(__MODULE__, &Map.values(&1.canvases))
+  end
+
   @doc "Register a user so `lookup_user_by_username/1` can find it."
   def seed_user(user) do
     Agent.update(__MODULE__, fn state ->

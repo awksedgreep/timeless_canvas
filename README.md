@@ -65,6 +65,9 @@ Also import the stylesheet in your `assets/css/app.css`:
 @import "../../deps/timeless_canvas/assets/css/timeless_canvas.css";
 ```
 
+This `assets/css` file is the only copy of the stylesheet — there is no
+prebuilt copy under `priv/` and no CSS route; your bundler owns it.
+
 `assets/package.json` declares `main`/`exports`, so bundlers that resolve
 packages (esbuild with `NODE_PATH=deps`, Vite, webpack) can also use
 `import { CanvasHook } from "timeless_canvas"`.

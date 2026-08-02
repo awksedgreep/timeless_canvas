@@ -961,51 +961,6 @@ const CanvasHook = {
     }
   },
 
-  // --- Visual Updates (optimistic, no server) ---
-
-  moveElementVisual(group, dx, dy) {
-    // Skip elements inside transform-based icon groups (they use local coords)
-    const insideTransform = (el) => el.closest(".canvas-element__icon");
-
-    group.querySelectorAll("[x]").forEach((el) => {
-      if (!insideTransform(el))
-        el.setAttribute("x", parseFloat(el.getAttribute("x")) + dx);
-    });
-    group.querySelectorAll("[y]").forEach((el) => {
-      if (!insideTransform(el))
-        el.setAttribute("y", parseFloat(el.getAttribute("y")) + dy);
-    });
-    group.querySelectorAll("[cx]").forEach((el) => {
-      if (!insideTransform(el))
-        el.setAttribute("cx", parseFloat(el.getAttribute("cx")) + dx);
-    });
-    group.querySelectorAll("[cy]").forEach((el) => {
-      if (!insideTransform(el))
-        el.setAttribute("cy", parseFloat(el.getAttribute("cy")) + dy);
-    });
-    // Move polyline/polygon points (graph lines only, skip icon internals)
-    group.querySelectorAll("polyline[points], polygon[points]").forEach((el) => {
-      if (insideTransform(el)) return;
-      const pts = el.getAttribute("points").trim();
-      if (!pts) return;
-      const shifted = pts.split(/\s+/).map((pair) => {
-        const [px, py] = pair.split(",");
-        return `${parseFloat(px) + dx},${parseFloat(py) + dy}`;
-      }).join(" ");
-      el.setAttribute("points", shifted);
-    });
-    // Move transform-based icons as a whole
-    group.querySelectorAll("[transform]").forEach((el) => {
-      const t = el.getAttribute("transform");
-      const match = t.match(/translate\(([^,]+),\s*([^)]+)\)/);
-      if (match) {
-        const nx = parseFloat(match[1]) + dx;
-        const ny = parseFloat(match[2]) + dy;
-        el.setAttribute("transform", `translate(${nx}, ${ny})`);
-      }
-    });
-  },
-
   // --- Marquee Selection ---
 
   updateMarquee(start, current) {

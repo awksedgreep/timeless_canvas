@@ -77,7 +77,12 @@ defmodule TimelessCanvas.MixProject do
       maintainers: ["Mark Cotner"],
       licenses: ["MIT"],
       links: %{},
-      files: ~w(lib assets priv mix.exs README.md LICENSE)
+      # No priv/: the stylesheet ships only as assets/css/timeless_canvas.css
+      # (consumers @import it from deps — see README), migrations are
+      # generated from inline templates, and priv/static-test is gitignored
+      # E2E build output. The stale prebuilt priv/static/timeless_canvas.css
+      # copy (and the unrouted controller that served it) were removed.
+      files: ~w(lib assets mix.exs README.md LICENSE)
     ]
   end
 end

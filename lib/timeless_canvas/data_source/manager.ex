@@ -32,6 +32,7 @@ defmodule TimelessCanvas.DataSource.Manager do
   require Logger
 
   alias TimelessCanvas.DataSource
+  alias TimelessCanvas.Profiling
 
   @default_module TimelessCanvas.DataSource.Stub
   @default_poll_interval 10_000
@@ -343,7 +344,7 @@ defmodule TimelessCanvas.DataSource.Manager do
   @impl true
   def handle_info(:poll, state) do
     {poll_us, state} =
-      :timer.tc(fn ->
+      Profiling.timed(fn ->
         state
         |> update_in([:debug, :polls], &(&1 + 1))
         |> poll_all()
@@ -409,8 +410,17 @@ defmodule TimelessCanvas.DataSource.Manager do
     Process.send_after(self(), :poll, interval)
   end
 
+  # The [canvas-prof] report timer is never even armed unless profiling
+  # is enabled (config :timeless_canvas, :profiling, true).
   defp schedule_debug_report do
-    Process.send_after(self(), :debug_report, @debug_report_interval)
+    if Profiling.enabled?() do
+      interval =
+        Application.get_env(:timeless_canvas, :profiling_report_ms, @debug_report_interval)
+
+      Process.send_after(self(), :debug_report, interval)
+    end
+
+    :ok
   end
 
   defp monitor_registrant(state, canvas_id, pid) do

@@ -17,6 +17,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   alias TimelessCanvas.DataSource.Manager, as: StatusManager
   alias TimelessCanvas.IconCatalog
   alias TimelessCanvas.Presence
+  alias TimelessCanvas.Profiling
   alias TimelessCanvas.StreamManager
   require Logger
 
@@ -129,6 +130,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
           user_id: current_user.id,
           decode_failed?: decode_failed?,
           save_state: :saved,
+          # nil | {ref, timer} — see arm_autosave_timer/2
+          autosave_ref: nil,
           autosave_failures: 0,
           record_updated_at: Map.get(record, :updated_at),
           stale_write_warning: false,
@@ -1488,16 +1491,37 @@ defmodule TimelessCanvas.Web.CanvasLive do
     assign(socket, resolved_elements: resolved)
   end
 
+  # The [canvas-prof] report timer is never even armed unless profiling
+  # is enabled (config :timeless_canvas, :profiling, true).
   defp schedule_debug_report(socket) do
-    if connected?(socket) do
-      Process.send_after(self(), :debug_report, @debug_report_interval)
+    if connected?(socket) and Profiling.enabled?() do
+      Process.send_after(self(), :debug_report, debug_report_interval())
     end
 
     socket
   end
 
+  defp debug_report_interval,
+    do: Application.get_env(:timeless_canvas, :profiling_report_ms, @debug_report_interval)
+
+  # No-op unless profiling is enabled: the process-dictionary counters
+  # only feed the [canvas-prof] debug report.
   defp bump_render_stat(key, delta) do
-    Process.put(key, (Process.get(key) || 0) + delta)
+    if Profiling.enabled?() do
+      Process.put(key, (Process.get(key) || 0) + delta)
+    end
+
+    :ok
+  end
+
+  # debug_counts stays assigned (and static) when profiling is off so
+  # nothing that reads the assign needs a nil guard.
+  defp bump_debug_count(socket, key) do
+    if Profiling.enabled?() do
+      update(socket, :debug_counts, &Map.update!(&1, key, fn n -> n + 1 end))
+    else
+      socket
+    end
   end
 
   defp consume_render_stats do
@@ -1664,22 +1688,45 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp autosave_ms, do: Application.get_env(:timeless_canvas, :autosave_ms, 2000)
   defp autosave_retry_ms, do: Application.get_env(:timeless_canvas, :autosave_retry_ms, 5000)
 
+  # Exactly one autosave timer chain exists at a time: arming always
+  # cancels the previously armed timer, and each timer message carries
+  # the make_ref it was armed with so a message from a timer that was
+  # cancelled too late (already sitting in the mailbox) is ignored by
+  # ref-matching in handle_info({:autosave, ref}, ...). Without this,
+  # an eager save interleaved with a failing retry chain could leave two
+  # live timers double-counting toward the failure cap.
+  defp cancel_autosave_timer(socket) do
+    case Map.get(socket.assigns, :autosave_ref) do
+      {_ref, timer} -> Process.cancel_timer(timer)
+      _ -> :ok
+    end
+
+    assign(socket, autosave_ref: nil)
+  end
+
+  defp arm_autosave_timer(socket, delay) do
+    socket = cancel_autosave_timer(socket)
+    ref = make_ref()
+    timer = Process.send_after(self(), {:autosave, ref}, delay)
+    assign(socket, autosave_ref: {ref, timer})
+  end
+
   # User-edit path: (re)arm the autosave timer, mark the canvas dirty,
   # and reset the consecutive-failure counter (a fresh edit restarts the
   # retry budget even after autosave previously gave up).
   defp schedule_autosave(socket) do
-    if Map.get(socket.assigns, :autosave_ref) do
-      Process.cancel_timer(socket.assigns.autosave_ref)
-    end
-
-    ref = Process.send_after(self(), :autosave, autosave_ms())
-    assign(socket, autosave_ref: ref, save_state: :dirty, autosave_failures: 0)
+    socket
+    |> arm_autosave_timer(autosave_ms())
+    |> assign(save_state: :dirty, autosave_failures: 0)
   end
 
   # Persist the current canvas and track the outcome in save_state.
   # Failures re-arm the timer with a longer delay so transient DB
   # outages self-heal, up to @max_autosave_failures consecutive misses.
+  # A save happening now supersedes any armed timer (manual canvas:save
+  # while an autosave is pending), so cancel it first.
   defp attempt_save(socket) do
+    socket = cancel_autosave_timer(socket)
     socket = detect_stale_write(socket)
     data = Serializer.encode(socket.assigns.canvas)
 
@@ -1702,8 +1749,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         socket = assign(socket, save_state: :error, autosave_failures: failures)
 
         if failures < @max_autosave_failures do
-          ref = Process.send_after(self(), :autosave, autosave_retry_ms())
-          assign(socket, autosave_ref: ref)
+          arm_autosave_timer(socket, autosave_retry_ms())
         else
           socket
         end
@@ -1954,6 +2000,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
         {:noreply, push_navigate(socket, to: "#{socket.assigns.tc_base_path}/#{canvas_id}")}
 
+      # Never-opened sub-canvas element: the child record is created
+      # lazily here, on first navigation, not at placement.
+      %{type: :canvas} = el ->
+        open_new_sub_canvas(socket, el)
+
       %{type: :graph} ->
         if socket.assigns.expanded_graph_id == id do
           {:noreply,
@@ -2191,6 +2242,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
             Canvas.remove_connection(acc, id)
           end)
 
+        # Deliberate: deleting a sub-canvas element leaves any child
+        # canvas record it links to intact. The record stays discoverable
+        # (and deletable) from the canvas list, and undoing the delete
+        # restores the element's "canvas_id" link. Records are only ever
+        # created lazily on first navigation (open_new_sub_canvas/2), so
+        # a placed-then-deleted element that was never opened has no
+        # record to orphan.
         canvas = Canvas.remove_elements(canvas, element_ids)
 
         {:noreply,
@@ -3017,7 +3075,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_info({:element_status, element_id, status}, socket) do
-    socket = update(socket, :debug_counts, &Map.update!(&1, :status_msgs, fn n -> n + 1 end))
+    socket = bump_debug_count(socket, :status_msgs)
 
     if socket.assigns.timeline_mode == :live do
       canvas = Canvas.set_element_status(socket.assigns.canvas, element_id, status)
@@ -3044,7 +3102,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # Only the changed element entries are merged; historical viewers keep
   # their scrubbed data untouched, mirroring the old live-mode-only guard.
   def handle_info({:canvas_data, _canvas_id, diffs}, socket) do
-    socket = update(socket, :debug_counts, &Map.update!(&1, :data_msgs, fn n -> n + 1 end))
+    socket = bump_debug_count(socket, :data_msgs)
 
     if socket.assigns.timeline_mode == :live do
       socket =
@@ -3078,25 +3136,32 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # the prepend order of the old per-entry broadcasts). Live entries are
   # still dropped while scrubbed into historical mode.
   def handle_info({:stream_entries, element_id, new_entries}, socket) do
-    socket =
-      update(socket, :debug_counts, &Map.update!(&1, :stream_entry_msgs, fn n -> n + 1 end))
+    socket = bump_debug_count(socket, :stream_entry_msgs)
 
     merge_stream_entries(socket, element_id, new_entries)
   end
 
   def handle_info({:stream_spans, element_id, new_spans}, socket) do
-    socket = update(socket, :debug_counts, &Map.update!(&1, :stream_span_msgs, fn n -> n + 1 end))
+    socket = bump_debug_count(socket, :stream_span_msgs)
 
     merge_stream_entries(socket, element_id, new_spans)
   end
 
-  def handle_info(:autosave, socket) do
-    socket = assign(socket, autosave_ref: nil)
+  def handle_info({:autosave, ref}, socket) do
+    case socket.assigns.autosave_ref do
+      {^ref, _timer} ->
+        socket = assign(socket, autosave_ref: nil)
 
-    if socket.assigns.can_edit and not socket.assigns.decode_failed? do
-      {:noreply, attempt_save(socket)}
-    else
-      {:noreply, socket}
+        if socket.assigns.can_edit and not socket.assigns.decode_failed? do
+          {:noreply, attempt_save(socket)}
+        else
+          {:noreply, socket}
+        end
+
+      # Stale message from a timer superseded by a newer arm (or by an
+      # eager save): ignore, the live chain owns the next attempt.
+      _ ->
+        {:noreply, socket}
     end
   end
 
@@ -3275,7 +3340,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   defp sorted_elements(elements, expanded_id) do
     {elapsed_us, result} =
-      :timer.tc(fn ->
+      Profiling.timed(fn ->
         elements
         |> Map.values()
         |> Enum.sort_by(&{if(&1.id == expanded_id, do: 1, else: 0), &1.z_index, &1.id})
@@ -3782,22 +3847,67 @@ defmodule TimelessCanvas.Web.CanvasLive do
     {:noreply, socket}
   end
 
+  # First navigation into a sub-canvas element that has no child record
+  # yet: create the record now, link it into the element meta, persist the
+  # parent synchronously, then navigate. The save is synchronous (not
+  # schedule_autosave) because navigation tears this LiveView down — a
+  # pending autosave would never run and the fresh child would be left
+  # unreferenced by the parent.
+  defp open_new_sub_canvas(socket, el) do
+    if socket.assigns.can_edit and not socket.assigns.decode_failed? do
+      name = if el.label in [nil, ""], do: "Sub-canvas", else: el.label
+
+      case persistence().create_child_canvas(socket.assigns.canvas_id, name) do
+        {:ok, child} ->
+          meta = Map.put(el.meta, "canvas_id", to_string(child.id))
+          canvas = Canvas.update_element(socket.assigns.canvas, el.id, %{meta: meta})
+
+          # The linkage is not an undoable user edit: replace the history
+          # top instead of pushing a new entry.
+          socket =
+            socket
+            |> assign(
+              history: History.replace_top(socket.assigns.history, canvas),
+              canvas: canvas
+            )
+            |> resolve_and_assign()
+
+          case safe_update_canvas_data(socket.assigns.canvas_id, Serializer.encode(canvas)) do
+            {:ok, _record} ->
+              {:noreply, push_navigate(socket, to: "#{socket.assigns.tc_base_path}/#{child.id}")}
+
+            {:error, reason} ->
+              Logger.error(
+                "[canvas] could not persist sub-canvas link on canvas " <>
+                  "#{socket.assigns.canvas_id}: #{inspect(reason)} — staying on parent"
+              )
+
+              # Stay put: the link is kept in state and the autosave retry
+              # chain persists it; the next double-click then navigates.
+              {:noreply, schedule_autosave(socket)}
+          end
+
+        {:error, reason} ->
+          Logger.error(
+            "[canvas] failed to create sub-canvas record for canvas " <>
+              "#{socket.assigns.canvas_id}: #{inspect(reason)}"
+          )
+
+          {:noreply, socket}
+      end
+    else
+      # Viewers (and the decode-failed hold) cannot materialize the child
+      # record; there is nothing to navigate to yet.
+      {:noreply, socket}
+    end
+  end
+
   defp place_typed_element(socket, type, x, y) do
     defaults = Element.defaults_for(type)
 
-    meta =
-      if type == :canvas do
-        case persistence().create_child_canvas(
-               socket.assigns.canvas_id,
-               "Sub-canvas #{socket.assigns.canvas.next_id}"
-             ) do
-          {:ok, child} -> %{"canvas_id" => to_string(child.id)}
-          {:error, _} -> %{}
-        end
-      else
-        %{}
-      end
-
+    # :canvas elements get NO child record here: the record is created
+    # lazily on the first double-click navigation (open_new_sub_canvas/2),
+    # so place/undo churn can't leak orphaned records.
     {canvas, _el} =
       Canvas.add_element(socket.assigns.canvas, %{
         type: type,
@@ -3807,7 +3917,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         width: defaults.width,
         height: defaults.height,
         label: "#{type |> to_string() |> String.capitalize()} #{socket.assigns.canvas.next_id}",
-        meta: meta
+        meta: %{}
       })
 
     {:noreply,

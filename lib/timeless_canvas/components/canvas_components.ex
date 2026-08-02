@@ -9,6 +9,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   alias TimelessCanvas.Canvas.Element
   alias TimelessCanvas.IconCatalog
   alias TimelessCanvas.MetricFormatter
+  alias TimelessCanvas.Profiling
 
   attr(:element, Element, required: true)
   attr(:selected, :boolean, default: false)
@@ -21,7 +22,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   def canvas_element(assigns) do
     {elapsed_us, result} =
-      :timer.tc(fn ->
+      Profiling.timed(fn ->
         is_expanded =
           assigns.element.type == :graph and assigns.expanded_graph_id == assigns.element.id
 
@@ -150,7 +151,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   defp element_body(%{element: %{type: :log_stream}} = assigns) do
     {elapsed_us, result} =
-      :timer.tc(fn ->
+      Profiling.timed(fn ->
         level_filter = Map.get(assigns.element.meta, "level", "all")
 
         log_title =
@@ -243,7 +244,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   defp element_body(%{element: %{type: :trace_stream}} = assigns) do
     {elapsed_us, result} =
-      :timer.tc(fn ->
+      Profiling.timed(fn ->
         service_filter = Map.get(assigns.element.meta, "service", "all")
 
         trace_title =
@@ -347,7 +348,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   defp element_body(%{element: %{type: :graph}, is_expanded: true} = assigns) do
     {elapsed_us, result} =
-      :timer.tc(fn ->
+      Profiling.timed(fn ->
         metric_name = Map.get(assigns.element.meta, "metric_name", "metric")
 
         graph_title =
@@ -406,7 +407,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   defp element_body(%{element: %{type: :graph}} = assigns) do
     {elapsed_us, result} =
-      :timer.tc(fn ->
+      Profiling.timed(fn ->
         metric_name = Map.get(assigns.element.meta, "metric_name", "metric")
         unit = Map.get(assigns.metric_units, assigns.element.id)
 
@@ -1054,8 +1055,14 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     end
   end
 
+  # No-op unless profiling is enabled: the process-dictionary counters
+  # only feed the [canvas-prof] debug report.
   defp bump_render_stat(key, delta) do
-    Process.put(key, (Process.get(key) || 0) + delta)
+    if Profiling.enabled?() do
+      Process.put(key, (Process.get(key) || 0) + delta)
+    end
+
+    :ok
   end
 
   # --- Connection component ---

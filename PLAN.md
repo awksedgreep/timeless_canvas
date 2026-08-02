@@ -326,22 +326,33 @@ v0.5.0 until then.
 
 ## Phase 7 — Hardening batch
 
-- [ ] Sub-canvas lifecycle: create the child canvas record LAZILY on first
+- [x] Sub-canvas lifecycle: create the child canvas record LAZILY on first
       navigation (double-click) instead of eagerly at placement, so
       place/undo churn stops leaking orphaned records
       (`place_typed_element` creates via `create_child_canvas` today).
       Deleting the element leaves an existing child record intact
       (discoverable/deletable from the canvas list) — document that choice.
-- [ ] Gate the profiling instrumentation (`[canvas-prof]` logs, `:timer.tc`
+      (Done: `open_new_sub_canvas/2` creates + links + saves the parent
+      synchronously before navigating; deletion choice documented in
+      `delete_selected`.)
+- [x] Gate the profiling instrumentation (`[canvas-prof]` logs, `:timer.tc`
       wrappers in `canvas_components.ex` / `canvas_live.ex` /
       `manager.ex` debug reports) behind
       `config :timeless_canvas, :profiling, false` (persistent_term-cached
       check; report timers not even scheduled when off; default off).
-- [ ] Autosave retry: cancel any armed timer before arming a new one so
+      (Done: `TimelessCanvas.Profiling` — `enabled?/0`, `refresh/0`,
+      `timed/1`; `:profiling_report_ms` overrides the 30s report interval.)
+- [x] Autosave retry: cancel any armed timer before arming a new one so
       overlapping timers can't double-count toward the failure cap.
-- [ ] Delete dead `moveElementVisual` from canvas_hook.js.
-- [ ] Resolve the stale `priv/static/timeless_canvas.css` copy: delete it
+      (Done: single `{ref, timer}` chain; `{:autosave, ref}` messages are
+      ref-matched so late-cancelled timer messages are ignored.)
+- [x] Delete dead `moveElementVisual` from canvas_hook.js.
+- [x] Resolve the stale `priv/static/timeless_canvas.css` copy: delete it
       if nothing references it (grep consumers), else regenerate + document.
+      (Done: deleted, along with the unrouted `AssetsController` that
+      served it — no repo or consumer references it; consumers `@import`
+      `assets/css/timeless_canvas.css` from deps. `priv` dropped from the
+      hex package files list; migrations use inline templates.)
 
 ## Phase 8 — Load benchmark
 

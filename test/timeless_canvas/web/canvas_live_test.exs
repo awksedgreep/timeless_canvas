@@ -1445,4 +1445,221 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       assert eventually(fn -> not manager_registered?(record.id, el.id) end)
     end
   end
+
+  describe "sub-canvas lazy record creation" do
+    defp place_canvas_element(view) do
+      view |> element(~s{button[phx-value-mode="place"]}) |> render_click()
+      render_hook(view, "set_place_kind", %{"kind" => "canvas"})
+      render_hook(view, "canvas:click", %{"x" => 300, "y" => 300})
+    end
+
+    test "placing a :canvas element creates no persistence record", %{conn: conn, user: user} do
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      place_canvas_element(view)
+
+      # Only the parent record exists; the element carries no link yet.
+      assert [%{id: parent_id}] = FakePersistence.all_canvases()
+      assert parent_id == record.id
+
+      el = :sys.get_state(view.pid).socket.assigns.canvas.elements["el-1"]
+      assert el.type == :canvas
+      refute Map.has_key?(el.meta, "canvas_id")
+    end
+
+    test "first dblclick creates exactly one child record, links it, and navigates", %{
+      conn: conn,
+      user: user
+    } do
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      place_canvas_element(view)
+
+      assert {:error, {:live_redirect, %{to: to}}} =
+               render_hook(view, "element:dblclick", %{"id" => "el-1"})
+
+      canvases = FakePersistence.all_canvases()
+      assert length(canvases) == 2
+
+      child = Enum.find(canvases, &(&1.id != record.id))
+      assert child.parent_id == record.id
+      assert to == "/canvas/#{child.id}"
+
+      # The parent was saved synchronously before navigating, so the
+      # stored blob already carries the link.
+      {:ok, saved} = FakePersistence.get_canvas(record.id)
+      assert saved.data["elements"]["el-1"]["meta"]["canvas_id"] == to_string(child.id)
+    end
+
+    test "a second dblclick reuses the existing child record", %{conn: conn, user: user} do
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      place_canvas_element(view)
+
+      assert {:error, {:live_redirect, %{to: to}}} =
+               render_hook(view, "element:dblclick", %{"id" => "el-1"})
+
+      assert length(FakePersistence.all_canvases()) == 2
+
+      # Re-open the parent (the first navigation tore the LiveView down).
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      assert {:error, {:live_redirect, %{to: ^to}}} =
+               render_hook(view, "element:dblclick", %{"id" => "el-1"})
+
+      assert length(FakePersistence.all_canvases()) == 2
+    end
+
+    test "delete + undo of a never-opened canvas element round-trips with zero records", %{
+      conn: conn,
+      user: user
+    } do
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      place_canvas_element(view)
+      assert length(FakePersistence.all_canvases()) == 1
+
+      render_hook(view, "element:select", %{"id" => "el-1"})
+      view |> element(~s{button[phx-click="delete_selected"]}) |> render_click()
+      assert length(FakePersistence.all_canvases()) == 1
+      refute has_element?(view, ~s([data-element-id="el-1"]))
+
+      view |> element(~s{button[phx-click="canvas:undo"]}) |> render_click()
+      assert length(FakePersistence.all_canvases()) == 1
+      assert has_element?(view, ~s([data-element-id="el-1"]))
+
+      el = :sys.get_state(view.pid).socket.assigns.canvas.elements["el-1"]
+      refute Map.has_key?(el.meta, "canvas_id")
+    end
+
+    test "a view-only session cannot materialize the child record", %{conn: conn, user: user} do
+      previous = Application.get_env(:timeless_canvas, :auth)
+      Application.put_env(:timeless_canvas, :auth, TimelessCanvas.Test.DenyEditAuth)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:timeless_canvas, :auth)
+          value -> Application.put_env(:timeless_canvas, :auth, value)
+        end
+      end)
+
+      {data, el} = canvas_with_element(%{type: :canvas, label: "sub", x: 100.0, y: 100.0})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      # No navigation, no record created.
+      html = render_hook(view, "element:dblclick", %{"id" => el.id})
+      assert is_binary(html)
+      assert length(FakePersistence.all_canvases()) == 1
+    end
+  end
+
+  describe "autosave timer chain" do
+    @tag capture_log: true
+    test "an eager save during a failing chain leaves exactly one armed timer and stale timer messages are ignored",
+         %{conn: conn, user: user} do
+      # Long timers: nothing fires during the test — all assertions go
+      # through state refs, not timing.
+      with_fast_autosave(60_000, 60_000)
+      {data, el} = canvas_with_element(%{x: 100.0, y: 100.0, label: "one-chain"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      FakePersistence.fail_update_canvas_data({:error, :db_down})
+
+      # Edit arms the autosave timer.
+      render_hook(view, "element:move", %{"id" => el.id, "dx" => 10, "dy" => 0})
+      assert {ref1, t1} = :sys.get_state(view.pid).socket.assigns.autosave_ref
+      assert is_integer(Process.read_timer(t1))
+
+      # Manual save fails: exactly one failure counted, the pending edit
+      # timer is cancelled, and one retry timer is armed in its place.
+      render_hook(view, "canvas:save", %{})
+      assigns = :sys.get_state(view.pid).socket.assigns
+      assert assigns.autosave_failures == 1
+      assert {ref2, t2} = assigns.autosave_ref
+      refute ref2 == ref1
+      assert Process.read_timer(t1) == false
+      assert is_integer(Process.read_timer(t2))
+
+      # A stale timer message (superseded ref) is ignored: no extra
+      # failure, the armed chain is untouched.
+      send(view.pid, {:autosave, ref1})
+      render(view)
+      assigns = :sys.get_state(view.pid).socket.assigns
+      assert assigns.autosave_failures == 1
+      assert assigns.autosave_ref == {ref2, t2}
+
+      # A new edit supersedes the retry chain and resets the budget.
+      render_hook(view, "element:move", %{"id" => el.id, "dx" => 1, "dy" => 0})
+      assigns = :sys.get_state(view.pid).socket.assigns
+      assert assigns.autosave_failures == 0
+      assert {ref3, t3} = assigns.autosave_ref
+      assert Process.read_timer(t2) == false
+      assert is_integer(Process.read_timer(t3))
+
+      # Delivering the live ref performs exactly one attempt.
+      send(view.pid, {:autosave, ref3})
+      render(view)
+      assert :sys.get_state(view.pid).socket.assigns.autosave_failures == 1
+    end
+  end
+
+  describe "profiling gate (debug report timer)" do
+    defp with_profiling(enabled?, report_ms) do
+      Application.put_env(:timeless_canvas, :profiling, enabled?)
+      Application.put_env(:timeless_canvas, :profiling_report_ms, report_ms)
+      TimelessCanvas.Profiling.refresh()
+
+      # test_helper runs at :warning; the reports log at :info.
+      previous_level = Logger.level()
+      Logger.configure(level: :info)
+
+      on_exit(fn ->
+        Logger.configure(level: previous_level)
+        Application.delete_env(:timeless_canvas, :profiling)
+        Application.delete_env(:timeless_canvas, :profiling_report_ms)
+        TimelessCanvas.Profiling.refresh()
+      end)
+    end
+
+    test "with profiling on, the LiveView schedules and emits [canvas-prof] reports", %{
+      conn: conn,
+      user: user
+    } do
+      with_profiling(true, 30)
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+          Process.sleep(120)
+          render(view)
+        end)
+
+      assert log =~ "[canvas-prof] liveview"
+    end
+
+    test "with profiling off, no [canvas-prof] report is ever scheduled", %{
+      conn: conn,
+      user: user
+    } do
+      with_profiling(false, 30)
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+          Process.sleep(120)
+          render(view)
+        end)
+
+      refute log =~ "[canvas-prof]"
+    end
+  end
 end
