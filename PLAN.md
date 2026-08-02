@@ -356,17 +356,23 @@ v0.5.0 until then.
 
 ## Phase 8 — Load benchmark
 
-- [ ] `bench/canvas_bench.exs` (mix run): seeded canvases at N =
+- [x] `bench/canvas_bench.exs` (mix run): seeded canvases at N =
       25/100/300 elements with programmable FakeDataSource; measure and
       print p50/p95 for: mount-to-first-render, connected mount incl.
       initial async data, one poller tick fan-out (1 and 10 subscribed
       viewer processes), timeline scrub round-trip, push_graph_data diff
       pass, undo/redo, and per-socket memory (`:erlang.process_info`)
       including the 50-snapshot history at each N.
-- [ ] Record baseline numbers in bench/BASELINE.md (machine-noted);
+      (`MIX_ENV=test mix run bench/canvas_bench.exs`; reuses the
+      test/support fakes, polling/autosave disabled so measured ops are
+      deterministic.)
+- [x] Record baseline numbers in bench/BASELINE.md (machine-noted);
       re-run instructions in the file header.
-- [ ] Optional CI tripwire: nightly job runs the bench and fails on >2x
-      regression vs recorded baseline (soft — log-only at first).
+- [x] Optional CI tripwire (soft version): nightly job runs the bench and
+      uploads its output as an artifact (see e2e-nightly.yml `bench` job).
+      No failure threshold yet — comparison vs bench/BASELINE.md is
+      manual/log-only; add the >2x auto-fail only if drift becomes a
+      recurring problem.
 
 ## Pending product decisions (not scheduled)
 
