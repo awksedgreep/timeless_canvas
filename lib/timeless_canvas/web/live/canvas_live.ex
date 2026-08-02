@@ -1223,9 +1223,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
         phx-debounce="150"
       />
       <div :if={@open?} class="host-combobox__dropdown">
+        <%!-- The HTML `value` attribute must mirror phx-value-value: in a
+             real browser LiveView merges the button's own value property
+             into the click payload, and a <button> without `value` would
+             clobber phx-value-value with "" (LiveViewTest render_click
+             never exercises that merge — caught by the E2E suite). --%>
         <button
           :for={opt <- @suggestions}
           type="button"
+          value={opt}
           class={"host-combobox__option#{if opt == @selected, do: " host-combobox__option--active", else: ""}"}
           phx-click="ta:select"
           phx-value-ta_id={@id}

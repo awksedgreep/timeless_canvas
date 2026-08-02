@@ -22,3 +22,12 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 timeless_canvas-*.tar
 
+
+# Browser E2E suite artifacts
+/priv/static-test/
+/test/e2e/node_modules/
+/test/e2e/artifacts/
+# Only the chromium visual golden is committed; other engines' screenshots
+# are informational artifacts (font rendering varies per engine)
+/test/e2e/screenshots/firefox/
+/test/e2e/screenshots/webkit/

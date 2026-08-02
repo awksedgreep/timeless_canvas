@@ -30,10 +30,15 @@ defmodule TimelessCanvas.Test.Router do
     plug(:accepts, ["html"])
     plug(:fetch_session)
     plug(:fetch_live_flash)
+    plug(:protect_from_forgery)
+    plug(:put_root_layout, html: {TimelessCanvas.Test.E2E.Layout, :root})
   end
 
   scope "/" do
     pipe_through(:browser)
+
+    # Browser login for the E2E suite (harmless under LiveViewTest).
+    get("/e2e/login", TimelessCanvas.Test.E2E.SessionController, :login)
 
     live_canvas("/canvas", on_mount: [{TimelessCanvas.Test.Auth, :default}])
   end
@@ -56,6 +61,11 @@ defmodule TimelessCanvas.Test.Endpoint do
 
   socket("/live", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @session_options]])
 
+  # E2E assets (JS bundle + stylesheet) built by `mix e2e.assets` into
+  # priv/static-test/assets. Unused by LiveViewTest.
+  plug(Plug.Static, at: "/e2e-assets", from: {:timeless_canvas, "priv/static-test/assets"})
+
+  plug(Plug.Parsers, parsers: [:urlencoded], pass: ["*/*"])
   plug(Plug.Session, @session_options)
   plug(TimelessCanvas.Test.Router)
 end

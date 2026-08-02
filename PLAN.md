@@ -259,14 +259,50 @@ Status legend: `[x]` done · `[ ]` pending
       properties-panel forms; the `missing_form_id: :ignore` test silence is
       removed
 
-## Phase 5 — Browser E2E suite
+## Phase 5 — Browser E2E suite ✅ (2026-08-02)
 
-- [ ] `phoenix_test_playwright` (test-only) + test app wired to `DataSource.Random`
-- [ ] ~12 smoke flows across Chromium, Firefox, WebKit: render, placement, drag,
-      resize, marquee, wheel + pinch zoom, pan, timeline scrub + Go Live,
-      undo/redo, read-only enforcement, stream entry click, share flow
-- [ ] Screenshot visual regression of a seeded reference canvas per engine
-- [ ] CI: Chromium on PR; all three engines nightly
+- [x] Tooling: custom Node/playwright sidecar instead of
+      `phoenix_test_playwright` (deliberate deviation: the flows are raw
+      mouse/wheel/keyboard + pixel-diff heavy, which phoenix_test's
+      high-level API doesn't cover, and the sidecar pattern was already
+      proven against this app). ExUnit stays the driver: each `:e2e`-tagged
+      test seeds the existing fakes (FakePersistence/FakeDataSource/
+      FakeStreamBackend — richer than `DataSource.Random`, another
+      deliberate deviation: programmable + deterministic) and shells out to
+      `node test/e2e/run_flow.js <flow>`. `mix test.e2e` builds the browser
+      bundle (`mix e2e.assets`: esbuild profile bundling phoenix +
+      phoenix_live_view from deps/ with the three hooks registered per
+      README) and runs the suite against the test endpoint booted with a
+      real HTTP server (bandit, test-only dep) on a random port; plain
+      `mix test` stays browserless (`:e2e` excluded)
+- [x] 13 flows + visual test, one ExUnit test each: render + graph:data
+      polylines, toolbar rect + typeahead host placement, drag persists
+      across reload, SE-handle resize, marquee + Backspace delete + Ctrl+Z
+      restore, wheel pan + ctrl+wheel zoom-at-cursor + keyboard +/- +
+      zoom indicator, Space-drag & middle-mouse pan with pinned legend
+      overlay, timeline scrub → historical (Go Live + readout) → live,
+      undo/redo (buttons + keyboard), read-only enforcement (no drag
+      ghost + denied tampered element:move shows the view-only toast),
+      stream entry click → popover, Escape cascade (share overlay →
+      typeahead → place mode → selection), plus the Phase 4 focus-scoping
+      regression (Backspace on the timeline track must not delete).
+      Chromium and Firefox pass all 14 locally; found+fixed a real bug on
+      the way: `<button phx-value-value>` typeahead options were clobbered
+      to `""` by the button's own DOM value in real browsers
+      (LiveViewTest's render_click never exercises that merge)
+- [x] Visual regression: fixed reference canvas (rect/server/database/
+      text + connection — no graphs; their x-axis labels are
+      time-dependent), screenshot clipped to the SVG with time-varying
+      chrome masked; chromium compares against the committed golden via
+      pixelmatch (bootstrap-writes when absent, `E2E_VISUAL_TOLERANCE`
+      env), firefox/webkit screenshots saved as artifacts only
+- [x] CI: `e2e` job (chromium) added to ci.yml on push/PR;
+      `.github/workflows/e2e-nightly.yml` cron runs the
+      [chromium, firefox, webkit] matrix with `--with-deps`; screenshots
+      uploaded as artifacts in both. WebKit is CI-only (deviation): the
+      playwright build needs Ubuntu system libraries (libicu 74) that
+      don't exist on the local Arch host — verified locally that the
+      binary cannot even launch
 
 ## Phase 6 — Release hygiene
 

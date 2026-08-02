@@ -54,3 +54,60 @@ jobs:
 
       - name: Run tests
         run: mix test
+
+  e2e:
+    name: Browser E2E (Chromium)
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+      # Absorb cross-machine font rasterization differences vs the
+      # committed visual golden (masks already cover the worst offenders).
+      E2E_VISUAL_TOLERANCE: "0.05"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20.2"
+          otp-version: "29"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-e2e-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            mix-e2e-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Install E2E npm packages
+        working-directory: test/e2e
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium
+        working-directory: test/e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser E2E suite
+        run: mix test.e2e
+
+      - name: Upload screenshots and artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-chromium
+          path: |
+            test/e2e/screenshots/
+            test/e2e/artifacts/
+          if-no-files-found: ignore

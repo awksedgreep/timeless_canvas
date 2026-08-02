@@ -1,0 +1,73 @@
+name: E2E Nightly
+
+# Full browser matrix. Chromium also runs on every PR (see ci.yml); the
+# nightly adds Firefox and WebKit (WebKit is CI-only: the playwright
+# build needs Ubuntu system libraries unavailable on e.g. Arch hosts).
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Browser E2E (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, firefox, webkit]
+    env:
+      MIX_ENV: test
+      E2E_BROWSER: ${{ matrix.engine }}
+      E2E_VISUAL_TOLERANCE: "0.05"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20.2"
+          otp-version: "29"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-e2e-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            mix-e2e-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Install E2E npm packages
+        working-directory: test/e2e
+        run: npm ci --no-audit --no-fund
+
+      - name: Install ${{ matrix.engine }}
+        working-directory: test/e2e
+        run: npx playwright install --with-deps ${{ matrix.engine }}
+
+      - name: Run browser E2E suite
+        run: mix test.e2e
+
+      - name: Upload screenshots and artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.engine }}
+          path: |
+            test/e2e/screenshots/
+            test/e2e/artifacts/
+          if-no-files-found: ignore
