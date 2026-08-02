@@ -918,6 +918,24 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
   end
 
   describe "icon rendering safety" do
+    test "the timeless icon renders as a direct static path", %{conn: conn, user: user} do
+      # :service honors an explicit icon; :server/:router draw a fixed glyph
+      {data, el} =
+        canvas_with_element(%{
+          x: 100.0,
+          y: 100.0,
+          label: "brand",
+          type: :service,
+          meta: %{"service_name" => "timeless_ui", "icon" => "timeless"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+      {:ok, view, html} = live(conn, "/canvas/#{record.id}")
+
+      assert has_element?(view, ~s([data-element-id="#{el.id}"]))
+      assert html =~ ~s(href="/images/logo.svg")
+    end
+
     test "an unknown icon renders without crashing the view", %{conn: conn, user: user} do
       {data, el} =
         canvas_with_element(%{

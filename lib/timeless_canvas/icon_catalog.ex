@@ -29,6 +29,9 @@ defmodule TimelessCanvas.IconCatalog do
   }
 
   @semantic_icons %{
+    # Icons starting with "/" are served directly from the host app's
+    # static assets instead of going through Iconify.
+    "timeless" => "/images/logo.svg",
     "cpu" => "heroicons:cpu-chip-solid",
     "memory" => "heroicons:server-stack-solid",
     "disk" => "heroicons:circle-stack-solid",
@@ -68,6 +71,7 @@ defmodule TimelessCanvas.IconCatalog do
 
   @icon_options [
     {"", "Auto"},
+    {"timeless", "Timeless"},
     {"cpu", "CPU"},
     {"memory", "Memory"},
     {"disk", "Disk"},
