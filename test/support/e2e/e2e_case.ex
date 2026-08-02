@@ -34,6 +34,7 @@ defmodule TimelessCanvas.E2ECase do
   setup do
     TimelessCanvas.Test.FakePersistence.reset()
     TimelessCanvas.Test.FakeDataSource.reset()
+    TimelessCanvas.ConnCase.reset_clipboard()
     :ok
   end
 

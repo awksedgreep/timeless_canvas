@@ -494,6 +494,72 @@ const flows = {
   },
 
   /**
+   * Flow 15: split a canvas — cut two elements in the parent, dblclick
+   * the sub-canvas element to navigate into the child (a full LiveView
+   * remount), paste there, then return via the breadcrumb link and
+   * verify the cut elements are gone from the parent. Exercises the
+   * per-user Clipboard store surviving the remount.
+   */
+  async split_canvas(page, h) {
+    await h.login();
+    await h.waitLoaded();
+
+    // Marquee across the two seeded rects (upper-left); the :canvas
+    // element (el-3) sits far outside the marquee.
+    const b1 = await page.locator('[data-element-id="el-1"]').boundingBox();
+    const b2 = await page.locator('[data-element-id="el-2"]').boundingBox();
+    const from = { x: Math.min(b1.x, b2.x) - 40, y: Math.min(b1.y, b2.y) - 40 };
+    const to = {
+      x: Math.max(b1.x + b1.width, b2.x + b2.width) + 40,
+      y: Math.max(b1.y + b1.height, b2.y + b2.height) + 40,
+    };
+    await h.drag(from, to);
+    await page.waitForFunction(
+      () => document.querySelectorAll(".canvas-element--selected").length === 2,
+      { timeout: 5000 },
+    );
+
+    // Cut (the marquee pointerdown focused the SVG).
+    await page.keyboard.press("Control+x");
+    await page.waitForFunction(
+      () => document.querySelectorAll("[data-element-id]").length === 1,
+      { timeout: 5000 },
+    );
+
+    // Double-click the sub-canvas element: two quick clicks (the hook
+    // detects dblclick as a same-element click within 400ms).
+    const center = await h.elementCenter("el-3");
+    await h.clickAt(center);
+    await h.clickAt(center);
+
+    // Navigation remounts the LiveView on the child canvas.
+    await page.waitForURL("**/canvas/26", { timeout: 10000 });
+    await page.waitForSelector("[data-phx-main].phx-connected", { timeout: 15000 });
+    await h.waitLoaded();
+    await page.waitForSelector("a.canvas-breadcrumbs__link", { timeout: 5000 });
+
+    // Paste into the (empty) child; both elements materialize in its SVG.
+    await h.focusSvg();
+    await page.keyboard.press("Control+v");
+    await page.waitForFunction(
+      () => document.querySelectorAll("#canvas-svg [data-element-id]").length === 2,
+      { timeout: 5000 },
+    );
+    await h.waitSaved();
+
+    // Back to the parent via the breadcrumb link.
+    await page.click("a.canvas-breadcrumbs__link");
+    await page.waitForURL("**/canvas/25", { timeout: 10000 });
+    await page.waitForSelector("[data-phx-main].phx-connected", { timeout: 15000 });
+    await h.waitLoaded();
+
+    // Only the sub-canvas element remains: the cut elements moved out.
+    await page.waitForSelector('[data-element-id="el-3"]', { timeout: 5000 });
+    const remaining = await page.locator("[data-element-id]").count();
+    h.assert(remaining === 1, `parent should keep only el-3, saw ${remaining}`);
+  },
+
+  /**
    * Visual regression: screenshot a fixed reference canvas. Chromium
    * compares against the committed golden (bootstrap-writes it when
    * absent); other engines only save theirs as artifacts.

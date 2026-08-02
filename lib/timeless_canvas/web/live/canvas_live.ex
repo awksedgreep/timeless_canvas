@@ -13,6 +13,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   }
 
   alias TimelessCanvas.CanvasPoller
+  alias TimelessCanvas.Clipboard
   alias TimelessCanvas.DataQueries
   alias TimelessCanvas.DataSource.Manager, as: StatusManager
   alias TimelessCanvas.IconCatalog
@@ -161,7 +162,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
           hosts_available?: false,
           loading_data?: true,
           data_load_failed?: false,
-          clipboard: [],
           paste_offset: 20,
           expanded_graph_id: nil,
           expanded_graph_data: [],
@@ -2345,6 +2345,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
     {:noreply, assign(socket, selected_ids: all_ids)}
   end
 
+  # The clipboard lives in TimelessCanvas.Clipboard (per-user ETS), not a
+  # socket assign: navigating into a sub-canvas remounts the LiveView, and
+  # cut-here/paste-there is the primary way to split a big canvas into
+  # sub-canvases. Per-user means every tab of a user shares one clipboard
+  # (intentional — OS clipboard semantics). `paste_offset` stays a socket
+  # assign: the cascade position is per-view state.
   def handle_event("canvas:copy", _params, socket) do
     element_ids =
       socket.assigns.selected_ids
@@ -2354,7 +2360,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
       Enum.map(element_ids, &Map.get(socket.assigns.canvas.elements, &1))
       |> Enum.reject(&is_nil/1)
 
-    {:noreply, assign(socket, clipboard: templates, paste_offset: 20)}
+    Clipboard.put(socket.assigns.user_id, templates)
+    {:noreply, assign(socket, paste_offset: 20)}
   end
 
   def handle_event("canvas:cut", _params, socket) do
@@ -2368,17 +2375,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
         |> Enum.reject(&is_nil/1)
 
       canvas = Canvas.remove_elements(socket.assigns.canvas, element_ids)
+      Clipboard.put(socket.assigns.user_id, templates)
 
       {:noreply,
        push_canvas(socket, canvas)
-       |> assign(clipboard: templates, paste_offset: 20, selected_ids: MapSet.new())
+       |> assign(paste_offset: 20, selected_ids: MapSet.new())
        |> schedule_autosave()}
     end)
   end
 
   def handle_event("canvas:paste", _params, socket) do
     require_edit(socket, fn ->
-      case socket.assigns.clipboard do
+      case Clipboard.get(socket.assigns.user_id) do
         [] ->
           {:noreply, socket}
 

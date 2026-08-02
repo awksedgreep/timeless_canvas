@@ -177,6 +177,26 @@ defmodule TimelessCanvas.CanvasE2ETest do
     run_flow("focus_scoping_backspace", path: "/canvas/23")
   end
 
+  test "14. split canvas: cut in parent, paste in child, breadcrumb back" do
+    # Parent (25): two rects to move plus a :canvas element already linked
+    # to the seeded child record (26) — mirrors open_new_sub_canvas.
+    canvas = rect_canvas([{150, 150}, {430, 320}])
+
+    {canvas, _sub} =
+      Canvas.add_element(canvas, %{
+        type: :canvas,
+        x: 1500.0,
+        y: 850.0,
+        label: "Sub",
+        meta: %{"canvas_id" => "26"}
+      })
+
+    parent = seed(25, canvas, %{name: "Parent"})
+    seed(26, Canvas.new(snap_to_grid: false), %{name: "Child", parent_id: parent.id})
+
+    run_flow("split_canvas", path: "/canvas/25")
+  end
+
   test "visual regression: reference canvas screenshot" do
     canvas = Canvas.new(snap_to_grid: false)
     {canvas, r} = Canvas.add_element(canvas, %{type: :rect, x: 140.0, y: 140.0, label: "Zone A"})

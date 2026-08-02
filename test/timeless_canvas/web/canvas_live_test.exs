@@ -1559,6 +1559,225 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
     end
   end
 
+  describe "cross-canvas clipboard / splitting" do
+    alias TimelessCanvas.Clipboard
+
+    @clipboard_table :timeless_canvas_clipboard
+
+    # Parent with two data-bearing elements plus an empty child record
+    # (mirrors what open_new_sub_canvas/2 creates: child.parent_id set,
+    # parent element of type :canvas linking it by id).
+    defp seed_split_pair(user, opts \\ []) do
+      canvas = Canvas.new(snap_to_grid: false)
+
+      {canvas, el1} =
+        Canvas.add_element(canvas, %{
+          type: :server,
+          x: 100.0,
+          y: 100.0,
+          label: "web-1",
+          meta: %{"host" => "host-a"}
+        })
+
+      {canvas, el2} =
+        Canvas.add_element(canvas, %{type: :rect, x: 300.0, y: 200.0, label: "zone"})
+
+      {canvas, link_el} =
+        if opts[:link_element?] do
+          Canvas.add_element(canvas, %{type: :canvas, x: 500.0, y: 400.0, label: "Sub"})
+        else
+          {canvas, nil}
+        end
+
+      parent = FakePersistence.seed_canvas(%{name: "Parent", user_id: user.id})
+
+      child =
+        FakePersistence.seed_canvas(%{name: "Child", user_id: user.id, parent_id: parent.id})
+
+      canvas =
+        if link_el do
+          Canvas.update_element(canvas, link_el.id, %{
+            meta: %{"canvas_id" => to_string(child.id)}
+          })
+        else
+          canvas
+        end
+
+      {:ok, parent} = FakePersistence.update_canvas_data(parent.id, encode_raw(canvas))
+      {parent, child, el1, el2}
+    end
+
+    defp encode_raw(canvas) do
+      canvas |> Serializer.encode() |> Jason.encode!() |> Jason.decode!()
+    end
+
+    defp cut_both(view, el1, el2) do
+      render_hook(view, "marquee:select", %{"ids" => [el1.id, el2.id]})
+      render_hook(view, "canvas:cut", %{})
+    end
+
+    test "cut in the parent pastes into a separately mounted child with meta/pins intact",
+         %{conn: conn, user: user} do
+      with_fast_autosave()
+      {parent, child, el1, el2} = seed_split_pair(user)
+
+      {:ok, parent_view, _html} = live(conn, "/canvas/#{parent.id}")
+      cut_both(parent_view, el1, el2)
+
+      # Cut removed both from the parent view and (via autosave) the store.
+      refute has_element?(parent_view, "[data-element-id]")
+      assert eventually(fn -> saved_elements(parent.id) == %{} end)
+
+      # A SECOND mount simulates the post-push_navigate remount: the old
+      # socket-assign clipboard would be gone here.
+      {:ok, child_view, _html} = live(log_in_user(build_conn(), user), "/canvas/#{child.id}")
+      render_hook(child_view, "canvas:paste", %{})
+
+      elements = :sys.get_state(child_view.pid).socket.assigns.canvas.elements
+      assert map_size(elements) == 2
+
+      pasted_web = Enum.find(Map.values(elements), &(&1.label == "web-1"))
+      pasted_zone = Enum.find(Map.values(elements), &(&1.label == "zone"))
+
+      # Fresh ids from the child's own sequence; meta and the decode-derived
+      # host pin travel with the template; positions carry the paste offset.
+      assert pasted_web.id != pasted_zone.id
+      assert pasted_web.meta["host"] == "host-a"
+      assert pasted_web.pins["host"] == %{"mode" => "literal", "value" => "host-a"}
+      assert pasted_web.x == 120.0
+      assert pasted_zone.x == 320.0
+      assert has_element?(child_view, ~s([data-element-id="#{pasted_web.id}"]))
+      assert has_element?(child_view, ~s([data-element-id="#{pasted_zone.id}"]))
+
+      # Both canvases persist their post-split state through autosave.
+      assert eventually(fn ->
+               labels = saved_elements(child.id) |> Map.values() |> Enum.map(& &1["label"])
+               Enum.sort(labels) == ["web-1", "zone"]
+             end)
+
+      assert saved_elements(parent.id) == %{}
+    end
+
+    test "copy (not cut) pastes into the child while the parent keeps its elements",
+         %{conn: conn, user: user} do
+      with_fast_autosave()
+      {parent, child, el1, el2} = seed_split_pair(user)
+
+      {:ok, parent_view, _html} = live(conn, "/canvas/#{parent.id}")
+      render_hook(parent_view, "marquee:select", %{"ids" => [el1.id, el2.id]})
+      render_hook(parent_view, "canvas:copy", %{})
+
+      assert has_element?(parent_view, ~s([data-element-id="#{el1.id}"]))
+      assert has_element?(parent_view, ~s([data-element-id="#{el2.id}"]))
+
+      {:ok, child_view, _html} = live(log_in_user(build_conn(), user), "/canvas/#{child.id}")
+      render_hook(child_view, "canvas:paste", %{})
+
+      assert map_size(:sys.get_state(child_view.pid).socket.assigns.canvas.elements) == 2
+
+      assert eventually(fn -> map_size(saved_elements(child.id)) == 2 end)
+      assert map_size(saved_elements(parent.id)) == 2
+    end
+
+    test "an expired clipboard entry pastes nothing and is dropped on read",
+         %{conn: conn, user: user} do
+      {parent, child, el1, el2} = seed_split_pair(user)
+
+      {:ok, parent_view, _html} = live(conn, "/canvas/#{parent.id}")
+      render_hook(parent_view, "marquee:select", %{"ids" => [el1.id, el2.id]})
+      render_hook(parent_view, "canvas:copy", %{})
+
+      # Age the real entry past the 30-minute TTL in place.
+      [{key, templates, _at}] = :ets.lookup(@clipboard_table, user.id)
+      expired_at = System.monotonic_time(:millisecond) - 31 * 60 * 1000
+      :ets.insert(@clipboard_table, {key, templates, expired_at})
+
+      {:ok, child_view, _html} = live(log_in_user(build_conn(), user), "/canvas/#{child.id}")
+      render_hook(child_view, "canvas:paste", %{})
+
+      refute has_element?(child_view, "[data-element-id]")
+      # Lazy expiry deleted the entry on that read.
+      assert :ets.lookup(@clipboard_table, user.id) == []
+      assert Clipboard.get(user.id) == []
+    end
+
+    test "paste with an empty/absent clipboard is a no-op", %{conn: conn, user: user} do
+      {data, el} = canvas_with_element(%{x: 100.0, y: 100.0, label: "lonely"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_hook(view, "canvas:paste", %{})
+
+      assigns = :sys.get_state(view.pid).socket.assigns
+      assert map_size(assigns.canvas.elements) == 1
+      assert has_element?(view, ~s([data-element-id="#{el.id}"]))
+      # No edit happened, so nothing was marked dirty.
+      assert assigns.save_state == :saved
+      assert assigns.autosave_ref == nil
+    end
+
+    test "one user's cut is invisible to another user's session", %{conn: conn, user: user} do
+      {parent, _child, el1, el2} = seed_split_pair(user)
+      other = test_user(%{id: user.id + 1, username: "other", email: "other@example.com"})
+      other_record = FakePersistence.seed_canvas(%{name: "Other's", user_id: other.id})
+
+      {:ok, parent_view, _html} = live(conn, "/canvas/#{parent.id}")
+      cut_both(parent_view, el1, el2)
+      assert length(Clipboard.get(user.id)) == 2
+
+      {:ok, other_view, _html} =
+        live(log_in_user(build_conn(), other), "/canvas/#{other_record.id}")
+
+      render_hook(other_view, "canvas:paste", %{})
+
+      refute has_element?(other_view, "[data-element-id]")
+      assert Clipboard.get(other.id) == []
+    end
+
+    test "the child renders the parent breadcrumb as a link that navigates back",
+         %{conn: conn, user: user} do
+      {parent, child, _el1, _el2} = seed_split_pair(user, link_element?: true)
+
+      {:ok, child_view, html} = live(conn, "/canvas/#{child.id}")
+
+      assert html =~ "canvas-breadcrumbs"
+
+      link = ~s{a.canvas-breadcrumbs__link[href="/canvas/#{parent.id}"]}
+      assert has_element?(child_view, link, "Parent")
+
+      assert {:error, {:live_redirect, %{to: to}}} =
+               child_view |> element(link) |> render_click()
+
+      assert to == "/canvas/#{parent.id}"
+    end
+
+    test "a read-only viewer cannot paste", %{conn: conn, user: user} do
+      previous = Application.get_env(:timeless_canvas, :auth)
+      Application.put_env(:timeless_canvas, :auth, TimelessCanvas.Test.DenyEditAuth)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:timeless_canvas, :auth)
+          value -> Application.put_env(:timeless_canvas, :auth, value)
+        end
+      end)
+
+      {_canvas, template} =
+        Canvas.add_element(Canvas.new(), %{type: :rect, x: 50.0, y: 50.0, label: "loot"})
+
+      Clipboard.put(user.id, [template])
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id})
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = render_hook(view, "canvas:paste", %{})
+
+      refute has_element?(view, "[data-element-id]")
+      # require_edit answered with the view-only notice instead.
+      assert html =~ "canvas-view-only-toast"
+    end
+  end
+
   describe "autosave timer chain" do
     @tag capture_log: true
     test "an eager save during a failing chain leaves exactly one armed timer and stale timer messages are ignored",

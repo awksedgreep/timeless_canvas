@@ -29,7 +29,22 @@ defmodule TimelessCanvas.ConnCase do
   setup do
     TimelessCanvas.Test.FakePersistence.reset()
     TimelessCanvas.Test.FakeDataSource.reset()
+    reset_clipboard()
     {:ok, conn: Phoenix.ConnTest.build_conn()}
+  end
+
+  @doc """
+  Empty the per-user clipboard ETS table. The store is keyed by user id
+  and most tests share the default user, so leftover copy/cut contents
+  would leak between tests without this.
+  """
+  def reset_clipboard do
+    case :ets.whereis(:timeless_canvas_clipboard) do
+      :undefined -> :ok
+      tid -> :ets.delete_all_objects(tid)
+    end
+
+    :ok
   end
 
   @doc """

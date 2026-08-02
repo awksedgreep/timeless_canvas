@@ -374,6 +374,23 @@ v0.5.0 until then.
       manual/log-only; add the >2x auto-fail only if drift becomes a
       recurring problem.
 
+## Phase 9 — Sub-canvas split workflow
+
+- [x] Cross-canvas clipboard: copy/cut/paste templates now live in
+      `TimelessCanvas.Clipboard` (per-user public ETS table owned by a
+      tiny GenServer under `TimelessCanvas.Supervisor`) instead of a
+      socket assign — `push_navigate` into a sub-canvas remounts the
+      LiveView, so the assign-based clipboard made cut-from-parent →
+      paste-into-child (the canvas-splitting workflow) paste nothing.
+      Entries expire lazily on read after 30 minutes (no sweeper).
+      Per-user keying means all tabs of a user share one clipboard
+      (intentional, OS-clipboard semantics). `paste_offset` stays
+      per-view. Pasted elements go through the normal
+      `push_canvas`/`register_elements` path, so stream subscriptions
+      and pollers pick them up in the target canvas. Covered by the
+      "cross-canvas clipboard / splitting" unit describe (7 tests) and
+      E2E flow 15 (`split_canvas`).
+
 ## Pending product decisions (not scheduled)
 
 - [ ] Touch-device support: two-finger pinch zoom via pointer events
@@ -390,6 +407,9 @@ v0.5.0 until then.
 - Live-session access revocation does not propagate (can_edit computed at
   mount; persistence layer does not re-authorize writes). Acknowledged,
   deliberately deferred.
+- Access grants do not cascade to child canvases: a shared editor of a
+  parent gets access-denied when opening its sub-canvases (grants are
+  per-record). Same family as the revocation item above.
 - Watch: first nightly WebKit E2E run; chromium visual-regression golden
   may need one regeneration from Ubuntu font rendering.
 - StreamManager subscriptions keyed by bare element id (same-id elements
