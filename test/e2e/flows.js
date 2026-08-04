@@ -30,6 +30,7 @@ const flows = {
         const poly = document.querySelector("#graph-dyn-el-3 polyline");
         return poly && poly.getAttribute("points").length > 20;
       },
+      null,
       { timeout: 10000 },
     );
   },
@@ -57,6 +58,7 @@ const flows = {
       () =>
         document.querySelector('input[name="ta_search"]').placeholder ===
         "alpha-host",
+      null,
       { timeout: 5000 },
     );
     await h.clickAt(await h.emptyCanvasPoint(0.6, 0.5));
@@ -147,18 +149,12 @@ const flows = {
     await h.waitLoaded();
 
     // Marquee across both seeded elements (they sit in the upper-left
-    // quadrant of the default viewbox).
-    const b1 = await page.locator('[data-element-id="el-1"]').boundingBox();
-    const b2 = await page.locator('[data-element-id="el-2"]').boundingBox();
-    const from = { x: Math.min(b1.x, b2.x) - 40, y: Math.min(b1.y, b2.y) - 40 };
-    const to = {
-      x: Math.max(b1.x + b1.width, b2.x + b2.width) + 40,
-      y: Math.max(b1.y + b1.height, b2.y + b2.height) + 40,
-    };
-    await h.drag(from, to);
+    // quadrant of the default viewbox), clamped to the visible canvas.
+    await h.marqueeAround(["el-1", "el-2"]);
 
     await page.waitForFunction(
       () => document.querySelectorAll(".canvas-element--selected").length === 2,
+      null,
       { timeout: 5000 },
     );
 
@@ -166,6 +162,7 @@ const flows = {
     await page.keyboard.press("Backspace");
     await page.waitForFunction(
       () => document.querySelectorAll("[data-element-id]").length === 0,
+      null,
       { timeout: 5000 },
     );
 
@@ -173,6 +170,7 @@ const flows = {
     await page.keyboard.press("Control+z");
     await page.waitForFunction(
       () => document.querySelectorAll("[data-element-id]").length === 2,
+      null,
       { timeout: 5000 },
     );
   },
@@ -217,6 +215,7 @@ const flows = {
         const span = document.querySelector(".canvas-zoom-indicator > span");
         return span && parseInt(span.textContent, 10) > 100;
       },
+      null,
       { timeout: 3000 },
     );
 
@@ -300,6 +299,7 @@ const flows = {
       `readout should be a timestamp, got "${readout.trim()}"`);
     await page.waitForFunction(
       () => !document.querySelector(".timeline-bar__live-dot--active"),
+      null,
       { timeout: 5000 },
     );
 
@@ -309,6 +309,7 @@ const flows = {
     });
     await page.waitForFunction(
       () => !document.querySelector(".timeline-bar__go-live"),
+      null,
       { timeout: 5000 },
     );
   },
@@ -328,6 +329,7 @@ const flows = {
     await page.click('button[phx-click="canvas:undo"]');
     await page.waitForFunction(
       () => document.querySelectorAll("[data-element-id]").length === 0,
+      null,
       { timeout: 5000 },
     );
     await page.click('button[phx-click="canvas:redo"]');
@@ -338,6 +340,7 @@ const flows = {
     await page.keyboard.press("Control+z");
     await page.waitForFunction(
       () => document.querySelectorAll("[data-element-id]").length === 0,
+      null,
       { timeout: 5000 },
     );
     await page.keyboard.press("Control+Shift+z");
@@ -386,6 +389,7 @@ const flows = {
 
     await page.waitForFunction(
       () => document.querySelectorAll(".canvas-stream-row").length >= 2,
+      null,
       { timeout: 10000 },
     );
 
@@ -418,6 +422,7 @@ const flows = {
     await page.keyboard.press("Escape");
     await page.waitForFunction(
       () => !document.querySelector(".canvas-share-overlay"),
+      null,
       { timeout: 5000 },
     );
 
@@ -431,6 +436,7 @@ const flows = {
     await page.keyboard.press("Escape");
     await page.waitForFunction(
       () => !document.querySelector(".host-combobox__dropdown"),
+      null,
       { timeout: 5000 },
     );
     let mode = await page.getAttribute("#canvas-svg", "data-mode");
@@ -440,6 +446,7 @@ const flows = {
     await page.keyboard.press("Escape");
     await page.waitForFunction(
       () => document.getElementById("canvas-svg").dataset.mode === "select",
+      null,
       { timeout: 5000 },
     );
 
@@ -449,6 +456,7 @@ const flows = {
     await page.keyboard.press("Escape");
     await page.waitForFunction(
       () => !document.querySelector(".canvas-element--selected"),
+      null,
       { timeout: 5000 },
     );
   },
@@ -469,6 +477,7 @@ const flows = {
     await h.clickAt({ x: track.x + track.width * 0.3, y: track.y + track.height / 2 });
     await page.waitForFunction(
       () => document.activeElement && document.activeElement.id === "timeline-slider",
+      null,
       { timeout: 5000 },
     );
 
@@ -489,6 +498,7 @@ const flows = {
     await page.keyboard.press("Backspace");
     await page.waitForFunction(
       () => document.querySelectorAll("[data-element-id]").length === 0,
+      null,
       { timeout: 5000 },
     );
   },
@@ -506,16 +516,10 @@ const flows = {
 
     // Marquee across the two seeded rects (upper-left); the :canvas
     // element (el-3) sits far outside the marquee.
-    const b1 = await page.locator('[data-element-id="el-1"]').boundingBox();
-    const b2 = await page.locator('[data-element-id="el-2"]').boundingBox();
-    const from = { x: Math.min(b1.x, b2.x) - 40, y: Math.min(b1.y, b2.y) - 40 };
-    const to = {
-      x: Math.max(b1.x + b1.width, b2.x + b2.width) + 40,
-      y: Math.max(b1.y + b1.height, b2.y + b2.height) + 40,
-    };
-    await h.drag(from, to);
+    await h.marqueeAround(["el-1", "el-2"]);
     await page.waitForFunction(
       () => document.querySelectorAll(".canvas-element--selected").length === 2,
+      null,
       { timeout: 5000 },
     );
 
@@ -523,6 +527,7 @@ const flows = {
     await page.keyboard.press("Control+x");
     await page.waitForFunction(
       () => document.querySelectorAll("[data-element-id]").length === 1,
+      null,
       { timeout: 5000 },
     );
 
@@ -543,6 +548,7 @@ const flows = {
     await page.keyboard.press("Control+v");
     await page.waitForFunction(
       () => document.querySelectorAll("#canvas-svg [data-element-id]").length === 2,
+      null,
       { timeout: 5000 },
     );
     await h.waitSaved();

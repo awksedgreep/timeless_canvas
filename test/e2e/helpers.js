@@ -72,6 +72,37 @@ module.exports = (page) => {
       await page.mouse.up();
     },
 
+    /**
+     * Marquee-drag a rectangle around the given elements: their union
+     * box plus a margin, clamped inside the SVG and below the floating
+     * toolbar. Unclamped margins made the drag start on the toolbar on
+     * runners whose fonts render it a few pixels taller (firefox CI).
+     */
+    async marqueeAround(ids, margin = 40) {
+      const svg = await page.locator("#canvas-svg").boundingBox();
+      const bar = await page.locator(".canvas-toolbar").boundingBox();
+      const topLimit = Math.max(svg.y, bar ? bar.y + bar.height : 0) + 2;
+      const boxes = [];
+      for (const id of ids) {
+        boxes.push(await page.locator(`[data-element-id="${id}"]`).boundingBox());
+      }
+      const from = {
+        x: Math.max(svg.x + 2, Math.min(...boxes.map((b) => b.x)) - margin),
+        y: Math.max(topLimit, Math.min(...boxes.map((b) => b.y)) - margin),
+      };
+      const to = {
+        x: Math.min(
+          svg.x + svg.width - 2,
+          Math.max(...boxes.map((b) => b.x + b.width)) + margin,
+        ),
+        y: Math.min(
+          svg.y + svg.height - 2,
+          Math.max(...boxes.map((b) => b.y + b.height)) + margin,
+        ),
+      };
+      await h.drag(from, to);
+    },
+
     /** A point inside the SVG that is empty canvas (away from elements). */
     async emptyCanvasPoint(dx = 0.75, dy = 0.75) {
       const box = await page.locator("#canvas-svg").boundingBox();
