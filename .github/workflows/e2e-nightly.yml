@@ -1,11 +1,8 @@
-name: E2E Nightly
+name: E2E browser matrix
 
-# Full browser matrix. Chromium also runs on every PR (see ci.yml); the
-# nightly adds Firefox and WebKit (WebKit is CI-only: the playwright
-# build needs Ubuntu system libraries unavailable on e.g. Arch hosts).
+# Full browser matrix, run only when explicitly requested. WebKit needs
+# Ubuntu system libraries unavailable on e.g. Arch hosts.
 on:
-  schedule:
-    - cron: "30 4 * * *"
   workflow_dispatch:
 
 permissions:
