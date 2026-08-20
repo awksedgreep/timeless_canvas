@@ -277,7 +277,9 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       assert html =~ "host-0050"
       refute html =~ "host-0051"
       assert html =~ "keep typing to narrow"
-      assert count_occurrences(html, ~s(phx-click="ta:select")) == 50
+      # Counts hosts specifically: the dropdown also carries a "— none —" entry
+      # for clearing, which is not a host and must not count against the cap.
+      assert count_occurrences(html, ~s(phx-value-value="host-)) == 50
     end
 
     test "ta:filter narrows via a bounded server-side query and pick still works", %{
@@ -298,7 +300,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
         |> element(~s{input[name="ta_search"]})
         |> render_keyup(%{"value" => "host-0777"})
 
-      assert count_occurrences(html, ~s(phx-click="ta:select")) == 1
+      assert count_occurrences(html, ~s(phx-value-value="host-)) == 1
       assert html =~ "host-0777"
       refute html =~ "host-0002"
       refute html =~ "keep typing to narrow"
@@ -1003,6 +1005,54 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       state = :sys.get_state(view.pid)
       assert state.socket.assigns.canvas.elements[el.id].pins["host"]["value"] == "host-b"
       assert state.socket.assigns.resolved_elements[el.id].meta["host"] == "host-b"
+    end
+
+    # Nothing in the typeahead could emit "" before: the hidden input resubmitted
+    # the current value and every option was a real host, so a host could be set
+    # and changed but never removed. The dropdown now carries a "— none —" entry,
+    # and this is the path it drives.
+    test "clearing host removes the value and its pin", %{conn: conn, user: user} do
+      {data, el} =
+        canvas_with_element(%{
+          x: 100.0,
+          y: 100.0,
+          label: "pinned",
+          type: :server,
+          meta: %{"host" => "host-a"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      render_hook(view, "property:update_meta", %{"element_id" => el.id, "host" => ""})
+
+      state = :sys.get_state(view.pid)
+      element = state.socket.assigns.canvas.elements[el.id]
+
+      # Both halves must go: the meta entry, and the pin that would otherwise
+      # keep overriding it at resolution time.
+      refute Map.has_key?(element.meta, "host")
+      assert element.pins["host"] == %{"mode" => "none", "value" => ""}
+      refute state.socket.assigns.resolved_elements[el.id].meta["host"]
+    end
+
+    test "the typeahead offers a clear entry once a host is set", %{conn: conn, user: user} do
+      {data, el} =
+        canvas_with_element(%{
+          x: 100.0,
+          y: 100.0,
+          label: "pinned",
+          type: :server,
+          meta: %{"host" => "host-a"}
+        })
+
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      render_hook(view, "element:select", %{"id" => el.id})
+      html = view |> element(~s{input[name="ta_search"]}) |> render_focus()
+
+      assert html =~ "— none —"
     end
   end
 

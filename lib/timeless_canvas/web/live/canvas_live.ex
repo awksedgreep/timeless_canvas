@@ -1231,6 +1231,20 @@ defmodule TimelessCanvas.Web.CanvasLive do
              into the click payload, and a <button> without `value` would
              clobber phx-value-value with "" (LiveViewTest render_click
              never exercises that merge — caught by the E2E suite). --%>
+        <%!-- Nothing else in the dropdown can produce "", so without this a value
+             could be set and changed but never removed. update_element_meta
+             already deletes the field on "", so this needs no backend change. --%>
+        <button
+          :if={@selected not in [nil, ""]}
+          type="button"
+          value=""
+          class="host-combobox__option host-combobox__option--none"
+          phx-click="ta:select"
+          phx-value-ta_id={@id}
+          phx-value-value=""
+        >
+          — none —
+        </button>
         <button
           :for={opt <- @suggestions}
           type="button"
@@ -1242,7 +1256,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
         >
           {opt}
         </button>
-        <span :if={@suggestions == []} class="host-combobox__empty">No matches</span>
+        <span :if={@suggestions == [] and @selected in [nil, ""]} class="host-combobox__empty">
+          No matches
+        </span>
         <span :if={@more > 0} class="host-combobox__empty">
           +{@more} more — keep typing to narrow
         </span>
