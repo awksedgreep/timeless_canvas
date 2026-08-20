@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.5.2 (2026-08-20)
+
+### Fixed
+- A typeahead-backed field can be cleared. Nothing in the host dropdown could
+  emit an empty value — the hidden input resubmitted whatever was already set
+  and every option was a real host — so a value could be set and changed but
+  never removed. The dropdown now carries a "— none —" entry.
+
+### Changed
+- The series filter sits next to the series list it narrows, rather than above
+  the whole Metadata section with the list near the bottom of it.
+
 ## v0.5.1 (2026-08-20)
 
 Release hardening on top of v0.5.0.
