@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.1 (2026-08-20)
+
+Release hardening on top of v0.5.0.
+
+### Fixed
+- Cross-canvas cut/paste: the clipboard is per-user and now survives navigation
+  between canvases, instead of being lost on the way.
+- Firefox-only nightly E2E failures: the selection marquee is clamped inside the
+  canvas bounds.
+
+### Changed
+- Release hardening batch (Phase 7) and a load benchmark with a recorded baseline
+  (Phase 8), so performance regressions have something to compare against.
+- CI no longer runs on automatic triggers.
+
 ## v0.5.0 (2026-08-02)
 
 Major performance, usability, and testing overhaul. Highlights:
