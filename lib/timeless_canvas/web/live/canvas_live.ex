@@ -835,26 +835,27 @@ defmodule TimelessCanvas.Web.CanvasLive do
           </div>
         </div>
       </form>
-      <div
-        :if={@available_series != [] or @series_filter != ""}
-        class="properties-panel__field"
-      >
-        <label>Series Filter</label>
-        <input
-          type="text"
-          name="series_filter"
-          value={@series_filter}
-          placeholder="Filter series..."
-          autocomplete="off"
-          phx-keyup="series:filter"
-          phx-debounce="200"
-        />
-        <span :if={@series_truncated} class="properties-panel__hint">
-          showing first {@series_limit} series — refine filter
-        </span>
-      </div>
       <div :if={@meta_fields != []} class="properties-panel__section">
         <h4 class="properties-panel__subtitle">Metadata</h4>
+        <%!-- Kept adjacent to the series list it filters. It used to sit above
+             the whole Metadata section, far enough from the list that the two
+             did not read as related. It stays outside the meta form so typing
+             here does not fire property:update_meta on every keystroke. --%>
+        <div :if={@available_series != [] or @series_filter != ""} class="properties-panel__field">
+          <label>Series Filter</label>
+          <input
+            type="text"
+            name="series_filter"
+            value={@series_filter}
+            placeholder="Filter series..."
+            autocomplete="off"
+            phx-keyup="series:filter"
+            phx-debounce="200"
+          />
+          <span :if={@series_truncated} class="properties-panel__hint">
+            showing first {@series_limit} series — refine filter
+          </span>
+        </div>
         <form id="element-meta-form" phx-change="property:update_meta" phx-submit="property:update_meta">
           <input type="hidden" name="element_id" value={@selected.id} />
           <div :for={field <- @display_meta_fields} class="properties-panel__field">
@@ -1663,9 +1664,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  # Series leads the list so it sits directly beneath the filter that narrows it.
+  # It was previously placed next to y_min, which put the list far enough below
+  # the filter that the two did not read as related.
   defp display_meta_fields(fields, :graph) do
-    fields
-    |> List.insert_at(Enum.find_index(fields, &(&1 == "y_min")) || length(fields), "graph_series")
+    ["graph_series" | fields]
     |> Enum.uniq()
   end
 
