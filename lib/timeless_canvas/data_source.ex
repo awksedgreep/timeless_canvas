@@ -91,6 +91,20 @@ defmodule TimelessCanvas.DataSource do
   @callback list_series_for_host(state :: term(), host :: String.t(), opts :: query_opts()) ::
               [{String.t(), map()}]
 
+  @doc """
+  Whether the series list for `host` is settled, or still being fetched.
+
+  A backend that answers `list_series_for_host/3` from a cache returns an
+  empty list on a cold miss, which is indistinguishable from a host that
+  genuinely has no series -- the panel shows nothing either way and gives the
+  reader no reason to look again. A backend that can tell the difference says
+  so here, and the caller can say "loading" instead of implying "none".
+
+  Not implementing this means every answer is settled, which is correct for a
+  backend that reads its store synchronously.
+  """
+  @callback series_loaded?(state :: term(), host :: String.t()) :: boolean()
+
   @callback list_hosts(state :: term(), opts :: query_opts()) :: [String.t()]
 
   @callback metric_metadata(state :: term(), metric_name :: String.t()) ::
@@ -113,6 +127,7 @@ defmodule TimelessCanvas.DataSource do
   @optional_callbacks [
     event_density: 4,
     list_series_for_host: 3,
+    series_loaded?: 2,
     list_hosts: 2,
     list_label_values: 3,
     metric_metadata: 2,

@@ -121,6 +121,38 @@ defmodule TimelessCanvas.DataSource.Manager do
     end
   end
 
+  @doc """
+  Topic a backend broadcasts on when a host's series list has been fetched.
+
+  The message is `{:series_loaded, host}`. Without it a cold cache stays
+  visibly empty until something else happens to ask again -- the fetch lands
+  but nothing tells the page, so the reader concludes the host has no series.
+  """
+  def series_topic, do: "timeless_canvas:series"
+
+  @doc """
+  Whether `host`'s series list is settled, per `c:TimelessCanvas.DataSource.series_loaded?/2`.
+
+  Backends that do not implement it are always settled. So is the absence of a
+  source: nothing is being fetched, so nothing is pending.
+  """
+  def series_loaded?(host) do
+    case lookup_source() do
+      {:ok, module, ds_state} ->
+        # Code.ensure_loaded? first: function_exported?/3 answers false for a
+        # module that is merely not loaded yet, which would report a pending
+        # fetch as settled and put us back to a silently empty list.
+        if Code.ensure_loaded?(module) and function_exported?(module, :series_loaded?, 2) do
+          module.series_loaded?(ds_state, host)
+        else
+          true
+        end
+
+      :error ->
+        true
+    end
+  end
+
   def list_series_for_host(host, opts \\ []) do
     case lookup_source() do
       {:ok, module, ds_state} ->

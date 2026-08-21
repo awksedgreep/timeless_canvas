@@ -67,6 +67,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
         Phoenix.PubSub.subscribe(pubsub(), StatusManager.status_topic(canvas_id))
         Phoenix.PubSub.subscribe(pubsub(), StreamManager.stream_topic(canvas_id))
         Phoenix.PubSub.subscribe(pubsub(), CanvasPoller.data_topic(canvas_id))
+        # A cold series cache answers empty and fetches in the background;
+        # this is how the panel finds out the answer changed.
+        Phoenix.PubSub.subscribe(pubsub(), StatusManager.series_topic())
 
         # Editor presence: track this viewer and watch for others' diffs.
         Phoenix.PubSub.subscribe(pubsub(), Presence.topic(canvas_id))
@@ -169,6 +172,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
           available_series: [],
           series_filter: "",
           series_truncated: false,
+          series_loading: false,
+          series_host: nil,
           ta_open: nil,
           ta_filter: "",
           ta_suggestions: [],
@@ -633,6 +638,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         available_series={@available_series}
         series_filter={@series_filter}
         series_truncated={@series_truncated}
+        series_loading={@series_loading}
         ta_open={@ta_open}
         ta_filter={@ta_filter}
         ta_suggestions={@ta_suggestions}
@@ -965,6 +971,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
           </button>
           <div :if={@series_truncated} class="properties-panel__series-hint">
             showing first {@series_limit} series — refine filter
+          </div>
+          <div :if={@series_loading} class="properties-panel__series-hint">
+            Loading series…
+          </div>
+          <div
+            :if={!@series_loading and @available_series == []}
+            class="properties-panel__series-hint"
+          >
+            No metrics reported for this host
           </div>
         </div>
       </div>
@@ -3094,6 +3109,23 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # --- Info handlers ---
 
   @impl true
+  # The background series fetch landed. Only the panel showing that host cares,
+  # and only while it is still showing "loading" -- a settled panel re-fetching
+  # on every refresh would fight the filter the reader just typed.
+  def handle_info({:series_loaded, host}, socket) do
+    if socket.assigns[:series_loading] and socket.assigns[:series_host] == host do
+      case sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas) do
+        %Element{id: id} ->
+          {:noreply, fetch_series_for_selected(socket, id, socket.assigns.series_filter)}
+
+        _ ->
+          {:noreply, socket}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
   def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff"}, socket) do
     {:noreply,
      assign(socket,
@@ -4000,10 +4032,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
             |> Enum.group_by(fn {name, _labels} -> name end, fn {_name, labels} -> labels end)
             |> Enum.sort_by(fn {name, _labels_list} -> name end)
 
+          # Empty is ambiguous: a host with no series and a cache that has not
+          # answered yet look identical. Only the backend can tell them apart.
           assign(socket,
             available_series: grouped,
             series_filter: filter,
-            series_truncated: length(series) >= @series_limit
+            series_truncated: length(series) >= @series_limit,
+            series_loading: grouped == [] and not StatusManager.series_loaded?(host),
+            series_host: host
           )
         else
           reset_available_series(socket)
@@ -4015,7 +4051,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp reset_available_series(socket) do
-    assign(socket, available_series: [], series_filter: "", series_truncated: false)
+    assign(socket,
+      available_series: [],
+      series_filter: "",
+      series_truncated: false,
+      series_loading: false,
+      series_host: nil
+    )
   end
 
   defp maybe_put(map, _key, nil), do: map

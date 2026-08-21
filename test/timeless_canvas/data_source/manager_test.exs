@@ -23,6 +23,12 @@ defmodule TimelessCanvas.DataSource.ManagerTest do
     def status_at(_state, _element, _time), do: :warning
   end
 
+  defmodule PendingSeriesDS do
+    @moduledoc "Backend that can say a cached series list has not arrived yet."
+    def list_series_for_host(_state, _host, _opts), do: []
+    def series_loaded?(_state, host), do: host != "cold"
+  end
+
   defmodule NoOptionalDS do
     @moduledoc "Backend exporting none of the optional callbacks."
   end
@@ -341,6 +347,42 @@ defmodule TimelessCanvas.DataSource.ManagerTest do
       # Backend without the callback falls back to :no_data.
       put_source(PerElementDS)
       assert Manager.text_metric_at(1, "t1", "cpu", now) == :no_data
+    end
+  end
+
+  describe "series_loaded?/1" do
+    # An empty series list means two different things: this host has none, or
+    # the cache has not answered yet. They render identically, so the reader
+    # concludes "none" and never looks again. Only the backend can tell them
+    # apart, and this is where it says so.
+
+    test "a backend that tracks pending fetches is believed" do
+      put_source(PendingSeriesDS)
+
+      refute Manager.series_loaded?("cold")
+      assert Manager.series_loaded?("warm")
+    end
+
+    test "a backend without the callback is always settled" do
+      # Correct for a backend that reads its store synchronously: by the time
+      # it answers, the answer is final.
+      put_source(NoOptionalDS)
+
+      assert Manager.series_loaded?("anything")
+    end
+
+    test "no configured source is settled, not pending" do
+      :ets.delete(@table, :source)
+
+      # Nothing is fetching, so nothing is on its way; reporting "loading"
+      # here would spin forever.
+      assert Manager.series_loaded?("anything")
+    end
+
+    test "the series topic is stable" do
+      # Backends broadcast on it from another application; renaming it
+      # silently stops the panel from ever hearing that a fetch landed.
+      assert Manager.series_topic() == "timeless_canvas:series"
     end
   end
 end
