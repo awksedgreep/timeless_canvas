@@ -174,6 +174,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
           series_truncated: false,
           series_loading: false,
           series_host: nil,
+          alert_rules: [],
+          alert_form: nil,
+          alert_error: nil,
           ta_open: nil,
           ta_filter: "",
           ta_suggestions: [],
@@ -639,6 +642,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
         series_filter={@series_filter}
         series_truncated={@series_truncated}
         series_loading={@series_loading}
+        alert_rules={@alert_rules}
+        alert_form={@alert_form}
+        alert_error={@alert_error}
+        alert_enabled={TimelessCanvas.AlertSource.configured?()}
+        alert_formats={delivery_formats()}
+        can_edit={@can_edit}
         ta_open={@ta_open}
         ta_filter={@ta_filter}
         ta_suggestions={@ta_suggestions}
@@ -925,6 +934,93 @@ defmodule TimelessCanvas.Web.CanvasLive do
             />
           </div>
         </form>
+        <div
+          :if={@alert_enabled and @selected.type in [:graph, :text_series] and (@selected.meta["metric_name"] || "") != ""}
+          class="properties-panel__field"
+        >
+          <label>Alerts</label>
+
+          <div :if={@alert_error} class="properties-panel__hint">{@alert_error}</div>
+
+          <div :if={@alert_rules == [] and !@alert_form} class="properties-panel__hint">
+            No alerts on this metric
+          </div>
+
+          <div :for={rule <- @alert_rules} class="properties-panel__alert-row">
+            <label class="properties-panel__alert-toggle">
+              <input
+                type="checkbox"
+                checked={rule.enabled}
+                disabled={!@can_edit}
+                phx-click="alert:toggle"
+                phx-value-id={rule.id}
+              />
+              <span>{rule.name}</span>
+            </label>
+            <span class="properties-panel__alert-summary">
+              {rule.aggregate} {rule.condition} {rule.threshold}{if rule.duration > 0,
+                do: " for #{rule.duration}s"}
+            </span>
+            <button
+              :if={@can_edit}
+              type="button"
+              class="properties-panel__alert-delete"
+              phx-click="alert:delete"
+              phx-value-id={rule.id}
+            >
+              Remove
+            </button>
+          </div>
+
+          <button
+            :if={@can_edit and !@alert_form}
+            type="button"
+            class="properties-panel__series-btn"
+            phx-click="alert:new"
+          >
+            Add alert
+          </button>
+
+          <form id="alert-form" :if={@alert_form} phx-submit="alert:save" phx-change="alert:change">
+            <input type="text" name="name" value={@alert_form["name"]} placeholder="Name" />
+            <select name="aggregate">
+              <option :for={agg <- ~w(avg max min last)} value={agg} selected={agg == @alert_form["aggregate"]}>
+                {agg}
+              </option>
+            </select>
+            <select name="condition">
+              <option value="above" selected={@alert_form["condition"] == "above"}>above</option>
+              <option value="below" selected={@alert_form["condition"] == "below"}>below</option>
+            </select>
+            <input
+              type="text"
+              name="threshold"
+              value={@alert_form["threshold"]}
+              placeholder="Threshold"
+            />
+            <input
+              type="text"
+              name="duration"
+              value={@alert_form["duration"]}
+              placeholder="Seconds breaching before firing"
+            />
+            <input
+              type="text"
+              name="webhook_url"
+              value={@alert_form["webhook_url"]}
+              placeholder="Notification URL"
+            />
+            <select :if={@alert_formats != []} name="webhook_format">
+              <option :for={{value, label} <- @alert_formats} value={value} selected={value == @alert_form["webhook_format"]}>
+                {label}
+              </option>
+            </select>
+            <button type="submit" class="properties-panel__series-btn">Save alert</button>
+            <button type="button" class="properties-panel__series-btn" phx-click="alert:cancel">
+              Cancel
+            </button>
+          </form>
+        </div>
         <div :if={@selected.type == :graph} class="properties-panel__field">
           <label>Matching Series</label>
           <div class="properties-panel__series-list">
@@ -1997,6 +2093,77 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  # --- Alert events ---
+
+  def handle_event("alert:new", _params, socket) do
+    case sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas) do
+      %Element{} = element ->
+        {:noreply, assign(socket, alert_form: default_alert_form(element), alert_error: nil)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("alert:cancel", _params, socket) do
+    {:noreply, assign(socket, alert_form: nil, alert_error: nil)}
+  end
+
+  def handle_event("alert:change", params, socket) do
+    {:noreply, assign(socket, alert_form: Map.take(params, alert_form_fields()))}
+  end
+
+  def handle_event("alert:save", params, socket) do
+    require_edit(socket, fn ->
+      element = sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas)
+      attrs = Map.take(params, alert_form_fields())
+
+      with %Element{} <- element,
+           {:ok, attrs} <- validate_alert(attrs),
+           {:ok, _id} <- TimelessCanvas.AlertSource.backend().create_rule(element, attrs) do
+        {:noreply, fetch_alert_rules(socket, element.id)}
+      else
+        {:error, message} when is_binary(message) ->
+          {:noreply, assign(socket, alert_error: message)}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, alert_error: "Could not save alert: #{inspect(reason)}")}
+
+        _ ->
+          {:noreply, socket}
+      end
+    end)
+  end
+
+  def handle_event("alert:delete", %{"id" => id}, socket) do
+    require_edit(socket, fn ->
+      element = sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas)
+
+      case TimelessCanvas.AlertSource.backend().delete_rule(alert_id(id)) do
+        :ok ->
+          {:noreply, fetch_alert_rules(socket, element.id)}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, alert_error: "Could not delete alert: #{inspect(reason)}")}
+      end
+    end)
+  end
+
+  def handle_event("alert:toggle", %{"id" => id} = params, socket) do
+    require_edit(socket, fn ->
+      element = sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas)
+      enabled = params["value"] == "on"
+
+      case TimelessCanvas.AlertSource.backend().update_rule(alert_id(id), %{"enabled" => enabled}) do
+        :ok ->
+          {:noreply, fetch_alert_rules(socket, element.id)}
+
+        {:error, reason} ->
+          {:noreply, assign(socket, alert_error: "Could not update alert: #{inspect(reason)}")}
+      end
+    end)
+  end
+
   def handle_event("element:select", %{"id" => id}, socket) do
     case socket.assigns.mode do
       :connect ->
@@ -2020,7 +2187,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
         {:noreply,
          socket
          |> assign(selected_ids: MapSet.new([id]))
-         |> fetch_series_for_selected(id)}
+         |> fetch_series_for_selected(id)
+         |> fetch_alert_rules(id)}
     end
   end
 
@@ -4019,6 +4187,126 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # Bounded + grouped at the assign boundary: at most @series_limit series
   # are fetched (optionally metric-name-filtered server-side) and grouped
   # into [{metric_name, [labels, ...]}] sorted by metric name.
+  defp alert_form_fields,
+    do: ~w(name condition threshold duration aggregate webhook_url webhook_format)
+
+  # Ids arrive from the DOM as strings; backends key rules by integer.
+  defp alert_id(id) when is_binary(id) do
+    case Integer.parse(id) do
+      {int, ""} -> int
+      _ -> id
+    end
+  end
+
+  # Refused rather than coerced. A blank threshold saved as 0 would fire
+  # constantly on any "above" rule, and the operator would have no idea why.
+  defp validate_alert(attrs) do
+    with {:ok, threshold} <- parse_number(attrs["threshold"], "Threshold"),
+         {:ok, duration} <- parse_non_negative_integer(attrs["duration"] || "0", "Duration") do
+      name = String.trim(attrs["name"] || "")
+
+      if name == "" do
+        {:error, "Name is required"}
+      else
+        {:ok,
+         attrs
+         |> Map.put("name", name)
+         |> Map.put("threshold", threshold)
+         |> Map.put("duration", duration)}
+      end
+    end
+  end
+
+  defp parse_number(value, field) do
+    case Float.parse(String.trim(value || "")) do
+      {number, ""} -> {:ok, number}
+      _ -> {:error, "#{field} must be a number"}
+    end
+  end
+
+  defp parse_non_negative_integer(value, field) do
+    case Integer.parse(String.trim(value || "")) do
+      {int, ""} when int >= 0 -> {:ok, int}
+      _ -> {:error, "#{field} must be zero or more seconds"}
+    end
+  end
+
+  # --- Alerting ---
+
+  # Rules are listed per element rather than globally: the panel is answering
+  # "what am I told about *this*", and a rule for another element is noise.
+  defp fetch_alert_rules(socket, element_id) do
+    backend = TimelessCanvas.AlertSource.backend()
+    element = Map.get(socket.assigns.resolved_elements, element_id)
+
+    cond do
+      is_nil(backend) or is_nil(element) ->
+        assign(socket, alert_rules: [], alert_form: nil, alert_error: nil)
+
+      not alertable?(element) ->
+        assign(socket, alert_rules: [], alert_form: nil, alert_error: nil)
+
+      true ->
+        case backend.list_rules(element) do
+          {:ok, rules} ->
+            assign(socket, alert_rules: rules, alert_form: nil, alert_error: nil)
+
+          {:error, reason} ->
+            # Say so rather than showing an empty list, which would read as
+            # "no alerts on this" — the most misleading possible answer.
+            assign(socket,
+              alert_rules: [],
+              alert_form: nil,
+              alert_error: "Could not load alerts: #{inspect(reason)}"
+            )
+        end
+    end
+  end
+
+  # Only elements that select a metric can carry a threshold.
+  defp alertable?(%Element{type: type, meta: meta}) when type in [:graph, :text_series],
+    do: is_binary(meta["metric_name"]) and meta["metric_name"] != ""
+
+  defp alertable?(_element), do: false
+
+  defp default_alert_form(element) do
+    %{
+      "name" => alert_default_name(element),
+      "condition" => "above",
+      "threshold" => "",
+      "duration" => "0",
+      "aggregate" => "avg",
+      "webhook_url" => "",
+      "webhook_format" => default_delivery_format()
+    }
+  end
+
+  defp alert_default_name(%Element{label: label, meta: meta}) do
+    cond do
+      is_binary(label) and label != "" -> label
+      is_binary(meta["metric_name"]) -> meta["metric_name"]
+      true -> "alert"
+    end
+  end
+
+  defp delivery_formats do
+    backend = TimelessCanvas.AlertSource.backend()
+
+    if backend != nil and Code.ensure_loaded?(backend) and
+         function_exported?(backend, :delivery_formats, 0) do
+      backend.delivery_formats()
+    else
+      []
+    end
+  end
+
+  defp default_delivery_format do
+    case delivery_formats() do
+      [{value, _label} | _] -> value
+      [] -> ""
+    end
+  end
+
   defp fetch_series_for_selected(socket, element_id, filter \\ "") do
     case Map.get(socket.assigns.resolved_elements, element_id) do
       %Element{meta: meta} when is_map(meta) ->
