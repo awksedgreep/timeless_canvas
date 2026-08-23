@@ -139,10 +139,9 @@ defmodule TimelessCanvas.DataSource.Manager do
   def series_loaded?(host) do
     case lookup_source() do
       {:ok, module, ds_state} ->
-        # Code.ensure_loaded? first: function_exported?/3 answers false for a
-        # module that is merely not loaded yet, which would report a pending
-        # fetch as settled and put us back to a silently empty list.
-        if Code.ensure_loaded?(module) and function_exported?(module, :series_loaded?, 2) do
+        # lookup_source/0 guarantees the module is loaded, so a false here
+        # really means the callback is absent.
+        if function_exported?(module, :series_loaded?, 2) do
           module.series_loaded?(ds_state, host)
         else
           true
@@ -247,6 +246,12 @@ defmodule TimelessCanvas.DataSource.Manager do
   defp lookup_source do
     with tid when tid != :undefined <- :ets.whereis(@table),
          [{:source, module, ds_state}] <- :ets.lookup(tid, :source) do
+      # Queries run in the caller process, and every arity/capability probe
+      # downstream uses function_exported?/3, which answers false for a
+      # module that has not been loaded. init/1 normally loads the backend
+      # before publishing it here, but guard centrally so no caller can see
+      # a loadable backend as capability-less.
+      unless :erlang.module_loaded(module), do: Code.ensure_loaded(module)
       {:ok, module, ds_state}
     else
       _ -> :error

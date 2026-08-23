@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.5.4 (2026-08-22)
+
+### Added
+- Alert thresholds are set where the metric was selected: the properties
+  panel carries an Alerts section for elements that select a metric —
+  existing rules with an enable toggle and a summary of what they watch,
+  plus a form for condition, threshold, duration, aggregate, and delivery.
+  Alert callbacks take the Element (mirroring `DataSource.metric_range/5`),
+  so the backend derives the labels a graph actually queries and a rule
+  cannot silently watch a different series than the graph draws. A blank
+  threshold is refused rather than coerced to zero, a backend error is
+  reported instead of rendering an empty list, and with no alert-capable
+  backend configured the section does not render at all.
+
+## v0.5.3 (2026-08-21)
+
+### Fixed
+- A series list that is still loading says so instead of showing an empty
+  list. The backend answers from a cache and returns empty on a cold miss
+  while fetching in the background, so the panel said "none" when it meant
+  "not yet". Backends that can tell a pending fetch from a settled empty
+  answer now report loading, and the panel refreshes when the fetch lands.
+
 ## v0.5.2 (2026-08-20)
 
 ### Fixed

@@ -16,24 +16,40 @@
 
 > "I found it ironic that the first thing you do to time series data is squash the timestamp. That's how the name Timeless was born." --Mark Cotner
 
-Dashboard canvas builder for Elixir.
+Dashboard canvas builder for Elixir: a LiveView SVG canvas with pan/zoom,
+drag, marquee selection, per-user cut/paste that survives navigating between
+canvases, live-updating graph elements, a timeline scrubber, and an alerts
+section for metric-selecting elements when an alert-capable backend is
+configured. Data access goes through a `TimelessCanvas.DataSource` behaviour
+with a bounded discovery contract (`:filter`/`:limit`), so the host
+application decides where metrics come from.
 
 ## Installation
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `timeless_canvas` to your list of dependencies in `mix.exs`:
+The package is not on Hex; add it from GitHub. While development is fast the
+Timeless repos track `main` rather than pinning dot-release tags:
 
 ```elixir
 def deps do
   [
-    {:timeless_canvas, "~> 0.1.0"}
+    {:timeless_canvas, github: "awksedgreep/timeless_canvas", branch: "main"}
   ]
 end
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/timeless_canvas>.
+Mount the canvas in your router:
+
+```elixir
+# lib/my_app_web/router.ex
+import TimelessCanvas.Router
+
+scope "/" do
+  pipe_through [:browser, :require_authenticated_user]
+  live_canvas("/canvas", on_mount: [{MyAppWeb.UserAuth, :require_authenticated}])
+end
+```
+
+See `CHANGELOG.md` for what each release line carries.
 
 ## JavaScript setup
 
