@@ -608,7 +608,7 @@ const flows = {
     }
 
     const { PNG } = require("pngjs");
-    const pixelmatch = require("pixelmatch");
+    const { default: pixelmatch } = await import("pixelmatch");
     const golden = PNG.sync.read(fs.readFileSync(goldenPath));
     const current = PNG.sync.read(shot);
     h.assert(

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.5.5 (2026-09-11)
+
+### Changed
+- Refreshed the Elixir and browser-test dependency sets, including Phoenix
+  1.8.13, LiveView 1.2.11, and Playwright 1.63.0.
+
 ### Fixed
 - Hardened canvas decoding, client event parsing, authorization, Ecto
   persistence, stream registration, and data-source polling against malformed

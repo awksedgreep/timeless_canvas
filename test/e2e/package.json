@@ -4,8 +4,8 @@
   "description": "Node/playwright sidecar for the TimelessCanvas browser E2E suite (driven by mix test.e2e)",
   "type": "commonjs",
   "dependencies": {
-    "playwright": "1.62.1",
-    "pixelmatch": "5.3.0",
+    "pixelmatch": "7.2.0",
+    "playwright": "1.63.0",
     "pngjs": "7.0.0"
   }
 }
