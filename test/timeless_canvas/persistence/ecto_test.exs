@@ -61,6 +61,17 @@ defmodule TimelessCanvas.Persistence.EctoTest do
              Persistence.list_access(canvas.id)
   end
 
+  test "accessible canvases are returned in bounded pages without loading data blobs", %{
+    user: user
+  } do
+    for name <- ["c", "a", "b"] do
+      assert {:ok, _} = Persistence.save_canvas(user.id, name, %{"large" => "not selected"})
+    end
+
+    assert [%{name: "b", data: nil}, %{name: "c", data: nil}] =
+             Persistence.list_accessible_canvases(user, limit: 2, offset: 1)
+  end
+
   test "breadcrumb cycles terminate and delete explicitly cleans dependents", %{user: user} do
     {:ok, parent} = Persistence.create_canvas(user.id, "parent")
     {:ok, child} = Persistence.create_child_canvas(parent.id, "child")

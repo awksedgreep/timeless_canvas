@@ -106,13 +106,23 @@ defmodule TimelessCanvas.Persistence.Ecto do
 
   @impl true
   def list_accessible_canvases(user) do
+    list_accessible_canvases(user, [])
+  end
+
+  @doc "A bounded page of accessible canvases ordered by name and id."
+  def list_accessible_canvases(user, opts) when is_list(opts) do
+    limit = page_integer(opts[:limit], 500, 1, 500)
+    offset = page_integer(opts[:offset], 0, 0, 1_000_000_000)
+
     from(c in CanvasRecord,
       left_join: a in CanvasAccess,
       on: a.canvas_id == c.id and a.user_id == ^user.id,
       where: c.user_id == ^user.id or not is_nil(a.id),
       distinct: true,
       order_by: [asc: c.name, asc: c.id],
-      limit: 500
+      select: struct(c, [:id, :name, :user_id, :parent_id, :inserted_at, :updated_at]),
+      limit: ^limit,
+      offset: ^offset
     )
     |> repo().all()
   end
@@ -192,4 +202,9 @@ defmodule TimelessCanvas.Persistence.Ecto do
 
   defp unwrap_transaction({:ok, value}), do: {:ok, value}
   defp unwrap_transaction({:error, reason}), do: {:error, reason}
+
+  defp page_integer(value, default, minimum, maximum) do
+    value = if is_integer(value), do: value, else: default
+    value |> max(minimum) |> min(maximum)
+  end
 end
