@@ -58,10 +58,7 @@ const TimelineSlider = {
         return;
       }
 
-      this.min = data.min;
-      this.max = data.max;
-      this.value = data.value;
-      this.windowRatio = data.windowRatio;
+      this.setSliderData(data);
       this.isLive = data.live;
       this.render();
     });
@@ -95,11 +92,33 @@ const TimelineSlider = {
   },
 
   readAttrs() {
-    this.min = parseFloat(this.el.dataset.min);
-    this.max = parseFloat(this.el.dataset.max);
-    this.value = parseFloat(this.el.dataset.value);
-    this.windowRatio = parseFloat(this.el.dataset.windowRatio);
+    const min = this.finiteNumber(this.el.dataset.min, 0);
+    const max = this.finiteNumber(this.el.dataset.max, min + 1);
+    this.min = min;
+    this.max = max > min ? max : min + 1;
+    this.value = this.finiteNumber(this.el.dataset.value, min);
+    this.windowRatio = Math.max(
+      0,
+      Math.min(1, this.finiteNumber(this.el.dataset.windowRatio, 0)),
+    );
     this.isLive = this.el.dataset.live === "true";
+  },
+
+  setSliderData(data) {
+    const min = this.finiteNumber(data?.min, 0);
+    const max = this.finiteNumber(data?.max, min + 1);
+    this.min = min;
+    this.max = max > min ? max : min + 1;
+    this.value = this.finiteNumber(data?.value, min);
+    this.windowRatio = Math.max(
+      0,
+      Math.min(1, this.finiteNumber(data?.windowRatio, 0)),
+    );
+  },
+
+  finiteNumber(value, fallback) {
+    const parsed = typeof value === "number" ? value : parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
   },
 
   render() {
@@ -107,7 +126,7 @@ const TimelineSlider = {
     const max = this.dragging ? this.dragMax : this.max;
     const windowRatio = this.dragging ? this.dragWindowRatio : this.windowRatio;
     const range = max - min;
-    if (range <= 0) return;
+    if (!Number.isFinite(range) || range <= 0 || !Number.isFinite(this.value)) return;
 
     const winPct = Math.min(windowRatio * 100, 100);
     const halfWin = winPct / 2;
@@ -188,7 +207,7 @@ const TimelineSlider = {
     const maxTicks = 60;
     let count = 0;
 
-    let html = "";
+    const fragment = document.createDocumentFragment();
     for (let t = firstTick; t <= max && count < maxTicks; t += alignedInterval) {
       const pct = ((t - min) / range) * 100;
       if (pct < 0 || pct > 100) continue;
@@ -207,9 +226,15 @@ const TimelineSlider = {
         const d = date.getDate().toString().padStart(2, "0");
         label = `${mo}-${d}`;
       }
-      html += `<div class="timeline-bar__tick" style="left:${pct}%"><span>${label}</span></div>`;
+      const tick = document.createElement("div");
+      tick.className = "timeline-bar__tick";
+      tick.style.left = `${pct}%`;
+      const text = document.createElement("span");
+      text.textContent = label;
+      tick.appendChild(text);
+      fragment.appendChild(tick);
     }
-    this.ticksEl.innerHTML = html;
+    this.ticksEl.replaceChildren(fragment);
   },
 
   roundInterval(ms) {
@@ -337,7 +362,7 @@ const TimelineSlider = {
     this.render();
     // Snap to live if within 2% of right edge
     const range = this.max - this.min;
-    if ((centerMs - this.max) / range > -0.02) {
+    if (range > 0 && (centerMs - this.max) / range > -0.02) {
       this.pushEvent("timeline:go_live", {});
     } else {
       this.pushEvent("timeline:change", { time: centerMs });
@@ -358,6 +383,7 @@ const TimelineSlider = {
 
   clientXToValue(clientX) {
     const rect = this._dragRect || this.track.getBoundingClientRect();
+    if (!(rect.width > 0)) return this.value;
     const adjustedX = clientX - this.dragOffsetPx;
     const pct = Math.max(0, Math.min(1, (adjustedX - rect.left) / rect.width));
     const min = this.dragging ? this.dragMin : this.min;
@@ -396,10 +422,7 @@ const TimelineSlider = {
   applyPendingSliderData() {
     if (!this.pendingSliderData) return;
 
-    this.min = this.pendingSliderData.min;
-    this.max = this.pendingSliderData.max;
-    this.value = this.pendingSliderData.value;
-    this.windowRatio = this.pendingSliderData.windowRatio;
+    this.setSliderData(this.pendingSliderData);
     this.isLive = this.pendingSliderData.live;
     this.pendingSliderData = null;
   },
@@ -410,6 +433,7 @@ const TimelineSlider = {
 
   onKeyDown(e) {
     const range = this.max - this.min;
+    if (!Number.isFinite(range) || range <= 0) return;
     let delta = 0;
 
     switch (e.key) {

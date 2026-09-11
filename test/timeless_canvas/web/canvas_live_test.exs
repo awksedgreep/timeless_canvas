@@ -579,18 +579,20 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       html = render_hook(view, "element:dblclick", %{"id" => "el-1"})
       assert html =~ ~s(id="graph-dyn-el-1-expanded")
 
-      assert_push_event(view, "graph:expanded", %{
-        id: "el-1",
-        kind: "expanded",
-        value: "333",
-        points: points,
-        area: area,
-        raw: raw
-      })
+      {_ref, {:push_event, "graph:expanded", expanded}} =
+        assert_push_event(view, "graph:expanded", %{
+          id: "el-1",
+          kind: "expanded",
+          value: "333",
+          points: points,
+          area: area
+        })
 
       assert points =~ ","
       assert area =~ ","
-      assert [[_, 333.0], [_, 333.0]] = raw
+      # The compact push already populated the hook's raw tooltip cache;
+      # expansion sends geometry only when the underlying values are unchanged.
+      refute Map.has_key?(expanded, :raw)
 
       html = render_hook(view, "element:dblclick", %{"id" => "el-1"})
       refute html =~ "graph-dyn-el-1-expanded"
@@ -840,7 +842,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       user: user
     } do
       with_fake_stream_backends()
-      {record, _el} = seed_registered_stream_canvas(user)
+      {record, el} = seed_registered_stream_canvas(user)
 
       {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
       render_async(view)
@@ -848,6 +850,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
 
       vb_before = :sys.get_state(view.pid).socket.assigns.canvas.view_box
       fingerprint_before = :sys.get_state(view.pid).socket.assigns.registration_fingerprint
+      task_before = get_in(:sys.get_state(StreamManager), [:subscriptions, el.id, :task_pid])
 
       render_hook(view, "canvas:pan", %{"dx" => 25, "dy" => -10})
 
@@ -857,7 +860,9 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       assert assigns.registration_fingerprint == fingerprint_before
 
       # No backend re-subscription and no graph payload push from the pan.
-      Process.sleep(50)
+      assert get_in(:sys.get_state(StreamManager), [:subscriptions, el.id, :task_pid]) ==
+               task_before
+
       assert FakeStreamBackend.subscribe_count() == 1
       refute_push_event(view, "graph:data", %{}, 0)
     end
@@ -872,11 +877,15 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
       render_async(view)
       assert eventually(fn -> FakeStreamBackend.subscribe_count() == 1 end)
+      task_before = get_in(:sys.get_state(StreamManager), [:subscriptions, el.id, :task_pid])
 
       # A move goes through push_canvas but leaves the registration
       # fingerprint ({type, meta} per element) unchanged.
       render_hook(view, "element:move", %{"id" => el.id, "dx" => 30, "dy" => 0})
-      Process.sleep(50)
+
+      assert get_in(:sys.get_state(StreamManager), [:subscriptions, el.id, :task_pid]) ==
+               task_before
+
       assert FakeStreamBackend.subscribe_count() == 1
 
       # A meta change that alters the backend opts must re-subscribe.
@@ -1164,6 +1173,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
 
       render_hook(view, "canvas:save", %{})
+      render_async(view)
 
       {:ok, saved} = FakePersistence.get_canvas(record.id)
       assert %{"version" => 2, "elements" => elements} = saved.data
@@ -1278,13 +1288,32 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
 
       FakePersistence.fail_update_canvas_data({:error, :db_down})
-      html = render_hook(view, "canvas:save", %{})
+      render_hook(view, "canvas:save", %{})
+      html = render_async(view)
       assert html =~ "Save failed — retrying"
 
       FakePersistence.fail_update_canvas_data(nil)
-      html = render_hook(view, "canvas:save", %{})
+      render_hook(view, "canvas:save", %{})
+      html = render_async(view)
       assert html =~ "Saved"
       refute html =~ "Save failed"
+    end
+
+    test "a slow persistence adapter does not block LiveView events", %{conn: conn, user: user} do
+      with_fast_autosave(60_000, 60_000)
+      {data, _el} = canvas_with_element(%{label: "slow-save"})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      FakePersistence.delay_update_canvas_data(300)
+
+      started_at = System.monotonic_time(:millisecond)
+      html = render_hook(view, "canvas:save", %{})
+      elapsed = System.monotonic_time(:millisecond) - started_at
+
+      assert elapsed < 150
+      assert html =~ "Saving"
+      assert render_async(view, 1_000) =~ "Saved"
     end
   end
 
@@ -1385,8 +1414,10 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       refute html =~ "Rect 1"
       refute has_element?(view, "[data-element-id]")
 
-      # No autosave ever fires: the stored blob stays untouched.
-      Process.sleep(80)
+      # No autosave is armed: the stored blob stays untouched.
+      assigns = :sys.get_state(view.pid).socket.assigns
+      assert assigns.autosave_ref == nil
+      assert assigns.save_task_ref == nil
       {:ok, saved} = FakePersistence.get_canvas(record.id)
       assert saved.data == @corrupt_data
     end
@@ -1487,7 +1518,14 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
 
       # First viewer dies: the second keeps the registration alive.
       Process.exit(view_a.pid, :kill)
-      Process.sleep(100)
+
+      assert eventually(fn ->
+               registrants = :sys.get_state(Manager).registrants[record.id]
+
+               is_map(registrants) and map_size(registrants) == 1 and
+                 Map.has_key?(registrants, view_b.pid)
+             end)
+
       assert manager_registered?(record.id, el.id)
 
       # Last viewer dies: the canvas's registrations are dropped.
@@ -1849,6 +1887,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       # Manual save fails: exactly one failure counted, the pending edit
       # timer is cancelled, and one retry timer is armed in its place.
       render_hook(view, "canvas:save", %{})
+      render_async(view)
       assigns = :sys.get_state(view.pid).socket.assigns
       assert assigns.autosave_failures == 1
       assert {ref2, t2} = assigns.autosave_ref
@@ -1874,7 +1913,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
 
       # Delivering the live ref performs exactly one attempt.
       send(view.pid, {:autosave, ref3})
-      render(view)
+      render_async(view)
       assert :sys.get_state(view.pid).socket.assigns.autosave_failures == 1
     end
   end
@@ -1901,13 +1940,16 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       conn: conn,
       user: user
     } do
-      with_profiling(true, 30)
+      with_profiling(true, 60_000)
       record = FakePersistence.seed_canvas(%{user_id: user.id})
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
           {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
-          Process.sleep(120)
+          ref = :sys.get_state(view.pid).socket.assigns.debug_report_ref
+          assert is_reference(ref)
+          Process.cancel_timer(ref)
+          send(view.pid, :debug_report)
           render(view)
         end)
 
@@ -1918,13 +1960,13 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       conn: conn,
       user: user
     } do
-      with_profiling(false, 30)
+      with_profiling(false, 60_000)
       record = FakePersistence.seed_canvas(%{user_id: user.id})
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
           {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
-          Process.sleep(120)
+          assert :sys.get_state(view.pid).socket.assigns.debug_report_ref == nil
           render(view)
         end)
 

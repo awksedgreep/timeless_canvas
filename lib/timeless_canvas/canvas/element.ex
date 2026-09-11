@@ -52,6 +52,8 @@ defmodule TimelessCanvas.Canvas.Element do
   }
 
   @pin_dimensions ~w(host ifname)a
+  @fields ~w(id type x y width height label color meta pins status z_index)a
+  @field_names Map.new(@fields, &{Atom.to_string(&1), &1})
 
   @doc """
   Pin dimensions for host and interface pinning.
@@ -67,11 +69,11 @@ defmodule TimelessCanvas.Canvas.Element do
       is_nil(val) or val == "" ->
         %{"mode" => "none", "value" => ""}
 
-      String.starts_with?(val, "$") ->
+      is_binary(val) and String.starts_with?(val, "$") ->
         %{"mode" => "variable", "value" => val}
 
       true ->
-        %{"mode" => "literal", "value" => val}
+        %{"mode" => "literal", "value" => to_string(val)}
     end
   end
 
@@ -80,11 +82,45 @@ defmodule TimelessCanvas.Canvas.Element do
   Attrs with explicit values override type defaults.
   """
   def new(attrs \\ %{}) do
-    type = Map.get(attrs, :type, :rect)
+    attrs = normalize_attrs(attrs)
+    type = normalize_type(Map.get(attrs, :type, :rect))
     defaults = defaults_for(type)
-    merged = Map.merge(defaults, attrs)
-    struct!(__MODULE__, merged)
+
+    merged =
+      defaults
+      |> Map.merge(attrs)
+      |> Map.put(:type, type)
+      |> Map.update(:meta, %{}, &if(is_map(&1), do: &1, else: %{}))
+      |> Map.update(:pins, %{}, &if(is_map(&1), do: &1, else: %{}))
+      |> normalize_geometry(defaults)
+
+    struct(__MODULE__, merged)
   end
+
+  @doc false
+  def normalize_attrs(attrs) when is_list(attrs), do: attrs |> Map.new() |> normalize_attrs()
+
+  def normalize_attrs(attrs) when is_map(attrs) do
+    Map.new(attrs, fn
+      {key, value} when is_atom(key) -> {key, value}
+      {key, value} when is_binary(key) -> {Map.get(@field_names, key, key), value}
+      pair -> pair
+    end)
+    |> Map.take(@fields)
+  end
+
+  def normalize_attrs(_attrs), do: %{}
+
+  @doc false
+  def normalize_type(type) when is_atom(type) do
+    if type in element_types(), do: type, else: :rect
+  end
+
+  def normalize_type(type) when is_binary(type) do
+    Enum.find(element_types(), :rect, &(Atom.to_string(&1) == type))
+  end
+
+  def normalize_type(_type), do: :rect
 
   @doc """
   Returns list of all available element type atoms.
@@ -96,8 +132,10 @@ defmodule TimelessCanvas.Canvas.Element do
   Falls back to :rect defaults for unknown types.
   """
   def defaults_for(type) do
-    Map.get(@element_types, type, @element_types[:rect])
-    |> Map.put(:type, type)
+    normalized = normalize_type(type)
+
+    Map.fetch!(@element_types, normalized)
+    |> Map.put(:type, normalized)
   end
 
   @meta_fields %{
@@ -130,35 +168,85 @@ defmodule TimelessCanvas.Canvas.Element do
   Move element by (dx, dy).
   """
   def move(%__MODULE__{} = el, dx, dy) do
-    %{el | x: el.x + dx, y: el.y + dy}
+    with {:ok, x} <- number(el.x),
+         {:ok, y} <- number(el.y),
+         {:ok, dx} <- number(dx),
+         {:ok, dy} <- number(dy) do
+      %{el | x: x + dx, y: y + dy}
+    else
+      _ -> el
+    end
   end
 
   @doc """
   Resize element to new width and height. Enforces minimum 20x20.
   """
   def resize(%__MODULE__{} = el, width, height) do
-    %{el | width: max(width, 20.0), height: max(height, 20.0)}
+    with {:ok, width} <- number(width), {:ok, height} <- number(height) do
+      %{el | width: max(width, 20.0), height: max(height, 20.0)}
+    else
+      _ -> el
+    end
   end
 
   @doc """
   Snap element position to the nearest grid point.
   """
   def snap_to_grid(%__MODULE__{} = el, grid_size) when grid_size > 0 do
-    %{
-      el
-      | x: Float.round(el.x / grid_size) * grid_size,
-        y: Float.round(el.y / grid_size) * grid_size
-    }
+    with {:ok, x} <- number(el.x),
+         {:ok, y} <- number(el.y),
+         {:ok, grid_size} <- number(grid_size) do
+      %{el | x: Float.round(x / grid_size) * grid_size, y: Float.round(y / grid_size) * grid_size}
+    else
+      _ -> el
+    end
   end
+
+  def snap_to_grid(%__MODULE__{} = el, _grid_size), do: el
 
   @doc """
   Snap element dimensions to the nearest grid multiple. Enforces minimum one grid unit.
   """
   def snap_size_to_grid(%__MODULE__{} = el, grid_size) when grid_size > 0 do
-    %{
-      el
-      | width: max(Float.round(el.width / grid_size) * grid_size, grid_size),
-        height: max(Float.round(el.height / grid_size) * grid_size, grid_size)
-    }
+    with {:ok, width} <- number(el.width),
+         {:ok, height} <- number(el.height),
+         {:ok, grid_size} <- number(grid_size) do
+      %{
+        el
+        | width: max(Float.round(width / grid_size) * grid_size, grid_size),
+          height: max(Float.round(height / grid_size) * grid_size, grid_size)
+      }
+    else
+      _ -> el
+    end
+  end
+
+  def snap_size_to_grid(%__MODULE__{} = el, _grid_size), do: el
+
+  defp normalize_geometry(attrs, defaults) do
+    attrs
+    |> Map.put(:x, number_or(Map.get(attrs, :x), 0.0))
+    |> Map.put(:y, number_or(Map.get(attrs, :y), 0.0))
+    |> Map.put(:width, number_or(Map.get(attrs, :width), defaults.width))
+    |> Map.put(:height, number_or(Map.get(attrs, :height), defaults.height))
+  end
+
+  defp number(value) when is_integer(value), do: {:ok, value / 1}
+  defp number(value) when is_float(value), do: {:ok, value}
+
+  defp number(value) when is_binary(value) do
+    case Float.parse(value) do
+      {number, ""} -> {:ok, number}
+      _ -> :error
+    end
+  end
+
+  defp number(_value), do: :error
+
+  defp number_or(value, default) do
+    case number(value) do
+      {:ok, number} -> number
+      :error -> default
+    end
   end
 end

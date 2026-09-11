@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Hardened canvas decoding, client event parsing, authorization, Ecto
+  persistence, stream registration, and data-source polling against malformed
+  input and backend failures.
+- Moved polling, initial data loads, variable refreshes, status fan-out, stream
+  rendering, and autosave work off the LiveView event loop where applicable.
+- Bounded icon caching and client/server collections, pruned stale registrations
+  and assigns, and reduced graph-render and query hot paths.
+- Added real SQLite persistence coverage and browser-hook unit tests alongside
+  regression coverage for the reported crash and authorization paths.
+
+### Added
+- Alert-derived element status, visible graph threshold lines, and an optional
+  central rules/history/acknowledgement console through `AlertSource` callbacks.
+
 ## v0.5.4 (2026-08-22)
 
 ### Added

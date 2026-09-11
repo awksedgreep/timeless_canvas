@@ -70,6 +70,32 @@ defmodule TimelessCanvas.CanvasPollerTest do
     assert CanvasPoller.whereis(canvas_id) == pid
   end
 
+  test "idle pollers do not schedule poll wakeups", %{canvas_id: canvas_id} do
+    assert {:ok, pid} = CanvasPoller.ensure_started(canvas_id, poll_interval: 10, linger: 60_000)
+    state = :sys.get_state(pid)
+    assert state.poll_timer == nil
+    assert state.poll_ref == nil
+  end
+
+  test "slow queries do not block another subscriber", %{canvas_id: canvas_id} do
+    graph_id = "poller-slow-#{canvas_id}"
+    elements = register_and_map(canvas_id, [graph_element(graph_id)])
+    parent = self()
+
+    FakeDataSource.put(:metric_range, fn _element ->
+      send(parent, :graph_query_started)
+      Process.sleep(250)
+      {:ok, []}
+    end)
+
+    assert :ok = CanvasPoller.subscribe(canvas_id, elements, poll_interval: 10, linger: 60_000)
+    assert_receive :graph_query_started, 1_000
+
+    started = System.monotonic_time(:millisecond)
+    assert :ok = CanvasPoller.subscribe(canvas_id, elements, poll_interval: 10, linger: 60_000)
+    assert System.monotonic_time(:millisecond) - started < 100
+  end
+
   test "broadcasts reach every topic subscriber and later ticks carry only diffs", %{
     canvas_id: canvas_id
   } do

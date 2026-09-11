@@ -4,7 +4,17 @@ defmodule TimelessCanvas.Web.Hooks do
   import Phoenix.Component, only: [assign: 3]
 
   def on_mount(:assign_config, _params, session, socket) do
-    base_path = session["tc_base_path"] || "/canvas"
+    base_path = valid_base_path(session["tc_base_path"])
     {:cont, assign(socket, :tc_base_path, base_path)}
   end
+
+  defp valid_base_path(path) when is_binary(path) do
+    if Regex.match?(~r{^/[a-z0-9/_-]*$}i, path) do
+      if path == "/", do: path, else: String.trim_trailing(path, "/")
+    else
+      "/canvas"
+    end
+  end
+
+  defp valid_base_path(_path), do: "/canvas"
 end

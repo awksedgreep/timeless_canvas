@@ -30,10 +30,12 @@ defmodule TimelessCanvas.StreamManager do
   """
 
   use GenServer
+  require Logger
 
   @max_buffer 50
   @flush_cap 50
   @default_batch_ms 250
+  @default_retry_ms 1_000
 
   @doc "Per-canvas PubSub topic carrying batched stream broadcasts."
   def stream_topic(canvas_id), do: "timeless_canvas:canvas:#{canvas_id}:streams"
@@ -60,12 +62,22 @@ defmodule TimelessCanvas.StreamManager do
     GenServer.call(server, {:get_buffer, element_id})
   end
 
+  @doc false
+  def reset(server \\ __MODULE__), do: GenServer.call(server, :reset)
+
   # --- Server callbacks ---
 
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
-    {:ok, %{subscriptions: %{}, registrants: %{}, batch_ms: opts[:batch_ms]}}
+
+    {:ok,
+     %{
+       subscriptions: %{},
+       registrants: %{},
+       batch_ms: opts[:batch_ms],
+       retry_ms: opts[:retry_ms] || @default_retry_ms
+     }}
   end
 
   @impl true
@@ -104,10 +116,21 @@ defmodule TimelessCanvas.StreamManager do
     buffer =
       case get_in(state, [:subscriptions, element_id]) do
         nil -> []
+        %{error: true} -> :error
         sub -> sub.buffer
       end
 
     {:reply, buffer, state}
+  end
+
+  def handle_call(:reset, _from, state) do
+    state = Enum.reduce(Map.keys(state.subscriptions), state, &do_unregister(&2, &1))
+
+    Enum.each(state.registrants, fn {_canvas_id, registrants} ->
+      Enum.each(registrants, fn {_pid, ref} -> Process.demonitor(ref, [:flush]) end)
+    end)
+
+    {:reply, :ok, %{state | subscriptions: %{}, registrants: %{}}}
   end
 
   @impl true
@@ -116,10 +139,10 @@ defmodule TimelessCanvas.StreamManager do
     # historical maps built in DataQueries.query_stream_data/3.
     entry_map =
       TimelessCanvas.DataQueries.put_entry_id(%{
-        timestamp: entry.timestamp,
-        level: entry.level,
-        message: entry.message,
-        metadata: entry.metadata
+        timestamp: value(entry, :timestamp),
+        level: value(entry, :level),
+        message: value(entry, :message, ""),
+        metadata: value(entry, :metadata, %{})
       })
 
     {:noreply, buffer_entry(state, element_id, entry_map)}
@@ -128,14 +151,14 @@ defmodule TimelessCanvas.StreamManager do
   def handle_info({:stream_trace_span, element_id, span}, state) do
     span_map =
       TimelessCanvas.DataQueries.put_entry_id(%{
-        timestamp: Map.get(span, :start_time) || Map.get(span, :timestamp),
-        trace_id: span.trace_id,
-        span_id: span.span_id,
-        name: span.name,
-        kind: span.kind,
-        duration_ns: span.duration_ns,
-        status: span.status,
-        status_message: span.status_message,
+        timestamp: value(span, :start_time) || value(span, :timestamp),
+        trace_id: value(span, :trace_id),
+        span_id: value(span, :span_id),
+        name: value(span, :name, ""),
+        kind: value(span, :kind),
+        duration_ns: value(span, :duration_ns),
+        status: value(span, :status),
+        status_message: value(span, :status_message),
         service: get_service(span)
       })
 
@@ -158,6 +181,54 @@ defmodule TimelessCanvas.StreamManager do
       end
 
     {:noreply, state}
+  end
+
+  def handle_info({:subscription_ready, element_id, pid}, state) do
+    case get_in(state, [:subscriptions, element_id]) do
+      %{task_pid: ^pid} = sub ->
+        {:noreply,
+         put_in(state, [:subscriptions, element_id], %{
+           sub
+           | error: false,
+             retry_attempt: 0,
+             retry_timer: nil
+         })}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:subscription_failed, element_id, pid, reason}, state) do
+    case get_in(state, [:subscriptions, element_id]) do
+      %{task_pid: ^pid} = sub ->
+        Logger.warning(
+          "TimelessCanvas stream subscription #{element_id} failed: #{inspect(reason)}"
+        )
+
+        attempt = sub.retry_attempt + 1
+        delay = min(state.retry_ms * trunc(:math.pow(2, attempt - 1)), 30_000)
+        timer = Process.send_after(self(), {:retry_subscription, element_id}, delay)
+
+        {:noreply,
+         put_in(state, [:subscriptions, element_id], %{
+           sub
+           | task_pid: nil,
+             error: true,
+             retry_attempt: attempt,
+             retry_timer: timer
+         })}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:retry_subscription, element_id}, state) do
+    case get_in(state, [:subscriptions, element_id]) do
+      nil -> {:noreply, state}
+      sub -> {:noreply, restart_subscription(state, element_id, sub)}
+    end
   end
 
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
@@ -207,24 +278,43 @@ defmodule TimelessCanvas.StreamManager do
 
   defp respawn_subscription(state, backend, type, canvas_id, element_id, opts) do
     state = do_unregister(state, element_id)
-    manager = self()
-
-    task_pid =
-      spawn_link(fn ->
-        subscribe_and_forward(backend, type, element_id, opts, manager)
-      end)
 
     sub = %{
       type: type,
       canvas_id: canvas_id,
-      task_pid: task_pid,
+      task_pid: nil,
       buffer: [],
       opts: opts,
       pending: [],
-      flush_timer: nil
+      flush_timer: nil,
+      retry_timer: nil,
+      retry_attempt: 0,
+      error: false
     }
 
-    put_in(state, [:subscriptions, element_id], sub)
+    state
+    |> put_in([:subscriptions, element_id], sub)
+    |> restart_subscription(element_id, sub, backend)
+  end
+
+  defp restart_subscription(state, element_id, sub) do
+    case stream_backend(sub.type) do
+      nil -> do_unregister(state, element_id)
+      backend -> restart_subscription(state, element_id, sub, backend)
+    end
+  end
+
+  defp restart_subscription(state, element_id, sub, backend) do
+    manager = self()
+
+    if sub.retry_timer, do: Process.cancel_timer(sub.retry_timer)
+
+    task_pid =
+      spawn_link(fn ->
+        subscribe_and_forward(backend, sub.type, element_id, sub.opts, manager)
+      end)
+
+    put_in(state, [:subscriptions, element_id], %{sub | task_pid: task_pid, retry_timer: nil})
   end
 
   defp do_unregister(state, element_id) do
@@ -234,7 +324,11 @@ defmodule TimelessCanvas.StreamManager do
 
       {sub, subs} ->
         cancel_flush_timer(sub)
-        if Process.alive?(sub.task_pid), do: Process.exit(sub.task_pid, :shutdown)
+        if sub.retry_timer, do: Process.cancel_timer(sub.retry_timer)
+
+        if is_pid(sub.task_pid) and Process.alive?(sub.task_pid),
+          do: Process.exit(sub.task_pid, :shutdown)
+
         %{state | subscriptions: subs}
     end
   end
@@ -243,8 +337,25 @@ defmodule TimelessCanvas.StreamManager do
   defp cancel_flush_timer(%{flush_timer: timer}), do: Process.cancel_timer(timer)
 
   defp subscribe_and_forward(backend, type, element_id, opts, manager) do
-    backend.subscribe(opts)
-    receive_loop(type, element_id, manager)
+    case backend.subscribe(opts) do
+      :ok ->
+        send(manager, {:subscription_ready, element_id, self()})
+        receive_loop(type, element_id, manager)
+
+      {:ok, _subscription} ->
+        send(manager, {:subscription_ready, element_id, self()})
+        receive_loop(type, element_id, manager)
+
+      {:error, reason} ->
+        send(manager, {:subscription_failed, element_id, self(), reason})
+
+      other ->
+        send(manager, {:subscription_failed, element_id, self(), {:unexpected_return, other}})
+    end
+  rescue
+    error -> send(manager, {:subscription_failed, element_id, self(), error})
+  catch
+    kind, reason -> send(manager, {:subscription_failed, element_id, self(), {kind, reason}})
   end
 
   defp receive_loop(:log, element_id, manager) do
@@ -315,15 +426,26 @@ defmodule TimelessCanvas.StreamManager do
   end
 
   defp get_service(span) do
-    cond do
-      is_map(span.attributes) && Map.has_key?(span.attributes, "service.name") ->
-        span.attributes["service.name"]
+    attributes = value(span, :attributes, %{})
+    resource = value(span, :resource, %{})
 
-      is_map(span.resource) && Map.has_key?(span.resource, "service.name") ->
-        span.resource["service.name"]
+    cond do
+      is_map(attributes) && Map.has_key?(attributes, "service.name") ->
+        attributes["service.name"]
+
+      is_map(resource) && Map.has_key?(resource, "service.name") ->
+        resource["service.name"]
 
       true ->
         nil
+    end
+  end
+
+  defp value(map, key, default \\ nil) when is_map(map) do
+    case Map.fetch(map, key) do
+      {:ok, nil} -> Map.get(map, Atom.to_string(key), default)
+      {:ok, found} -> found
+      :error -> Map.get(map, Atom.to_string(key), default)
     end
   end
 end

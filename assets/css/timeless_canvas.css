@@ -647,6 +647,50 @@ body.tc-canvas-open {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
 }
 
+.canvas-alert-console {
+  position: absolute;
+  top: 48px;
+  right: 12px;
+  width: 440px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+  background: var(--toolbar-bg);
+  border: 1px solid var(--toolbar-border);
+  border-radius: 8px;
+  backdrop-filter: blur(12px);
+  padding: 16px;
+  z-index: 20;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.canvas-alert-console__header,
+.canvas-alert-console__rule,
+.canvas-alert-console__history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.canvas-alert-console__rule,
+.canvas-alert-console__history-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--toolbar-border);
+  font-size: 12px;
+}
+
+.canvas-alert-console__orphan {
+  margin-left: 6px;
+  color: var(--danger);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.canvas-alert-console__history {
+  margin-top: 16px;
+}
+
 /* Zoom Indicator */
 .canvas-shortcut-legend {
   position: absolute;

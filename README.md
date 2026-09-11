@@ -24,6 +24,13 @@ configured. Data access goes through a `TimelessCanvas.DataSource` behaviour
 with a bounded discovery contract (`:filter`/`:limit`), so the host
 application decides where metrics come from.
 
+Alert creation, rule status, history, and acknowledgement are exposed through
+the optional callbacks in `TimelessCanvas.AlertSource`. The alert backend owns
+rule storage and the evaluation schedule; the canvas deliberately does not
+start a second evaluator that could duplicate notifications. Backends that
+implement the central callbacks get an Alerts console in the toolbar, including
+visibility for rules whose originating element was deleted.
+
 ## Installation
 
 The package is not on Hex; add it from GitHub. While development is fast the
@@ -87,4 +94,3 @@ prebuilt copy under `priv/` and no CSS route; your bundler owns it.
 `assets/package.json` declares `main`/`exports`, so bundlers that resolve
 packages (esbuild with `NODE_PATH=deps`, Vite, webpack) can also use
 `import { CanvasHook } from "timeless_canvas"`.
-

@@ -81,10 +81,10 @@ defmodule TimelessCanvas.Test.FakeDataSource do
   def metric(_state, _element, _metric), do: get(:metric, :no_data)
 
   @impl true
-  def subscribe(state, _element), do: {:ok, state}
+  def subscribe(state, _element), do: get(:subscribe, {:ok, state})
 
   @impl true
-  def unsubscribe(state, _element), do: {:ok, state}
+  def unsubscribe(state, _element), do: get(:unsubscribe, {:ok, state})
 
   @impl true
   def handle_message(_state, _message), do: get(:handle_message, :ignore)

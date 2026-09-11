@@ -92,4 +92,10 @@ defmodule TimelessCanvas.MetricFormatterTest do
     assert MetricFormatter.format(15_000, "florps") == "15.0K"
     assert MetricFormatter.format(2.5, "florps") == "2.5"
   end
+
+  test "non-numeric values are placeholders for every unit" do
+    for value <- [nil, :error, "12"], unit <- ["bytes", "seconds", "percent", "ratio"] do
+      assert MetricFormatter.format(value, unit) == "---"
+    end
+  end
 end

@@ -31,9 +31,9 @@ defmodule TimelessCanvas.Canvas.ElementTest do
       assert el.height == 100.0
     end
 
-    test "unknown type falls back to rect dimensions but keeps the type" do
+    test "unknown type safely falls back to rect" do
       el = Element.new(%{type: :mystery})
-      assert el.type == :mystery
+      assert el.type == :rect
       assert el.width == 160.0
       assert el.height == 80.0
     end
@@ -51,7 +51,16 @@ defmodule TimelessCanvas.Canvas.ElementTest do
 
     test "unknown type gets rect defaults" do
       assert Element.defaults_for(:nope).width == 160.0
-      assert Element.defaults_for(:nope).type == :nope
+      assert Element.defaults_for(:nope).type == :rect
+    end
+
+    test "normalizes string keys, string types, nil maps, and numeric strings" do
+      el = Element.new(%{"type" => "graph", "x" => "12.5", "meta" => nil, "pins" => nil})
+
+      assert el.type == :graph
+      assert el.x == 12.5
+      assert el.meta == %{}
+      assert el.pins == %{}
     end
 
     test "element_types lists all known types" do
@@ -80,6 +89,11 @@ defmodule TimelessCanvas.Canvas.ElementTest do
       el = Element.new(%{x: 10.0, y: 20.0}) |> Element.move(5.0, -30.0)
       assert el.x == 15.0
       assert el.y == -10.0
+    end
+
+    test "invalid deltas are ignored" do
+      el = Element.new(%{x: 10.0, y: 20.0})
+      assert Element.move(el, nil, "bad") == el
     end
   end
 

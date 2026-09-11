@@ -12,6 +12,7 @@ defmodule TimelessCanvas.Supervisor do
   """
 
   use Supervisor
+  require Logger
 
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
@@ -19,6 +20,12 @@ defmodule TimelessCanvas.Supervisor do
 
   @impl true
   def init(_opts) do
+    if TimelessCanvas.auth() == TimelessCanvas.Auth.Noop do
+      Logger.warning(
+        "TimelessCanvas is using Auth.Noop; configure an authentication/authorization module before production"
+      )
+    end
+
     children = [
       {Registry, keys: :unique, name: TimelessCanvas.CanvasRegistry},
       {DynamicSupervisor, name: TimelessCanvas.PollerSupervisor, strategy: :one_for_one},
@@ -30,6 +37,6 @@ defmodule TimelessCanvas.Supervisor do
       {TimelessCanvas.Presence, pubsub_server: TimelessCanvas.pubsub()}
     ]
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 end

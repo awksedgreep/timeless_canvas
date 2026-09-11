@@ -18,6 +18,8 @@ defmodule TimelessCanvas.Canvas.ViewBox do
 
   @min_width 100.0
   @max_width 50_000.0
+  @min_height 100.0
+  @max_height 50_000.0
 
   @doc """
   Formats the viewBox for the SVG `viewBox` attribute.
@@ -30,6 +32,8 @@ defmodule TimelessCanvas.Canvas.ViewBox do
   defp format_float(f) when is_float(f) do
     :erlang.float_to_binary(f, [:compact, decimals: 4])
   end
+
+  defp format_float(i) when is_integer(i), do: Integer.to_string(i)
 
   @doc """
   Pan the viewbox by (dx, dy) in SVG coordinate space.
@@ -44,24 +48,28 @@ defmodule TimelessCanvas.Canvas.ViewBox do
   Keeps the point under the cursor stationary.
   """
   def zoom(%__MODULE__{} = vb, cx, cy, factor) do
-    new_width = vb.width * factor
-    new_height = vb.height * factor
+    if not is_number(factor) or factor <= 0 do
+      vb
+    else
+      new_width = vb.width * factor
+      new_height = vb.height * factor
 
-    cond do
-      new_width < @min_width ->
-        vb
-
-      new_width > @max_width ->
-        vb
-
-      true ->
-        %{
+      cond do
+        new_width < @min_width or new_height < @min_height ->
           vb
-          | min_x: cx - (cx - vb.min_x) * factor,
-            min_y: cy - (cy - vb.min_y) * factor,
-            width: new_width,
-            height: new_height
-        }
+
+        new_width > @max_width or new_height > @max_height ->
+          vb
+
+        true ->
+          %{
+            vb
+            | min_x: cx - (cx - vb.min_x) * factor,
+              min_y: cy - (cy - vb.min_y) * factor,
+              width: new_width,
+              height: new_height
+          }
+      end
     end
   end
 
@@ -71,8 +79,13 @@ defmodule TimelessCanvas.Canvas.ViewBox do
   `client_width`, `client_height` are the SVG element's pixel dimensions.
   """
   def client_to_svg(%__MODULE__{} = vb, client_x, client_y, client_width, client_height) do
-    svg_x = vb.min_x + client_x * (vb.width / client_width)
-    svg_y = vb.min_y + client_y * (vb.height / client_height)
-    {svg_x, svg_y}
+    if is_number(client_width) and client_width > 0 and is_number(client_height) and
+         client_height > 0 do
+      svg_x = vb.min_x + client_x * (vb.width / client_width)
+      svg_y = vb.min_y + client_y * (vb.height / client_height)
+      {svg_x, svg_y}
+    else
+      {vb.min_x, vb.min_y}
+    end
   end
 end

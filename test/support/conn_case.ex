@@ -13,7 +13,12 @@ defmodule TimelessCanvas.ConnCase do
 
   use ExUnit.CaseTemplate
 
-  using do
+  using opts do
+    if Keyword.get(opts, :async, false) do
+      raise ArgumentError,
+            "TimelessCanvas.ConnCase uses shared singleton test state and cannot run async"
+    end
+
     quote do
       import Plug.Conn
       import Phoenix.ConnTest
@@ -27,10 +32,17 @@ defmodule TimelessCanvas.ConnCase do
   end
 
   setup do
+    reset_singleton(TimelessCanvas.DataSource.Manager)
+    reset_singleton(TimelessCanvas.StreamManager)
     TimelessCanvas.Test.FakePersistence.reset()
     TimelessCanvas.Test.FakeDataSource.reset()
     reset_clipboard()
     {:ok, conn: Phoenix.ConnTest.build_conn()}
+  end
+
+  defp reset_singleton(module) do
+    if Process.whereis(module), do: module.reset()
+    :ok
   end
 
   @doc """

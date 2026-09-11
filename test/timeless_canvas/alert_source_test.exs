@@ -52,5 +52,9 @@ defmodule TimelessCanvas.AlertSourceTest do
 
   test "delivery_formats is optional" do
     assert {:delivery_formats, 0} in AlertSource.behaviour_info(:optional_callbacks)
+    assert {:statuses, 1} in AlertSource.behaviour_info(:optional_callbacks)
+    assert {:list_all_rules, 1} in AlertSource.behaviour_info(:optional_callbacks)
+    assert {:list_history, 2} in AlertSource.behaviour_info(:optional_callbacks)
+    assert {:acknowledge_alert, 2} in AlertSource.behaviour_info(:optional_callbacks)
   end
 end

@@ -2,6 +2,7 @@ defmodule TimelessCanvas.Web.CanvasShareComponent do
   use TimelessCanvas.Web, :live_component
 
   defp persistence, do: TimelessCanvas.persistence()
+  defp auth, do: TimelessCanvas.auth()
 
   @impl true
   def update(assigns, socket) do
@@ -77,39 +78,54 @@ defmodule TimelessCanvas.Web.CanvasShareComponent do
 
   @impl true
   def handle_event("grant", %{"username" => username, "role" => role}, socket) do
-    canvas_id = socket.assigns.canvas_id
+    with :ok <- authorize_share(socket),
+         {:ok, role_atom} <- share_role(role),
+         user when not is_nil(user) <- persistence().lookup_user_by_username(username),
+         {:ok, _} <- persistence().grant_access(socket.assigns.canvas_id, user.id, role_atom) do
+      accesses = persistence().list_access(socket.assigns.canvas_id)
+      {:noreply, assign(socket, accesses: accesses, username: "", error: nil)}
+    else
+      {:error, :unauthorized} ->
+        {:noreply, assign(socket, error: "Not authorized to share this canvas")}
 
-    case persistence().lookup_user_by_username(username) do
+      {:error, :invalid_role} ->
+        {:noreply, assign(socket, error: "Invalid sharing role")}
+
       nil ->
         {:noreply, assign(socket, error: "No user found with that username")}
 
-      user ->
-        role_atom = String.to_existing_atom(role)
-
-        case persistence().grant_access(canvas_id, user.id, role_atom) do
-          {:ok, _} ->
-            accesses = persistence().list_access(canvas_id)
-            {:noreply, assign(socket, accesses: accesses, username: "", error: nil)}
-
-          {:error, _} ->
-            {:noreply, assign(socket, error: "Could not grant access")}
-        end
+      {:error, _} ->
+        {:noreply, assign(socket, error: "Could not grant access")}
     end
   end
 
   def handle_event("revoke", %{"user-id" => user_id_str}, socket) do
-    canvas_id = socket.assigns.canvas_id
-    {user_id, ""} = Integer.parse(user_id_str)
+    with :ok <- authorize_share(socket),
+         {user_id, ""} <- Integer.parse(user_id_str),
+         {:ok, _} <- persistence().revoke_access(socket.assigns.canvas_id, user_id) do
+      accesses = persistence().list_access(socket.assigns.canvas_id)
+      {:noreply, assign(socket, accesses: accesses, error: nil)}
+    else
+      {:error, :unauthorized} ->
+        {:noreply, assign(socket, error: "Not authorized to share this canvas")}
 
-    case persistence().revoke_access(canvas_id, user_id) do
-      {:ok, _} ->
-        accesses = persistence().list_access(canvas_id)
-        {:noreply, assign(socket, accesses: accesses)}
-
-      {:error, _} ->
+      _ ->
         {:noreply, assign(socket, error: "Could not revoke access")}
     end
   end
+
+  defp authorize_share(socket) do
+    with %{current_user: current_user} <- socket.assigns,
+         {:ok, canvas} <- persistence().get_canvas(socket.assigns.canvas_id) do
+      auth().authorize(current_user, canvas, :share)
+    else
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  defp share_role("editor"), do: {:ok, :editor}
+  defp share_role("viewer"), do: {:ok, :viewer}
+  defp share_role(_), do: {:error, :invalid_role}
 
   defp role_badge_class(:editor), do: "badge-info"
   defp role_badge_class(:viewer), do: "badge-warning"

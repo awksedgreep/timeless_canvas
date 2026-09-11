@@ -66,5 +66,19 @@ defmodule TimelessCanvas.IconCatalogTest do
 
       assert IconCatalog.element_icon_name(service_el(%{"icon" => data_uri})) == data_uri
     end
+
+    test "invalid prefixes and non-string values are rejected" do
+      assert IconCatalog.element_icon_name(service_el(%{"icon" => "javascript:alert"})) == nil
+      assert IconCatalog.element_icon_name(service_el(%{"icon" => 123})) == nil
+    end
+
+    test "nil metadata is safe" do
+      assert IconCatalog.element_icon_name(%{service_el(%{}) | meta: nil}) == nil
+    end
+  end
+
+  test "graph metadata stores the symbolic Timeless name, not its data URI" do
+    source = service_el(%{"icon" => "timeless"})
+    assert IconCatalog.graph_meta(source, "host-1", "cpu")["icon"] == "timeless"
   end
 end

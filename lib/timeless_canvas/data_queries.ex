@@ -18,7 +18,7 @@ defmodule TimelessCanvas.DataQueries do
   # Per-element queries run in the caller process; fan them out with
   # bounded concurrency so backend I/O overlaps.
   @element_query_concurrency 8
-  @element_query_timeout 30_000
+  @element_query_timeout 5_000
 
   @doc "Maximum number of entries kept per stream element."
   def max_stream_entries, do: @max_stream_entries
@@ -34,7 +34,16 @@ defmodule TimelessCanvas.DataQueries do
   race live prepends the way the old index-based lookup did.
   """
   def put_entry_id(entry) when is_map(entry) do
-    Map.put(entry, :id, :erlang.phash2(entry))
+    id =
+      entry
+      |> Map.delete(:id)
+      |> Map.delete("id")
+      |> :erlang.term_to_binary()
+      |> then(&:crypto.hash(:sha256, &1))
+      |> binary_part(0, 12)
+      |> Base.url_encode64(padding: false)
+
+    Map.put(entry, :id, id)
   end
 
   @doc """
@@ -52,7 +61,7 @@ defmodule TimelessCanvas.DataQueries do
     resolved_elements
     |> Enum.filter(fn {_id, el} -> el.type == :graph end)
     |> concurrent_element_query(fn {id, element} ->
-      metric_name = Map.get(element.meta, "metric_name", "default")
+      metric_name = Map.get(element.meta || %{}, "metric_name", "default")
 
       points =
         case Manager.metric_range(canvas_id, id, metric_name, from, time) do
@@ -71,13 +80,15 @@ defmodule TimelessCanvas.DataQueries do
   elements whose query errored map to `:error` (see `query_graph_data/4`).
   """
   def query_text_data(canvas_id, resolved_elements, time) do
+    timestamp = DateTime.to_unix(time, :millisecond)
+
     resolved_elements
     |> Enum.filter(fn {_id, el} -> el.type == :text_series end)
     |> concurrent_element_query(fn {id, element} ->
-      metric_name = Map.get(element.meta, "metric_name", "default")
+      metric_name = Map.get(element.meta || %{}, "metric_name", "default")
 
       case Manager.text_metric_at(canvas_id, id, metric_name, time) do
-        {:ok, value} -> {id, {DateTime.to_unix(time, :millisecond), value}}
+        {:ok, value} -> {id, {timestamp, value}}
         {:error, _reason} -> {id, :error}
         :no_data -> :skip
       end
@@ -108,7 +119,7 @@ defmodule TimelessCanvas.DataQueries do
   def query_expanded_data(canvas_id, resolved_elements, element_id, time, span) do
     case Map.get(resolved_elements, element_id) do
       %{type: :graph} = element ->
-        metric_name = Map.get(element.meta, "metric_name", "default")
+        metric_name = Map.get(element.meta || %{}, "metric_name", "default")
         from = DateTime.add(time, -span, :second)
 
         case Manager.metric_range(canvas_id, element_id, metric_name, from, time) do
@@ -132,7 +143,13 @@ defmodule TimelessCanvas.DataQueries do
 
   @doc "Bounded host probe: `{hosts_available?, first_host_or_nil}`."
   def query_host_probe do
-    hosts = Manager.list_hosts(limit: 1)
+    hosts =
+      case Manager.list_hosts(limit: 1) do
+        {:ok, hosts} when is_list(hosts) -> hosts
+        hosts when is_list(hosts) -> hosts
+        _ -> []
+      end
+
     {hosts != [], List.first(hosts)}
   end
 
@@ -140,16 +157,17 @@ defmodule TimelessCanvas.DataQueries do
   def query_metric_units(resolved_elements) do
     resolved_elements
     |> Enum.filter(fn {_id, el} -> el.type == :graph end)
-    |> Enum.reduce(%{}, fn {id, el}, acc ->
+    |> concurrent_element_query(fn {id, el} ->
       metric_name = Map.get(el.meta || %{}, "metric_name")
 
       if metric_name do
         case Manager.metric_metadata(metric_name) do
-          {:ok, %{unit: unit}} when not is_nil(unit) -> Map.put(acc, id, unit)
-          _ -> acc
+          {:ok, %{unit: unit}} when not is_nil(unit) -> {id, unit}
+          {:ok, %{"unit" => unit}} when not is_nil(unit) -> {id, unit}
+          _ -> :skip
         end
       else
-        acc
+        :skip
       end
     end)
   end
@@ -163,27 +181,42 @@ defmodule TimelessCanvas.DataQueries do
 
   @doc """
   Fan out one query per element with bounded concurrency; results are
-  keyed by element id so ordering does not matter. Timed-out or crashed
-  queries are skipped, leaving any previously assigned data in place.
+  keyed by element id. Timed-out or crashed queries map to `:error`, so
+  callers can distinguish a failed backend from an empty result.
   A `fun` returning `:skip` omits the element from the result.
   """
   def concurrent_element_query(elements, fun) do
+    elements = Enum.to_list(elements)
+
+    results =
+      Task.async_stream(elements, &safe_element_query(&1, fun),
+        max_concurrency: @element_query_concurrency,
+        ordered: true,
+        timeout: @element_query_timeout,
+        on_timeout: :kill_task
+      )
+
     elements
-    |> Task.async_stream(fun,
-      max_concurrency: @element_query_concurrency,
-      ordered: false,
-      timeout: @element_query_timeout,
-      on_timeout: :kill_task
-    )
+    |> Enum.zip(results)
     |> Enum.reduce(%{}, fn
-      {:ok, :skip}, acc -> acc
-      {:ok, {id, value}}, acc -> Map.put(acc, id, value)
-      {:exit, _reason}, acc -> acc
+      {_element, {:ok, :skip}}, acc -> acc
+      {_element, {:ok, {:query_error, id}}}, acc -> Map.put(acc, id, :error)
+      {_element, {:ok, {id, value}}}, acc -> Map.put(acc, id, value)
+      {{id, _element}, {:exit, _reason}}, acc -> Map.put(acc, id, :error)
     end)
+  end
+
+  defp safe_element_query({id, _element} = item, fun) do
+    fun.(item)
+  rescue
+    _error -> {:query_error, id}
+  catch
+    _kind, _reason -> {:query_error, id}
   end
 
   @doc "Build stream-backend query opts from a log_stream element's meta."
   def build_log_opts(meta) do
+    meta = if is_map(meta), do: meta, else: %{}
     opts = []
 
     opts =
@@ -197,7 +230,7 @@ defmodule TimelessCanvas.DataQueries do
       case Map.get(meta, "level") do
         nil -> opts
         "" -> opts
-        level -> Keyword.put(opts, :level, String.to_existing_atom(level))
+        level -> maybe_put_known_atom(opts, :level, level, ~w(all debug info warning error))
       end
 
     case Map.get(meta, "metadata_filter") do
@@ -233,6 +266,7 @@ defmodule TimelessCanvas.DataQueries do
 
   @doc "Build stream-backend query opts from a trace_stream element's meta."
   def build_trace_opts(meta) do
+    meta = if is_map(meta), do: meta, else: %{}
     opts = []
 
     opts =
@@ -262,26 +296,42 @@ defmodule TimelessCanvas.DataQueries do
       end
 
     case Map.get(meta, "kind") do
-      nil -> opts
-      "" -> opts
-      kind -> Keyword.put(opts, :kind, String.to_existing_atom(kind))
+      nil ->
+        opts
+
+      "" ->
+        opts
+
+      kind ->
+        maybe_put_known_atom(
+          opts,
+          :kind,
+          kind,
+          ~w(unspecified internal server client producer consumer)
+        )
     end
   end
 
   # --- Private ---
 
-  defp downsample(points, max_count) when length(points) <= max_count do
-    Enum.reverse(points)
-  end
-
-  defp downsample(points, max_count) do
+  defp downsample(points, max_count)
+       when is_list(points) and is_integer(max_count) and max_count > 1 do
     total = length(points)
-    step = total / max_count
 
-    0..(max_count - 1)
-    |> Enum.map(fn i -> Enum.at(points, round(i * step)) end)
-    |> Enum.reverse()
+    if total <= max_count do
+      Enum.reverse(points)
+    else
+      tuple = List.to_tuple(points)
+      last_index = total - 1
+
+      for i <- 0..(max_count - 1) do
+        elem(tuple, round(i * last_index / (max_count - 1)))
+      end
+      |> Enum.reverse()
+    end
   end
+
+  defp downsample(_points, _max_count), do: []
 
   defp query_stream_historical(%{type: :log_stream} = element, from, to, backends) do
     case Keyword.get(backends, :log) do
@@ -290,7 +340,7 @@ defmodule TimelessCanvas.DataQueries do
 
       backend ->
         filters =
-          build_log_opts(element.meta)
+          build_log_opts(element.meta || %{})
           |> Keyword.put(:since, from)
           |> Keyword.put(:until, to)
           |> Keyword.put(:limit, @max_stream_entries)
@@ -300,10 +350,10 @@ defmodule TimelessCanvas.DataQueries do
           {:ok, %{entries: entries}} ->
             Enum.map(entries, fn e ->
               put_entry_id(%{
-                timestamp: e.timestamp,
-                level: e.level,
-                message: e.message,
-                metadata: e.metadata
+                timestamp: value(e, :timestamp),
+                level: value(e, :level),
+                message: value(e, :message, ""),
+                metadata: value(e, :metadata, %{})
               })
             end)
 
@@ -320,7 +370,7 @@ defmodule TimelessCanvas.DataQueries do
 
       backend ->
         filters =
-          build_trace_opts(element.meta)
+          build_trace_opts(element.meta || %{})
           |> Keyword.put(:since, from)
           |> Keyword.put(:until, to)
           |> Keyword.put(:limit, @max_stream_entries)
@@ -330,14 +380,14 @@ defmodule TimelessCanvas.DataQueries do
           {:ok, %{entries: spans}} ->
             Enum.map(spans, fn s ->
               put_entry_id(%{
-                timestamp: Map.get(s, :start_time) || Map.get(s, :timestamp),
-                trace_id: s.trace_id,
-                span_id: s.span_id,
-                name: s.name,
-                kind: s.kind,
-                duration_ns: s.duration_ns,
-                status: s.status,
-                status_message: s.status_message,
+                timestamp: value(s, :start_time) || value(s, :timestamp),
+                trace_id: value(s, :trace_id),
+                span_id: value(s, :span_id),
+                name: value(s, :name, ""),
+                kind: value(s, :kind),
+                duration_ns: value(s, :duration_ns),
+                status: value(s, :status),
+                status_message: value(s, :status_message),
                 service: get_span_service(s)
               })
             end)
@@ -351,15 +401,39 @@ defmodule TimelessCanvas.DataQueries do
   defp query_stream_historical(_element, _from, _to, _backends), do: []
 
   defp get_span_service(span) do
-    cond do
-      is_map(span.attributes) && Map.has_key?(span.attributes, "service.name") ->
-        span.attributes["service.name"]
+    attributes = value(span, :attributes, %{})
+    resource = value(span, :resource, %{})
 
-      is_map(span.resource) && Map.has_key?(span.resource, "service.name") ->
-        span.resource["service.name"]
+    cond do
+      is_map(attributes) && Map.has_key?(attributes, "service.name") ->
+        attributes["service.name"]
+
+      is_map(resource) && Map.has_key?(resource, "service.name") ->
+        resource["service.name"]
 
       true ->
         nil
+    end
+  end
+
+  defp maybe_put_known_atom(opts, key, value, allowed) when is_atom(value) do
+    if Atom.to_string(value) in allowed, do: Keyword.put(opts, key, value), else: opts
+  end
+
+  defp maybe_put_known_atom(opts, key, value, allowed) when is_binary(value) do
+    case Enum.find(allowed, &(&1 == value)) do
+      nil -> opts
+      known -> Keyword.put(opts, key, String.to_existing_atom(known))
+    end
+  end
+
+  defp maybe_put_known_atom(opts, _key, _value, _allowed), do: opts
+
+  defp value(map, key, default \\ nil) when is_map(map) do
+    case Map.fetch(map, key) do
+      {:ok, nil} -> Map.get(map, Atom.to_string(key), default)
+      {:ok, found} -> found
+      :error -> Map.get(map, Atom.to_string(key), default)
     end
   end
 end

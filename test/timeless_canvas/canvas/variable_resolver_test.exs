@@ -20,6 +20,14 @@ defmodule TimelessCanvas.Canvas.VariableResolverTest do
     test "empty variables produce empty bindings" do
       assert VariableResolver.bindings(%{}) == %{}
     end
+
+    test "ignores malformed variable definitions" do
+      assert VariableResolver.bindings(%{"bad" => nil, "host" => %{current: "web-1"}}) == %{
+               "host" => "web-1"
+             }
+
+      assert VariableResolver.bindings(nil) == %{}
+    end
   end
 
   describe "resolve_element/2" do
@@ -96,6 +104,11 @@ defmodule TimelessCanvas.Canvas.VariableResolverTest do
 
       resolved = VariableResolver.resolve_element(el, %{})
       assert resolved.meta["host"] == "kept"
+    end
+
+    test "nil metadata and pins plus atom-keyed pins are handled" do
+      el = %{Element.new() | meta: nil, pins: %{host: %{"mode" => "literal", "value" => "web-1"}}}
+      assert VariableResolver.resolve_element(el, %{}).meta["host"] == "web-1"
     end
   end
 

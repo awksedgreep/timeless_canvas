@@ -141,6 +141,50 @@ defmodule TimelessCanvas.Web.CanvasLiveInputTest do
     end
   end
 
+  describe "untrusted client input" do
+    test "invalid atoms, arithmetic, oversized selections, and stray messages are ignored", %{
+      conn: conn,
+      user: user
+    } do
+      {data, el} = canvas_with_element(%{x: 10.0, y: 20.0})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      for {event, params} <- [
+            {"toggle_mode", %{"mode" => "Elixir.System"}},
+            {"set_host_type", %{"host_type" => "not_real"}},
+            {"set_place_kind", %{"kind" => "owner"}},
+            {"canvas:zoom", %{"min_x" => nil, "min_y" => 0, "width" => 0, "height" => "bad"}},
+            {"canvas:click", %{"x" => "bad", "y" => nil}},
+            {"element:move", %{"id" => el.id, "dx" => "bad", "dy" => nil}},
+            {"element:resize", %{"id" => el.id, "width" => %{}, "height" => 1}},
+            {"element:nudge", %{"dx" => "NaN", "dy" => 1}},
+            {"place_child_element", %{"type" => "owner", "element_id" => el.id}}
+          ] do
+        render_hook(view, event, params)
+      end
+
+      render_hook(view, "marquee:select", %{"ids" => List.duplicate("attacker", 5_000) ++ [el.id]})
+
+      assert assigns(view).selected_ids == MapSet.new()
+      assert assigns(view).canvas.elements[el.id].x == 10.0
+
+      send(view.pid, {:unexpected, :message})
+      assert render(view) =~ "canvas-svg"
+      assert Process.alive?(view.pid)
+    end
+
+    test "numeric strings are accepted at the boundary", %{conn: conn, user: user} do
+      {data, el} = canvas_with_element(%{x: 10.0, y: 20.0})
+      record = FakePersistence.seed_canvas(%{user_id: user.id, data: data})
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      render_hook(view, "element:move", %{"id" => el.id, "dx" => "2.5", "dy" => "-5"})
+      assert assigns(view).canvas.elements[el.id].x == 12.5
+      assert assigns(view).canvas.elements[el.id].y == 15.0
+    end
+  end
+
   defp with_deny_edit_auth do
     previous = Application.get_env(:timeless_canvas, :auth)
     Application.put_env(:timeless_canvas, :auth, TimelessCanvas.Test.DenyEditAuth)

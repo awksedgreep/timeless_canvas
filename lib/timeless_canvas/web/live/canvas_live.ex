@@ -22,6 +22,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
   alias TimelessCanvas.StreamManager
   require Logger
 
+  @pending_statuses_key {__MODULE__, :pending_statuses}
+  @pending_streams_key {__MODULE__, :pending_streams}
+
   defp persistence, do: TimelessCanvas.persistence()
   defp auth, do: TimelessCanvas.auth()
   defp pubsub, do: TimelessCanvas.pubsub()
@@ -67,10 +70,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
         Phoenix.PubSub.subscribe(pubsub(), StatusManager.status_topic(canvas_id))
         Phoenix.PubSub.subscribe(pubsub(), StreamManager.stream_topic(canvas_id))
         Phoenix.PubSub.subscribe(pubsub(), CanvasPoller.data_topic(canvas_id))
-        # A cold series cache answers empty and fetches in the background;
-        # this is how the panel finds out the answer changed.
-        Phoenix.PubSub.subscribe(pubsub(), StatusManager.series_topic())
-
         # Editor presence: track this viewer and watch for others' diffs.
         Phoenix.PubSub.subscribe(pubsub(), Presence.topic(canvas_id))
 
@@ -136,6 +135,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
           save_state: :saved,
           # nil | {ref, timer} — see arm_autosave_timer/2
           autosave_ref: nil,
+          # nil | ref — persistence runs in a supervised LiveView async task.
+          save_task_ref: nil,
           autosave_failures: 0,
           record_updated_at: Map.get(record, :updated_at),
           stale_write_warning: false,
@@ -175,8 +176,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
           series_loading: false,
           series_host: nil,
           alert_rules: [],
+          alert_element_id: nil,
           alert_form: nil,
           alert_error: nil,
+          show_alert_console: false,
+          all_alert_rules: [],
+          alert_history: [],
+          alert_history_rule_id: nil,
+          alert_console_error: nil,
           ta_open: nil,
           ta_filter: "",
           ta_suggestions: [],
@@ -185,13 +192,21 @@ defmodule TimelessCanvas.Web.CanvasLive do
           metric_units: %{},
           resolved_elements: resolved_elements,
           registration_fingerprint: registration_fingerprint(resolved_elements),
+          registered_element_ids:
+            if(connected?(socket),
+              do: Map.keys(resolved_elements) |> MapSet.new(),
+              else: MapSet.new()
+            ),
+          registered_stream_ids:
+            if(connected?(socket), do: stream_element_ids(resolved_elements), else: MapSet.new()),
           show_add_variable: false,
           debug_counts: %{
             status_msgs: 0,
             data_msgs: 0,
             stream_entry_msgs: 0,
             stream_span_msgs: 0
-          }
+          },
+          debug_report_ref: nil
         )
 
       # The dead render performs no data-source queries at all: elements
@@ -431,6 +446,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
         </button>
         <span class="canvas-toolbar__sep"></span>
         <button
+          :if={central_alerts_supported?()}
+          phx-click="alerts:toggle_console"
+          class={"canvas-toolbar__btn#{if @show_alert_console, do: " canvas-toolbar__btn--active", else: ""}"}
+        >
+          Alerts
+        </button>
+        <span :if={central_alerts_supported?()} class="canvas-toolbar__sep"></span>
+        <button
           phx-click="fit_to_content"
           class="canvas-toolbar__btn"
           disabled={map_size(@canvas.elements) == 0}
@@ -563,7 +586,57 @@ defmodule TimelessCanvas.Web.CanvasLive do
           module={TimelessCanvas.Web.CanvasShareComponent}
           id="canvas-share"
           canvas_id={@canvas_id}
+          current_user={@current_user}
         />
+      </div>
+
+      <div :if={@show_alert_console} class="canvas-alert-console">
+        <div class="canvas-alert-console__header">
+          <strong>Alert rules</strong>
+          <button type="button" phx-click="alerts:close" aria-label="Close alerts">&times;</button>
+        </div>
+        <p :if={@alert_console_error} class="properties-panel__hint">{@alert_console_error}</p>
+        <p :if={@all_alert_rules == [] && !@alert_console_error} class="properties-panel__hint">
+          No alert rules
+        </p>
+        <div :for={rule <- @all_alert_rules} class="canvas-alert-console__rule">
+          <div>
+            <strong>{alert_rule_field(rule, :name, "Alert")}</strong>
+            <span
+              :if={orphaned_alert_rule?(rule, @canvas_id, @canvas.elements)}
+              class="canvas-alert-console__orphan"
+            >
+              orphaned element
+            </span>
+          </div>
+          <span>
+            {alert_rule_field(rule, :aggregate, "avg")} {alert_rule_field(rule, :condition, "above")}
+            {alert_rule_field(rule, :threshold, "?")}
+          </span>
+          <button
+            :if={alert_rule_field(rule, :id) != nil}
+            type="button"
+            phx-click="alerts:history"
+            phx-value-id={alert_rule_field(rule, :id)}
+          >
+            History
+          </button>
+        </div>
+        <div :if={@alert_history_rule_id != nil} class="canvas-alert-console__history">
+          <strong>Recent history</strong>
+          <p :if={@alert_history == []} class="properties-panel__hint">No alert history</p>
+          <div :for={entry <- @alert_history} class="canvas-alert-console__history-row">
+            <span>{alert_history_label(entry)}</span>
+            <button
+              :if={@can_edit && alert_rule_field(entry, :id) != nil && !alert_rule_field(entry, :acknowledged, false)}
+              type="button"
+              phx-click="alerts:acknowledge"
+              phx-value-id={alert_rule_field(entry, :id)}
+            >
+              Acknowledge
+            </button>
+          </div>
+        </div>
       </div>
 
       <svg
@@ -1485,6 +1558,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp push_canvas(socket, canvas, op_key \\ nil)
 
   defp push_canvas(socket, %Canvas{} = canvas, op_key) do
+    previous_resolved = socket.assigns.resolved_elements
     now = System.monotonic_time(:millisecond)
 
     history =
@@ -1496,14 +1570,19 @@ defmodule TimelessCanvas.Web.CanvasLive do
           History.push(socket.assigns.history, canvas)
       end
 
-    assign(socket,
-      history: history,
-      canvas: history.present,
-      last_history_op: op_key && {op_key, now}
+    socket =
+      assign(socket,
+        history: history,
+        canvas: history.present,
+        last_history_op: op_key && {op_key, now}
+      )
+      |> resolve_and_assign()
+      |> register_elements()
+
+    push_graph_data(
+      socket,
+      changed_graph_ids(previous_resolved, socket.assigns.resolved_elements)
     )
-    |> resolve_and_assign()
-    |> register_elements()
-    |> push_graph_data()
   end
 
   # Coalescible ops carry {event, object-id, changed-field}; only real
@@ -1513,12 +1592,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp coalesce_key(_event, _id, _params), do: nil
 
   defp update_canvas(socket, %Canvas{} = canvas) do
+    previous_resolved = socket.assigns.resolved_elements
     history = %{socket.assigns.history | present: canvas}
 
-    assign(socket, history: history, canvas: canvas)
-    |> resolve_and_assign()
-    |> register_elements()
-    |> push_graph_data()
+    socket =
+      assign(socket, history: history, canvas: canvas)
+      |> resolve_and_assign()
+      |> register_elements()
+
+    push_graph_data(
+      socket,
+      changed_graph_ids(previous_resolved, socket.assigns.resolved_elements)
+    )
   end
 
   # Fast path for pan/zoom/center/fit: only `canvas.view_box` changed, so
@@ -1540,8 +1625,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # pushes only the ones that changed since the last push. It is
   # idempotent, so every path that touches graph data, element geometry,
   # or expansion state simply calls it.
-  defp push_graph_data(socket) do
-    payloads = build_graph_payloads(socket.assigns)
+  defp push_graph_data(socket, ids \\ :all) do
+    payloads = build_graph_payloads(socket.assigns, ids)
     cache = socket.assigns.graph_push_cache
 
     socket =
@@ -1550,26 +1635,47 @@ defmodule TimelessCanvas.Web.CanvasLive do
           acc
         else
           event = if payload.kind == "expanded", do: "graph:expanded", else: "graph:data"
-          push_event(acc, event, payload)
+          previous = Map.get(cache, id, %{})
+
+          outgoing =
+            if Map.get(previous, :raw) == payload.raw,
+              do: Map.delete(payload, :raw),
+              else: payload
+
+          push_event(acc, event, outgoing)
         end
       end)
 
-    assign(socket, graph_push_cache: payloads)
+    valid_ids = Map.keys(socket.assigns.resolved_elements)
+    assign(socket, graph_push_cache: cache |> Map.merge(payloads) |> Map.take(valid_ids))
   end
 
-  defp build_graph_payloads(assigns) do
-    for {id, %Element{type: :graph} = el} <- assigns.resolved_elements, into: %{} do
+  defp build_graph_payloads(assigns, ids) do
+    elements =
+      if ids == :all,
+        do: assigns.resolved_elements,
+        else: Map.take(assigns.resolved_elements, List.wrap(ids))
+
+    for {id, %Element{type: :graph} = el} <- elements, into: %{} do
       unit = Map.get(assigns.metric_units, id)
+
+      rules = if assigns.alert_element_id == id, do: assigns.alert_rules, else: []
 
       payload =
         if assigns.expanded_graph_id == id do
-          expanded_graph_payload(el, assigns.expanded_graph_data, unit)
+          expanded_graph_payload(el, assigns.expanded_graph_data, unit, rules)
         else
-          compact_graph_payload(el, Map.get(assigns.graph_data, id, []), unit)
+          compact_graph_payload(el, Map.get(assigns.graph_data, id, []), unit, rules)
         end
 
       {id, payload}
     end
+  end
+
+  defp changed_graph_ids(previous, current) do
+    current
+    |> Enum.filter(fn {id, el} -> el.type == :graph and Map.get(previous, id) != el end)
+    |> Enum.map(&elem(&1, 0))
   end
 
   # Re-register with the Manager / StreamManager / poller only when the
@@ -1583,7 +1689,30 @@ defmodule TimelessCanvas.Web.CanvasLive do
     if fingerprint == socket.assigns.registration_fingerprint do
       socket
     else
-      StatusManager.register_elements(socket.assigns.canvas_id, Map.values(resolved))
+      previous = socket.assigns.registration_fingerprint
+      old_ids = socket.assigns.registered_element_ids
+      new_ids = Map.keys(resolved) |> MapSet.new()
+
+      changed_ids =
+        new_ids
+        |> Enum.filter(&(Map.get(previous, &1) != Map.get(fingerprint, &1)))
+        |> MapSet.new()
+
+      removed_or_changed =
+        MapSet.union(
+          MapSet.difference(old_ids, new_ids),
+          MapSet.intersection(old_ids, changed_ids)
+        )
+
+      Enum.each(
+        removed_or_changed,
+        &StatusManager.unregister_element(socket.assigns.canvas_id, &1)
+      )
+
+      changed_elements = resolved |> Map.take(MapSet.to_list(changed_ids)) |> Map.values()
+
+      if changed_elements != [],
+        do: StatusManager.register_elements(socket.assigns.canvas_id, changed_elements)
 
       if connected?(socket) do
         CanvasPoller.update_elements(socket.assigns.canvas_id, resolved,
@@ -1591,16 +1720,28 @@ defmodule TimelessCanvas.Web.CanvasLive do
         )
       end
 
+      old_stream_ids = socket.assigns.registered_stream_ids
+      new_stream_ids = stream_element_ids(resolved)
+      removed_stream_ids = MapSet.difference(old_stream_ids, new_stream_ids)
+      Enum.each(removed_stream_ids, &StreamManager.unregister_stream/1)
+
       stream_data =
-        if connected?(socket) and map_size(resolved) > 0 do
-          register_stream_elements(socket.assigns.canvas_id, resolved)
+        if connected?(socket) and MapSet.size(changed_ids) > 0 do
+          resolved
+          |> Map.take(MapSet.to_list(changed_ids))
+          |> then(&register_stream_elements(socket.assigns.canvas_id, &1))
         else
           %{}
         end
 
       assign(socket,
         registration_fingerprint: fingerprint,
-        stream_data: Map.merge(socket.assigns.stream_data, stream_data)
+        registered_element_ids: new_ids,
+        registered_stream_ids: new_stream_ids,
+        stream_data:
+          socket.assigns.stream_data
+          |> Map.take(MapSet.to_list(new_ids))
+          |> Map.merge(stream_data)
       )
     end
   end
@@ -1616,17 +1757,37 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp resolve_and_assign(socket) do
     bindings = VariableResolver.bindings(socket.assigns.canvas.variables)
     resolved = VariableResolver.resolve_elements(socket.assigns.canvas.elements, bindings)
-    assign(socket, resolved_elements: resolved)
+    ids = Map.keys(resolved)
+
+    assign(socket,
+      resolved_elements: resolved,
+      graph_data: Map.take(Map.get(socket.assigns, :graph_data, %{}), ids),
+      graph_push_cache: Map.take(Map.get(socket.assigns, :graph_push_cache, %{}), ids),
+      text_data: Map.take(Map.get(socket.assigns, :text_data, %{}), ids),
+      stream_data: Map.take(Map.get(socket.assigns, :stream_data, %{}), ids)
+    )
+  end
+
+  defp stream_element_ids(elements) do
+    for {id, %{type: type}} <- elements,
+        type in [:log_stream, :trace_stream],
+        into: MapSet.new(),
+        do: id
   end
 
   # The [canvas-prof] report timer is never even armed unless profiling
   # is enabled (config :timeless_canvas, :profiling, true).
   defp schedule_debug_report(socket) do
-    if connected?(socket) and Profiling.enabled?() do
-      Process.send_after(self(), :debug_report, debug_report_interval())
-    end
+    if socket.assigns.debug_report_ref,
+      do: Process.cancel_timer(socket.assigns.debug_report_ref)
 
-    socket
+    if connected?(socket) and Profiling.enabled?() do
+      assign(socket,
+        debug_report_ref: Process.send_after(self(), :debug_report, debug_report_interval())
+      )
+    else
+      assign(socket, debug_report_ref: nil)
+    end
   end
 
   defp debug_report_interval,
@@ -1644,9 +1805,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   # debug_counts stays assigned (and static) when profiling is off so
   # nothing that reads the assign needs a nil guard.
-  defp bump_debug_count(socket, key) do
+  defp bump_debug_count(socket, key, delta \\ 1) do
     if Profiling.enabled?() do
-      update(socket, :debug_counts, &Map.update!(&1, key, fn n -> n + 1 end))
+      update(socket, :debug_counts, &Map.update!(&1, key, fn n -> n + delta end))
     else
       socket
     end
@@ -1850,67 +2011,97 @@ defmodule TimelessCanvas.Web.CanvasLive do
     |> assign(save_state: :dirty, autosave_failures: 0)
   end
 
-  # Persist the current canvas and track the outcome in save_state.
-  # Failures re-arm the timer with a longer delay so transient DB
-  # outages self-heal, up to @max_autosave_failures consecutive misses.
-  # A save happening now supersedes any armed timer (manual canvas:save
-  # while an autosave is pending), so cancel it first.
+  # Persist the current canvas without blocking the LiveView. Exactly one
+  # write is allowed in flight; if another save becomes due while it runs,
+  # a retry timer keeps the newest canvas state queued behind it.
   defp attempt_save(socket) do
-    socket = cancel_autosave_timer(socket)
-    socket = detect_stale_write(socket)
-    data = Serializer.encode(socket.assigns.canvas)
+    if socket.assigns.save_task_ref do
+      arm_autosave_timer(socket, autosave_retry_ms())
+    else
+      socket = cancel_autosave_timer(socket)
+      ref = make_ref()
+      canvas_id = socket.assigns.canvas_id
+      data = Serializer.encode(socket.assigns.canvas)
+      last_seen = socket.assigns.record_updated_at
 
-    case safe_update_canvas_data(socket.assigns.canvas_id, data) do
-      {:ok, record} ->
-        assign(socket,
-          save_state: :saved,
-          autosave_failures: 0,
-          record_updated_at: Map.get(record, :updated_at, socket.assigns.record_updated_at)
-        )
+      socket
+      |> assign(save_state: :saving, save_task_ref: ref)
+      |> start_async({:save_canvas, ref}, fn ->
+        observed_updated_at = current_record_updated_at(canvas_id)
 
-      {:error, reason} ->
-        failures = socket.assigns.autosave_failures + 1
-
-        Logger.error(
-          "[canvas] save failed for canvas #{socket.assigns.canvas_id} " <>
-            "(attempt #{failures}/#{@max_autosave_failures}): #{inspect(reason)}"
-        )
-
-        socket = assign(socket, save_state: :error, autosave_failures: failures)
-
-        if failures < @max_autosave_failures do
-          arm_autosave_timer(socket, autosave_retry_ms())
-        else
-          socket
-        end
+        %{
+          data: data,
+          observed_updated_at: observed_updated_at,
+          result: safe_update_canvas_data(canvas_id, data),
+          stale?: stale_record?(last_seen, observed_updated_at)
+        }
+      end)
     end
   end
 
-  # Multi-editor scope is last-write-wins (no merging) — but never a
-  # silent clobber: if the record's updated_at moved since our last
-  # successful write, another editor saved in between. We still save,
-  # and raise the (dismissable) warning banner once per detection.
-  defp detect_stale_write(socket) do
-    last_seen = socket.assigns.record_updated_at
-
-    case persistence().get_canvas(socket.assigns.canvas_id) do
-      {:ok, %{updated_at: updated_at}}
-      when not is_nil(last_seen) and updated_at != last_seen ->
-        Logger.warning(
-          "[canvas] concurrent save detected on canvas #{socket.assigns.canvas_id} — " <>
-            "overwriting (last-write-wins)"
-        )
-
-        assign(socket, stale_write_warning: true, record_updated_at: updated_at)
-
-      _ ->
-        socket
+  defp current_record_updated_at(canvas_id) do
+    case persistence().get_canvas(canvas_id) do
+      {:ok, record} -> Map.get(record, :updated_at)
+      _ -> nil
     end
   rescue
-    # A broken persistence layer must not block the save path; the write
-    # itself will surface the failure through save_state.
-    _exception -> socket
+    _exception -> nil
   end
+
+  defp stale_record?(nil, _observed), do: false
+  defp stale_record?(_last_seen, nil), do: false
+  defp stale_record?(last_seen, observed), do: last_seen != observed
+
+  defp finish_save(socket, %{result: {:ok, record}, data: saved_data} = outcome) do
+    if outcome.stale? do
+      Logger.warning(
+        "[canvas] concurrent save detected on canvas #{socket.assigns.canvas_id} — " <>
+          "overwriting (last-write-wins)"
+      )
+    end
+
+    current_data = Serializer.encode(socket.assigns.canvas)
+
+    socket =
+      assign(socket,
+        save_task_ref: nil,
+        autosave_failures: 0,
+        record_updated_at: Map.get(record, :updated_at, socket.assigns.record_updated_at),
+        stale_write_warning: socket.assigns.stale_write_warning or outcome.stale?
+      )
+
+    if current_data == saved_data do
+      socket
+      |> cancel_autosave_timer()
+      |> assign(save_state: :saved)
+    else
+      socket
+      |> assign(save_state: :dirty)
+      |> ensure_autosave_timer()
+    end
+  end
+
+  defp finish_save(socket, %{result: {:error, reason}}) do
+    failures = socket.assigns.autosave_failures + 1
+
+    Logger.error(
+      "[canvas] save failed for canvas #{socket.assigns.canvas_id} " <>
+        "(attempt #{failures}/#{@max_autosave_failures}): #{inspect(reason)}"
+    )
+
+    socket = assign(socket, save_state: :error, save_task_ref: nil, autosave_failures: failures)
+
+    if failures < @max_autosave_failures do
+      arm_autosave_timer(socket, autosave_retry_ms())
+    else
+      cancel_autosave_timer(socket)
+    end
+  end
+
+  defp ensure_autosave_timer(%{assigns: %{autosave_ref: nil}} = socket),
+    do: arm_autosave_timer(socket, autosave_ms())
+
+  defp ensure_autosave_timer(socket), do: socket
 
   defp safe_update_canvas_data(canvas_id, data) do
     case persistence().update_canvas_data(canvas_id, data) do
@@ -1941,8 +2132,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   @impl true
   def handle_event("canvas:pan", %{"dx" => dx, "dy" => dy}, socket) do
-    canvas = Canvas.pan(socket.assigns.canvas, dx, dy)
-    {:noreply, update_viewbox(socket, canvas.view_box)}
+    with {:ok, dx} <- client_float(dx), {:ok, dy} <- client_float(dy) do
+      canvas = Canvas.pan(socket.assigns.canvas, dx, dy)
+      {:noreply, update_viewbox(socket, canvas.view_box)}
+    else
+      _ -> {:noreply, socket}
+    end
   end
 
   def handle_event(
@@ -1950,16 +2145,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
         %{"min_x" => min_x, "min_y" => min_y, "width" => width, "height" => height},
         socket
       ) do
-    requested_vb = %ViewBox{
-      min_x: min_x / 1,
-      min_y: min_y / 1,
-      width: width / 1,
-      height: height / 1
-    }
-
-    vb = clamp_view_box(requested_vb)
-
-    {:noreply, update_viewbox(socket, vb)}
+    with {:ok, min_x} <- client_float(min_x),
+         {:ok, min_y} <- client_float(min_y),
+         {:ok, width} <- positive_client_float(width),
+         {:ok, height} <- positive_client_float(height) do
+      vb = clamp_view_box(%ViewBox{min_x: min_x, min_y: min_y, width: width, height: height})
+      {:noreply, update_viewbox(socket, vb)}
+    else
+      _ -> {:noreply, socket}
+    end
   end
 
   def handle_event("zoom_reset", _params, socket) do
@@ -2064,32 +2258,36 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_event("canvas:click", %{"x" => x, "y" => y}, socket) do
-    case socket.assigns.mode do
-      :place ->
-        require_edit(socket, fn ->
-          case socket.assigns.place_kind do
-            :host ->
-              host = socket.assigns.place_host
+    with {:ok, x} <- client_float(x), {:ok, y} <- client_float(y) do
+      case socket.assigns.mode do
+        :place ->
+          require_edit(socket, fn ->
+            case socket.assigns.place_kind do
+              :host ->
+                host = socket.assigns.place_host
 
-              if host do
-                place_host_element(socket, host, x / 1.0, y / 1.0)
-              else
-                {:noreply, socket}
-              end
+                if host do
+                  place_host_element(socket, host, x, y)
+                else
+                  {:noreply, socket}
+                end
 
-            type when type in [:rect, :canvas, :text, :text_series] ->
-              place_typed_element(socket, type, x / 1.0, y / 1.0)
-          end
-        end)
+              type when type in [:rect, :canvas, :text, :text_series] ->
+                place_typed_element(socket, type, x, y)
+            end
+          end)
 
-      :connect ->
-        {:noreply, assign(socket, connect_from: nil)}
+        :connect ->
+          {:noreply, assign(socket, connect_from: nil)}
 
-      :select ->
-        {:noreply,
-         socket
-         |> assign(selected_ids: MapSet.new(), stream_popover: nil)
-         |> reset_available_series()}
+        :select ->
+          {:noreply,
+           socket
+           |> assign(selected_ids: MapSet.new(), stream_popover: nil)
+           |> reset_available_series()}
+      end
+    else
+      _ -> {:noreply, socket}
     end
   end
 
@@ -2115,12 +2313,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("alert:save", params, socket) do
     require_edit(socket, fn ->
-      element = sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas)
+      element =
+        case sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas) do
+          %Element{id: id} -> Map.get(socket.assigns.resolved_elements, id)
+          _ -> nil
+        end
+
       attrs = Map.take(params, alert_form_fields())
 
       with %Element{} <- element,
+           backend when not is_nil(backend) <- TimelessCanvas.AlertSource.backend(),
            {:ok, attrs} <- validate_alert(attrs),
-           {:ok, _id} <- TimelessCanvas.AlertSource.backend().create_rule(element, attrs) do
+           {:ok, _id} <- backend.create_rule(element, attrs) do
         {:noreply, fetch_alert_rules(socket, element.id)}
       else
         {:error, message} when is_binary(message) ->
@@ -2128,6 +2332,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
         {:error, reason} ->
           {:noreply, assign(socket, alert_error: "Could not save alert: #{inspect(reason)}")}
+
+        nil ->
+          {:noreply, assign(socket, alert_error: "Alerting is not configured")}
 
         _ ->
           {:noreply, socket}
@@ -2138,13 +2345,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
   def handle_event("alert:delete", %{"id" => id}, socket) do
     require_edit(socket, fn ->
       element = sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas)
+      id = alert_id(id)
 
-      case TimelessCanvas.AlertSource.backend().delete_rule(alert_id(id)) do
-        :ok ->
-          {:noreply, fetch_alert_rules(socket, element.id)}
+      case {TimelessCanvas.AlertSource.backend(), element,
+            alert_id_in?(socket.assigns.alert_rules, id)} do
+        {nil, _, _} ->
+          {:noreply, assign(socket, alert_error: "Alerting is not configured")}
 
-        {:error, reason} ->
-          {:noreply, assign(socket, alert_error: "Could not delete alert: #{inspect(reason)}")}
+        {backend, %Element{} = element, true} ->
+          delete_alert_rule(backend, id, socket, element)
+
+        _ ->
+          {:noreply, assign(socket, alert_error: "Alert rule does not belong to this element")}
       end
     end)
   end
@@ -2153,13 +2365,66 @@ defmodule TimelessCanvas.Web.CanvasLive do
     require_edit(socket, fn ->
       element = sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas)
       enabled = params["value"] == "on"
+      id = alert_id(id)
 
-      case TimelessCanvas.AlertSource.backend().update_rule(alert_id(id), %{"enabled" => enabled}) do
+      case {TimelessCanvas.AlertSource.backend(), element,
+            alert_id_in?(socket.assigns.alert_rules, id)} do
+        {nil, _, _} ->
+          {:noreply, assign(socket, alert_error: "Alerting is not configured")}
+
+        {backend, %Element{} = element, true} ->
+          toggle_alert_rule(backend, id, enabled, socket, element)
+
+        _ ->
+          {:noreply, assign(socket, alert_error: "Alert rule does not belong to this element")}
+      end
+    end)
+  end
+
+  def handle_event("alerts:toggle_console", _params, socket) do
+    if socket.assigns.show_alert_console do
+      {:noreply, assign(socket, show_alert_console: false)}
+    else
+      {:noreply, socket |> assign(show_share: false) |> load_alert_console()}
+    end
+  end
+
+  def handle_event("alerts:close", _params, socket) do
+    {:noreply, assign(socket, show_alert_console: false)}
+  end
+
+  def handle_event("alerts:history", %{"id" => id}, socket) do
+    id = alert_id(id)
+
+    if alert_id_in?(socket.assigns.all_alert_rules, id) do
+      {:noreply, load_alert_history(socket, id)}
+    else
+      {:noreply, assign(socket, alert_console_error: "Alert rule is not available")}
+    end
+  end
+
+  def handle_event("alerts:acknowledge", %{"id" => id}, socket) do
+    require_edit(socket, fn ->
+      backend = TimelessCanvas.AlertSource.backend()
+      id = alert_id(id)
+
+      result =
+        if alert_id_in?(socket.assigns.alert_history, id) && backend &&
+             function_exported?(backend, :acknowledge_alert, 2) do
+          backend.acknowledge_alert(id, socket.assigns.current_user)
+        else
+          {:error, :unsupported}
+        end
+
+      case result do
         :ok ->
-          {:noreply, fetch_alert_rules(socket, element.id)}
+          {:noreply, load_alert_history(socket, socket.assigns.alert_history_rule_id)}
 
         {:error, reason} ->
-          {:noreply, assign(socket, alert_error: "Could not update alert: #{inspect(reason)}")}
+          {:noreply,
+           assign(socket,
+             alert_console_error: "Could not acknowledge alert: #{inspect(reason)}"
+           )}
       end
     end)
   end
@@ -2197,7 +2462,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
       %{type: :canvas, meta: %{"canvas_id" => canvas_id}} when canvas_id != "" ->
         if socket.assigns.can_edit and not socket.assigns.decode_failed? do
           data = Serializer.encode(socket.assigns.canvas)
-          persistence().update_canvas_data(socket.assigns.canvas_id, data)
+
+          case persistence().update_canvas_data(socket.assigns.canvas_id, data) do
+            {:ok, _record} -> :ok
+            error -> Logger.error("Could not save canvas before navigation: #{inspect(error)}")
+          end
         end
 
         {:noreply, push_navigate(socket, to: "#{socket.assigns.tc_base_path}/#{canvas_id}")}
@@ -2249,7 +2518,17 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_event("marquee:select", %{"ids" => ids}, socket) do
-    {:noreply, assign(socket, selected_ids: MapSet.new(ids))}
+    valid_ids =
+      Map.keys(socket.assigns.canvas.elements) ++ Map.keys(socket.assigns.canvas.connections)
+
+    selected =
+      ids
+      |> List.wrap()
+      |> Enum.take(1_000)
+      |> MapSet.new()
+      |> MapSet.intersection(MapSet.new(valid_ids))
+
+    {:noreply, assign(socket, selected_ids: selected)}
   end
 
   def handle_event("connection:select", %{"id" => id}, socket) do
@@ -2260,21 +2539,20 @@ defmodule TimelessCanvas.Web.CanvasLive do
     require_edit(
       socket,
       fn ->
-        selected_ids = socket.assigns.selected_ids
+        with {:ok, dx} <- client_float(dx), {:ok, dy} <- client_float(dy) do
+          selected_ids = socket.assigns.selected_ids
 
-        canvas =
-          if MapSet.member?(selected_ids, id) and MapSet.size(selected_ids) > 1 do
-            Canvas.move_elements(
-              socket.assigns.canvas,
-              MapSet.to_list(selected_ids),
-              dx / 1.0,
-              dy / 1.0
-            )
-          else
-            Canvas.move_element(socket.assigns.canvas, id, dx / 1.0, dy / 1.0)
-          end
+          canvas =
+            if MapSet.member?(selected_ids, id) and MapSet.size(selected_ids) > 1 do
+              Canvas.move_elements(socket.assigns.canvas, MapSet.to_list(selected_ids), dx, dy)
+            else
+              Canvas.move_element(socket.assigns.canvas, id, dx, dy)
+            end
 
-        {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
+          {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
+        else
+          _ -> {:noreply, socket}
+        end
       end,
       reset_element_id: id
     )
@@ -2284,8 +2562,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
     require_edit(
       socket,
       fn ->
-        canvas = Canvas.resize_element(socket.assigns.canvas, id, width / 1.0, height / 1.0)
-        {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
+        with {:ok, width} <- client_float(width), {:ok, height} <- client_float(height) do
+          canvas = Canvas.resize_element(socket.assigns.canvas, id, width, height)
+          {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
+        else
+          _ -> {:noreply, socket}
+        end
       end,
       reset_element_id: id
     )
@@ -2293,34 +2575,41 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("element:nudge", %{"dx" => dx, "dy" => dy}, socket) do
     require_edit(socket, fn ->
-      selected_ids = socket.assigns.selected_ids
-      element_ids = Enum.filter(selected_ids, &String.starts_with?(&1, "el-"))
+      with {:ok, dx} <- client_float(dx), {:ok, dy} <- client_float(dy) do
+        element_ids = Enum.filter(socket.assigns.selected_ids, &String.starts_with?(&1, "el-"))
 
-      case element_ids do
-        [] ->
-          {:noreply, socket}
+        case element_ids do
+          [] ->
+            {:noreply, socket}
 
-        ids ->
-          canvas = Canvas.move_elements(socket.assigns.canvas, ids, dx / 1.0, dy / 1.0)
-          {:noreply, push_canvas(socket, canvas) |> schedule_autosave()}
+          ids ->
+            {:noreply,
+             push_canvas(socket, Canvas.move_elements(socket.assigns.canvas, ids, dx, dy))
+             |> schedule_autosave()}
+        end
+      else
+        _ -> {:noreply, socket}
       end
     end)
   end
 
-  def handle_event("toggle_mode", %{"mode" => mode}, socket) do
-    {:noreply, assign(socket, mode: String.to_existing_atom(mode), connect_from: nil)}
+  def handle_event("toggle_mode", %{"mode" => mode}, socket)
+      when mode in ~w(select place connect) do
+    {:noreply, assign(socket, mode: mode_atom(mode), connect_from: nil)}
   end
 
   def handle_event("set_place_host", %{"host" => host}, socket) do
     {:noreply, assign(socket, place_host: host, host_filter: "", place_kind: :host)}
   end
 
-  def handle_event("set_host_type", %{"host_type" => type}, socket) do
-    {:noreply, assign(socket, place_host_type: String.to_existing_atom(type))}
+  def handle_event("set_host_type", %{"host_type" => type}, socket)
+      when type in ~w(server service database load_balancer queue cache router network) do
+    {:noreply, assign(socket, place_host_type: Element.normalize_type(type))}
   end
 
-  def handle_event("set_place_kind", %{"kind" => kind}, socket) do
-    {:noreply, assign(socket, place_kind: String.to_existing_atom(kind))}
+  def handle_event("set_place_kind", %{"kind" => kind}, socket)
+      when kind in ~w(rect canvas text text_series) do
+    {:noreply, assign(socket, place_kind: Element.normalize_type(kind))}
   end
 
   def handle_event("ta:open", %{"ta_id" => id}, socket) do
@@ -2469,11 +2758,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   # Escape cascade: the client sends one generic "canvas:escape" and the
-  # server closes the topmost transient UI first — share overlay, then
-  # stream popover, then typeahead dropdown, then place/connect mode back
+  # server closes the topmost transient UI first — alert/share overlays,
+  # then stream popover, then typeahead dropdown, then place/connect mode back
   # to select — and only deselects when none of those are open.
   def handle_event("canvas:escape", _params, socket) do
     cond do
+      socket.assigns.show_alert_console ->
+        {:noreply, assign(socket, show_alert_console: false)}
+
       socket.assigns.show_share ->
         {:noreply, assign(socket, show_share: false)}
 
@@ -2650,7 +2942,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_event("toggle_share", _params, socket) do
-    {:noreply, assign(socket, show_share: !socket.assigns.show_share)}
+    {:noreply,
+     assign(socket,
+       show_share: !socket.assigns.show_share,
+       show_alert_console: false
+     )}
   end
 
   def handle_event("close_share", _params, socket) do
@@ -2713,9 +3009,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
         Map.get(socket.assigns.resolved_elements, source_id) ||
           Map.get(socket.assigns.canvas.elements, source_id)
 
-      if source do
-        type = String.to_existing_atom(type_str)
-        host = source.meta["host"] || source.meta["service_name"]
+      if source && type_str in ~w(log_stream trace_stream) do
+        type = Element.normalize_type(type_str)
+        meta_source = source.meta || %{}
+        host = meta_source["host"] || meta_source["service_name"]
         defaults = Element.defaults_for(type)
 
         {place_x, place_y} =
@@ -2843,10 +3140,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
         socket =
           socket
           |> push_canvas(canvas)
-          |> fetch_metric_units()
-          |> fill_graph_data_at(time)
-          |> fill_stream_data_at(time)
           |> schedule_autosave()
+
+        canvas_id = socket.assigns.canvas_id
+        resolved = socket.assigns.resolved_elements
+        span = socket.assigns.timeline_span
+        fingerprint = socket.assigns.registration_fingerprint
+
+        socket =
+          start_async(socket, :variable_data, fn ->
+            load_element_data(canvas_id, resolved, time, span)
+            |> Map.put(:fingerprint, fingerprint)
+          end)
 
         {:noreply, socket}
       else
@@ -2956,14 +3261,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   def handle_event("canvas:save", _params, socket) do
     require_edit(socket, fn ->
       socket = attempt_save(socket)
-
-      case socket.assigns.save_state do
-        :saved ->
-          {:noreply, put_flash(socket, :info, "Canvas saved")}
-
-        _ ->
-          {:noreply, put_flash(socket, :error, "Failed to save canvas")}
-      end
+      {:noreply, put_flash(socket, :info, "Saving canvas…")}
     end)
   end
 
@@ -3126,6 +3424,53 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
   def handle_event("timeline:change", _params, socket) do
     {:noreply, socket}
+  end
+
+  # Client events are untrusted. Unknown names or malformed parameter
+  # shapes are ignored rather than terminating the LiveView process.
+  def handle_event(_event, _params, socket), do: {:noreply, socket}
+
+  defp delete_alert_rule(backend, id, socket, element) do
+    case backend.delete_rule(id) do
+      :ok ->
+        {:noreply, fetch_alert_rules(socket, element.id)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, alert_error: "Could not delete alert: #{inspect(reason)}")}
+    end
+  end
+
+  defp toggle_alert_rule(backend, id, enabled, socket, element) do
+    case backend.update_rule(id, %{"enabled" => enabled}) do
+      :ok ->
+        {:noreply, fetch_alert_rules(socket, element.id)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, alert_error: "Could not update alert: #{inspect(reason)}")}
+    end
+  end
+
+  defp mode_atom("select"), do: :select
+  defp mode_atom("place"), do: :place
+  defp mode_atom("connect"), do: :connect
+
+  defp client_float(value) when is_integer(value), do: {:ok, value / 1}
+  defp client_float(value) when is_float(value), do: {:ok, value}
+
+  defp client_float(value) when is_binary(value) do
+    case Float.parse(value) do
+      {number, ""} -> {:ok, number}
+      _ -> :error
+    end
+  end
+
+  defp client_float(_value), do: :error
+
+  defp positive_client_float(value) do
+    case client_float(value) do
+      {:ok, number} when number > 0 -> {:ok, number}
+      _ -> :error
+    end
   end
 
   defp update_element_meta(socket, element, params) do
@@ -3302,20 +3647,31 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_info({:element_status, element_id, status}, socket) do
-    socket = bump_debug_count(socket, :status_msgs)
+    pending = Process.get(@pending_statuses_key, %{})
+    if pending == %{}, do: send(self(), :flush_element_statuses)
+    Process.put(@pending_statuses_key, Map.put(pending, element_id, status))
+    {:noreply, socket}
+  end
+
+  def handle_info(:flush_element_statuses, socket) do
+    statuses = Process.delete(@pending_statuses_key) || %{}
+    socket = bump_debug_count(socket, :status_msgs, map_size(statuses))
 
     if socket.assigns.timeline_mode == :live do
-      canvas = Canvas.set_element_status(socket.assigns.canvas, element_id, status)
+      statuses =
+        Map.filter(statuses, fn {_id, status} -> status in [:ok, :warning, :error, :unknown] end)
+
+      canvas = apply_statuses(socket.assigns.canvas, statuses)
       history = %{socket.assigns.history | present: canvas}
 
-      # The SVG renders @resolved_elements, not @canvas.elements: mirror
-      # the status there too, or the change stays invisible until the
-      # next full re-resolve.
       resolved_elements =
-        case Map.get(socket.assigns.resolved_elements, element_id) do
-          nil -> socket.assigns.resolved_elements
-          el -> Map.put(socket.assigns.resolved_elements, element_id, %{el | status: status})
-        end
+        Enum.reduce(statuses, socket.assigns.resolved_elements, fn {element_id, status},
+                                                                   resolved ->
+          case Map.get(resolved, element_id) do
+            nil -> resolved
+            el -> Map.put(resolved, element_id, %{el | status: status})
+          end
+        end)
 
       {:noreply,
        assign(socket, history: history, canvas: canvas, resolved_elements: resolved_elements)}
@@ -3346,13 +3702,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
           nil ->
             socket
 
-          expanded_id ->
+          expanded_id when is_map_key(diffs.graph_data, expanded_id) ->
             assign(socket, expanded_graph_data: fetch_expanded_data(socket, expanded_id))
+
+          _expanded_id ->
+            socket
         end
 
       # Deliver the tick as push_events; the diff cache inside
       # push_graph_data limits the pushes to the changed elements.
-      {:noreply, push_graph_data(socket)}
+      {:noreply, push_graph_data(socket, Map.keys(diffs.graph_data))}
     else
       {:noreply, socket}
     end
@@ -3363,15 +3722,31 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # the prepend order of the old per-entry broadcasts). Live entries are
   # still dropped while scrubbed into historical mode.
   def handle_info({:stream_entries, element_id, new_entries}, socket) do
-    socket = bump_debug_count(socket, :stream_entry_msgs)
-
-    merge_stream_entries(socket, element_id, new_entries)
+    queue_stream_entries(element_id, new_entries, :stream_entry_msgs)
+    {:noreply, socket}
   end
 
   def handle_info({:stream_spans, element_id, new_spans}, socket) do
-    socket = bump_debug_count(socket, :stream_span_msgs)
+    queue_stream_entries(element_id, new_spans, :stream_span_msgs)
+    {:noreply, socket}
+  end
 
-    merge_stream_entries(socket, element_id, new_spans)
+  def handle_info(:flush_stream_updates, socket) do
+    pending = Process.delete(@pending_streams_key) || %{}
+
+    socket =
+      Enum.reduce(pending, socket, fn {element_id, %{entries: entries}}, acc ->
+        put_stream_entries(acc, element_id, entries)
+      end)
+
+    counts = Enum.frequencies_by(Map.values(pending), & &1.counter)
+
+    socket =
+      socket
+      |> bump_debug_count(:stream_entry_msgs, Map.get(counts, :stream_entry_msgs, 0))
+      |> bump_debug_count(:stream_span_msgs, Map.get(counts, :stream_span_msgs, 0))
+
+    {:noreply, socket}
   end
 
   def handle_info({:autosave, ref}, socket) do
@@ -3425,9 +3800,24 @@ defmodule TimelessCanvas.Web.CanvasLive do
      |> schedule_debug_report()}
   end
 
-  defp merge_stream_entries(socket, element_id, new_entries) do
-    if @profile_skip_stream_updates or socket.assigns.timeline_mode != :live do
-      {:noreply, socket}
+  def handle_info(_message, socket), do: {:noreply, socket}
+
+  defp queue_stream_entries(element_id, new_entries, counter) do
+    pending = Process.get(@pending_streams_key, %{})
+    if pending == %{}, do: send(self(), :flush_stream_updates)
+
+    existing = Map.get(pending, element_id, %{entries: [], counter: counter})
+
+    Process.put(
+      @pending_streams_key,
+      Map.put(pending, element_id, %{existing | entries: new_entries ++ existing.entries})
+    )
+  end
+
+  defp put_stream_entries(socket, element_id, new_entries) do
+    if @profile_skip_stream_updates or socket.assigns.timeline_mode != :live or
+         not Map.has_key?(socket.assigns.resolved_elements, element_id) do
+      socket
     else
       stream_data = socket.assigns.stream_data
 
@@ -3440,11 +3830,52 @@ defmodule TimelessCanvas.Web.CanvasLive do
         end
         |> Enum.take(DataQueries.max_stream_entries())
 
-      {:noreply, assign(socket, stream_data: Map.put(stream_data, element_id, entries))}
+      assign(socket, stream_data: Map.put(stream_data, element_id, entries))
     end
   end
 
   # --- Async initial data load ---
+
+  @impl true
+  def handle_async({:save_canvas, ref}, {:ok, result}, socket) do
+    if socket.assigns.save_task_ref == ref do
+      {:noreply, finish_save(socket, result)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_async({:save_canvas, ref}, {:exit, reason}, socket) do
+    if socket.assigns.save_task_ref == ref do
+      {:noreply, finish_save(socket, %{result: {:error, reason}, stale?: false})}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_async(:variable_data, {:ok, %{fingerprint: fingerprint} = data}, socket) do
+    if fingerprint == socket.assigns.registration_fingerprint do
+      ids = Map.keys(socket.assigns.resolved_elements)
+
+      socket =
+        assign(socket,
+          metric_units: Map.take(data.metric_units, ids),
+          graph_data: socket.assigns.graph_data |> Map.merge(data.graph_data) |> Map.take(ids),
+          text_data: socket.assigns.text_data |> Map.merge(data.text_data) |> Map.take(ids),
+          stream_data: socket.assigns.stream_data |> Map.merge(data.stream_data) |> Map.take(ids)
+        )
+
+      {:noreply, push_graph_data(socket, Map.keys(data.graph_data))}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_async(:variable_data, {:exit, reason}, socket) do
+    Logger.warning("[canvas] variable data refresh failed: #{inspect(reason)}")
+    {:noreply, socket}
+  end
 
   @impl true
   def handle_async(:initial_data, {:ok, data}, socket) do
@@ -3504,10 +3935,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # none of them touching the socket. Per-element backfill queries run
   # concurrently (queries execute in the calling process since Phase 1b).
   defp load_initial_data(canvas_id, resolved_elements, span) do
-    data_range = query_data_range()
+    data_range_task = async_query(&query_data_range/0)
+    host_task = async_query(&query_host_probe/0)
+
+    data_range = await_query(data_range_task)
     {timeline_mode, timeline_time} = seed_timeline(data_range, span)
     initial_time = timeline_time || DateTime.utc_now()
-    {hosts_available?, place_host} = query_host_probe()
+    {hosts_available?, place_host} = await_query(host_task)
+    density_task = async_query(fn -> query_density_buckets(data_range) end)
+    element_data = load_element_data(canvas_id, resolved_elements, initial_time, span)
 
     %{
       span: span,
@@ -3516,12 +3952,45 @@ defmodule TimelessCanvas.Web.CanvasLive do
       timeline_time: timeline_time,
       hosts_available?: hosts_available?,
       place_host: place_host,
-      metric_units: query_metric_units(resolved_elements),
-      density_buckets: query_density_buckets(data_range),
-      graph_data: query_graph_data(canvas_id, resolved_elements, initial_time, span),
-      text_data: query_text_data(canvas_id, resolved_elements, initial_time),
-      stream_data: query_stream_data(resolved_elements, initial_time, span)
+      metric_units: element_data.metric_units,
+      density_buckets: await_query(density_task),
+      graph_data: element_data.graph_data,
+      text_data: element_data.text_data,
+      stream_data: element_data.stream_data
     }
+  end
+
+  defp load_element_data(canvas_id, resolved_elements, time, span) do
+    tasks = %{
+      metric_units: async_query(fn -> query_metric_units(resolved_elements) end),
+      graph_data:
+        async_query(fn -> query_graph_data(canvas_id, resolved_elements, time, span) end),
+      text_data: async_query(fn -> query_text_data(canvas_id, resolved_elements, time) end),
+      stream_data: async_query(fn -> query_stream_data(resolved_elements, time, span) end)
+    }
+
+    Map.new(tasks, fn {key, task} -> {key, await_query(task)} end)
+  end
+
+  # A nested linked Task must return its failure as data. The outer
+  # LiveView async task then raises it in its own process, allowing
+  # handle_async/3 to receive `{:exit, reason}` instead of link-propagating
+  # the child failure into the LiveView/test process.
+  defp async_query(fun) do
+    Task.async(fn ->
+      try do
+        {:ok, fun.()}
+      catch
+        kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+      end
+    end)
+  end
+
+  defp await_query(task) do
+    case Task.await(task, 30_000) do
+      {:ok, result} -> result
+      {:raised, kind, reason, stacktrace} -> :erlang.raise(kind, reason, stacktrace)
+    end
   end
 
   # --- Guards ---
@@ -4198,11 +4667,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  defp alert_id(id), do: id
+
+  defp alert_id_in?(items, id) do
+    Enum.any?(items, &(alert_id(alert_rule_field(&1, :id)) == id))
+  end
+
   # Refused rather than coerced. A blank threshold saved as 0 would fire
   # constantly on any "above" rule, and the operator would have no idea why.
   defp validate_alert(attrs) do
     with {:ok, threshold} <- parse_number(attrs["threshold"], "Threshold"),
-         {:ok, duration} <- parse_non_negative_integer(attrs["duration"] || "0", "Duration") do
+         {:ok, duration} <- parse_non_negative_integer(attrs["duration"] || "0", "Duration"),
+         :ok <- validate_delivery_format(attrs) do
       name = String.trim(attrs["name"] || "")
 
       if name == "" do
@@ -4215,6 +4691,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
          |> Map.put("duration", duration)}
       end
     end
+  end
+
+  defp validate_delivery_format(attrs) do
+    url = String.trim(attrs["webhook_url"] || "")
+    format = String.trim(attrs["webhook_format"] || "")
+
+    if url != "" and format == "",
+      do: {:error, "Notification format is required when a URL is set"},
+      else: :ok
   end
 
   defp parse_number(value, field) do
@@ -4241,26 +4726,41 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
     cond do
       is_nil(backend) or is_nil(element) ->
-        assign(socket, alert_rules: [], alert_form: nil, alert_error: nil)
+        set_alert_rules(socket, nil, [], nil)
 
       not alertable?(element) ->
-        assign(socket, alert_rules: [], alert_form: nil, alert_error: nil)
+        set_alert_rules(socket, nil, [], nil)
 
       true ->
         case backend.list_rules(element) do
           {:ok, rules} ->
-            assign(socket, alert_rules: rules, alert_form: nil, alert_error: nil)
+            set_alert_rules(socket, element_id, rules, nil)
 
           {:error, reason} ->
             # Say so rather than showing an empty list, which would read as
             # "no alerts on this" — the most misleading possible answer.
-            assign(socket,
-              alert_rules: [],
-              alert_form: nil,
-              alert_error: "Could not load alerts: #{inspect(reason)}"
+            set_alert_rules(
+              socket,
+              element_id,
+              [],
+              "Could not load alerts: #{inspect(reason)}"
             )
         end
     end
+  end
+
+  defp set_alert_rules(socket, element_id, rules, error) do
+    previous_id = socket.assigns.alert_element_id
+
+    socket =
+      assign(socket,
+        alert_element_id: element_id,
+        alert_rules: rules,
+        alert_form: nil,
+        alert_error: error
+      )
+
+    push_graph_data(socket, Enum.reject([previous_id, element_id], &is_nil/1))
   end
 
   # Only elements that select a metric can carry a threshold.
@@ -4300,6 +4800,94 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  defp central_alerts_supported? do
+    backend = TimelessCanvas.AlertSource.backend()
+    backend && Code.ensure_loaded?(backend) && function_exported?(backend, :list_all_rules, 1)
+  end
+
+  defp load_alert_console(socket) do
+    backend = TimelessCanvas.AlertSource.backend()
+
+    case backend && backend.list_all_rules(socket.assigns.current_user) do
+      {:ok, rules} when is_list(rules) ->
+        assign(socket,
+          show_alert_console: true,
+          all_alert_rules: rules,
+          alert_history: [],
+          alert_history_rule_id: nil,
+          alert_console_error: nil
+        )
+
+      {:error, reason} ->
+        assign(socket,
+          show_alert_console: true,
+          all_alert_rules: [],
+          alert_console_error: "Could not load alert rules: #{inspect(reason)}"
+        )
+
+      _ ->
+        assign(socket,
+          show_alert_console: true,
+          all_alert_rules: [],
+          alert_console_error: "Central alert management is not supported"
+        )
+    end
+  rescue
+    error ->
+      assign(socket,
+        show_alert_console: true,
+        all_alert_rules: [],
+        alert_console_error: "Could not load alert rules: #{Exception.message(error)}"
+      )
+  end
+
+  defp load_alert_history(socket, rule_id) do
+    backend = TimelessCanvas.AlertSource.backend()
+
+    result =
+      if backend && function_exported?(backend, :list_history, 2),
+        do: backend.list_history(rule_id, limit: 50),
+        else: {:error, :unsupported}
+
+    case result do
+      {:ok, history} when is_list(history) ->
+        assign(socket,
+          alert_history: history,
+          alert_history_rule_id: rule_id,
+          alert_console_error: nil
+        )
+
+      {:error, reason} ->
+        assign(socket, alert_console_error: "Could not load alert history: #{inspect(reason)}")
+    end
+  rescue
+    error ->
+      assign(socket,
+        alert_console_error: "Could not load alert history: #{Exception.message(error)}"
+      )
+  end
+
+  defp alert_rule_field(rule, key, default \\ nil)
+
+  defp alert_rule_field(rule, key, default) when is_map(rule),
+    do: Map.get(rule, key, Map.get(rule, Atom.to_string(key), default))
+
+  defp alert_rule_field(_rule, _key, default), do: default
+
+  defp orphaned_alert_rule?(rule, canvas_id, elements) do
+    element_id = alert_rule_field(rule, :element_id)
+    rule_canvas_id = alert_rule_field(rule, :canvas_id)
+
+    not is_nil(element_id) and rule_canvas_id in [nil, canvas_id] and
+      not Map.has_key?(elements, to_string(element_id))
+  end
+
+  defp alert_history_label(entry) do
+    status = alert_rule_field(entry, :status, alert_rule_field(entry, :state, "alert"))
+    timestamp = alert_rule_field(entry, :fired_at, alert_rule_field(entry, :inserted_at))
+    if timestamp, do: "#{status} · #{timestamp}", else: to_string(status)
+  end
+
   defp default_delivery_format do
     case delivery_formats() do
       [{value, _label} | _] -> value
@@ -4322,13 +4910,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
           # Empty is ambiguous: a host with no series and a cache that has not
           # answered yet look identical. Only the backend can tell them apart.
-          assign(socket,
+          socket
+          |> assign(
             available_series: grouped,
             series_filter: filter,
             series_truncated: length(series) >= @series_limit,
             series_loading: grouped == [] and not StatusManager.series_loaded?(host),
             series_host: host
           )
+          |> manage_series_subscription(grouped == [] and not StatusManager.series_loaded?(host))
         else
           reset_available_series(socket)
         end
@@ -4339,13 +4929,27 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp reset_available_series(socket) do
-    assign(socket,
+    socket
+    |> assign(
       available_series: [],
       series_filter: "",
       series_truncated: false,
       series_loading: false,
       series_host: nil
     )
+    |> manage_series_subscription(false)
+  end
+
+  defp manage_series_subscription(socket, loading?) do
+    if connected?(socket) do
+      if loading? do
+        Phoenix.PubSub.subscribe(pubsub(), StatusManager.series_topic())
+      else
+        Phoenix.PubSub.unsubscribe(pubsub(), StatusManager.series_topic())
+      end
+    end
+
+    socket
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -4403,7 +5007,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp maybe_put_atom(map, _key, nil), do: map
   defp maybe_put_atom(map, _key, ""), do: map
 
-  defp maybe_put_atom(map, key, val) when is_binary(val) do
-    Map.put(map, key, String.to_existing_atom(val))
+  defp maybe_put_atom(map, :type, val) when is_binary(val) do
+    type = Element.normalize_type(val)
+    if Atom.to_string(type) == val, do: Map.put(map, :type, type), else: map
   end
+
+  defp maybe_put_atom(map, :style, "solid"), do: Map.put(map, :style, :solid)
+  defp maybe_put_atom(map, :style, "dashed"), do: Map.put(map, :style, :dashed)
+  defp maybe_put_atom(map, :style, "dotted"), do: Map.put(map, :style, :dotted)
+  defp maybe_put_atom(map, _key, _val), do: map
 end

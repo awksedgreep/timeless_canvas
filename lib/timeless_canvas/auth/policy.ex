@@ -16,17 +16,19 @@ defmodule TimelessCanvas.Auth.Policy do
   defp repo, do: TimelessCanvas.repo()
 
   @impl true
-  def admin?(%{role: "admin"}), do: true
+  def admin?(%{role: role}) when role in ["admin", :admin], do: true
   def admin?(_), do: false
 
   @impl true
-  def authorize(user, canvas_record, action) do
+  def authorize(%{id: user_id} = user, %{id: canvas_id, user_id: owner_id}, action) do
     cond do
       admin?(user) -> :ok
-      canvas_record.user_id == user.id -> :ok
-      true -> check_access(user.id, canvas_record.id, action)
+      owner_id == user_id -> :ok
+      true -> check_access(user_id, canvas_id, action)
     end
   end
+
+  def authorize(_user, _canvas_record, _action), do: {:error, :unauthorized}
 
   defp check_access(user_id, canvas_id, action) do
     case get_role(user_id, canvas_id) do
@@ -40,6 +42,8 @@ defmodule TimelessCanvas.Auth.Policy do
     |> where([a], a.user_id == ^user_id and a.canvas_id == ^canvas_id)
     |> select([a], a.role)
     |> repo().one()
+  rescue
+    _ -> nil
   end
 
   defp check_role(:owner, _action), do: :ok
@@ -48,4 +52,5 @@ defmodule TimelessCanvas.Auth.Policy do
   defp check_role(:editor, _), do: {:error, :unauthorized}
   defp check_role(:viewer, :view), do: :ok
   defp check_role(:viewer, _), do: {:error, :unauthorized}
+  defp check_role(_, _), do: {:error, :unauthorized}
 end

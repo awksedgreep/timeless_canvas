@@ -11,11 +11,10 @@
 # non-E2E settings: no HTTP server and an effectively-infinite poll interval,
 # so every measured operation is triggered explicitly — no background timer
 # noise. Phoenix.LiveViewTest helpers demand an ExUnit test-process
-# supervisor, so the script starts ExUnit (autorun: false) and registers the
-# bench process with ExUnit.OnExitHandler; that is the one private-API touch
-# and it is confined to this file. The alternative (an ExUnit file tagged
-# :bench) was rejected because PLAN pins the `mix run bench/canvas_bench.exs`
-# entry point and this turned out to work without a fight.
+# supervisor, so this script defines one `:bench`-tagged ExUnit case and runs
+# it explicitly with the public ExUnit API. This keeps the pinned
+# `mix run bench/canvas_bench.exs` entry point without depending on ExUnit
+# internals.
 #
 # The bench never runs under `mix test`: bench/ is outside the test paths and
 # nothing in test/ references it.
@@ -99,6 +98,8 @@ TimelessCanvas.Test.FakeDataSource.ensure_table!()
 ExUnit.start(autorun: false)
 
 defmodule CanvasBench do
+  use ExUnit.Case, async: false
+
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
@@ -119,10 +120,12 @@ defmodule CanvasBench do
 
   # --- Entry point ---
 
-  def main do
-    # LiveViewTest helpers require an ExUnit test-process supervisor.
-    ExUnit.OnExitHandler.register(self())
+  @tag :bench
+  test "canvas load benchmark" do
+    main()
+  end
 
+  def main do
     print_machine_header()
 
     {timings, memories} =
@@ -164,6 +167,11 @@ defmodule CanvasBench do
     diff100 = bench_merge_push(view, record.id, :all_changed, graph_ids)
 
     {undo, redo} = bench_undo_redo(view)
+
+    # The poller is a separate process with an intentionally long linger.
+    # Stop it before sampling so completed scenarios cannot leave lifecycle
+    # registrations or queued broadcasts in later memory measurements.
+    if poller = CanvasPoller.whereis(record.id), do: GenServer.stop(poller)
     memory = measure_memory(view, n)
 
     GenServer.stop(view.pid)
@@ -421,6 +429,8 @@ defmodule CanvasBench do
     Enum.each(1..@warmup, fn i -> fun.(i) end)
 
     for i <- 1..@iterations do
+      # Keep garbage from the previous iteration outside the next sample.
+      :erlang.garbage_collect(self())
       t0 = System.monotonic_time(:microsecond)
       fun.(@warmup + i)
       System.monotonic_time(:microsecond) - t0
@@ -439,8 +449,9 @@ defmodule CanvasBench do
 
   defp percentile(times, p) do
     sorted = Enum.sort(times)
-    index = min(round(p / 100 * length(sorted) + 0.5) - 1, length(sorted) - 1)
-    Enum.at(sorted, max(index, 0))
+    # Nearest-rank percentile: rank = ceil(p / 100 * N), one-indexed.
+    rank = ceil(p / 100 * length(sorted))
+    Enum.at(sorted, max(rank - 1, 0))
   end
 
   defp fmt_ms(us), do: :erlang.float_to_binary(us / 1000, decimals: 2)
@@ -530,4 +541,4 @@ defmodule CanvasBench do
   defp fmt_kib(bytes), do: :erlang.float_to_binary(bytes / 1024, decimals: 1)
 end
 
-CanvasBench.main()
+ExUnit.run()

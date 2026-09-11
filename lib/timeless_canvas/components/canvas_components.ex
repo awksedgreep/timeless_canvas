@@ -1026,26 +1026,19 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   defp icon_image_src("data:" <> _ = src), do: src
 
   defp icon_image_src(icon) do
+    if IconCatalog.catalog_icon?(icon) do
+      cached_icon_image_src(icon)
+    else
+      prepare_icon_image_src(icon)
+    end
+  end
+
+  defp cached_icon_image_src(icon) do
     key = {__MODULE__, :icon_image_src, icon}
 
     case :persistent_term.get(key, :missing) do
       :missing ->
-        src =
-          try do
-            case Iconify.prepare(%{icon: icon, __changed__: nil}, mode: :img) do
-              {:img, _fun, %{src: src}} -> src
-              _other -> nil
-            end
-          rescue
-            e ->
-              Logger.warning(
-                "TimelessCanvas: cannot render icon #{inspect(icon)} " <>
-                  "(#{Exception.message(e)}); rendering without an icon. " <>
-                  "Pre-generate icon assets or install @iconify/json to fix."
-              )
-
-              nil
-          end
+        src = prepare_icon_image_src(icon)
 
         :persistent_term.put(key, src)
         src
@@ -1053,6 +1046,22 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       src ->
         src
     end
+  end
+
+  defp prepare_icon_image_src(icon) do
+    case Iconify.prepare(%{icon: icon, __changed__: nil}, mode: :img) do
+      {:img, _fun, %{src: src}} -> src
+      _other -> nil
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "TimelessCanvas: cannot render icon #{inspect(icon)} " <>
+          "(#{Exception.message(e)}); rendering without an icon. " <>
+          "Pre-generate icon assets or install @iconify/json to fix."
+      )
+
+      nil
   end
 
   # No-op unless profiling is enabled: the process-dictionary counters
@@ -1214,12 +1223,12 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   `status` field ("ok" | "empty" | "error") plus a `status_pos` so the
   client hook can draw a distinct "no data" / "data unavailable" state.
   """
-  def compact_graph_payload(element, graph_data, unit) do
+  def compact_graph_payload(element, graph_data, unit, alert_rules \\ []) do
     {status, points_newest_first} = graph_data_status(graph_data)
     points = Enum.reverse(points_newest_first)
     meta = element.meta || %{}
 
-    {plot_x, plot_y, plot_w, plot_h, min_val, _max_val, val_range, y_ticks, x_ticks,
+    {plot_x, plot_y, plot_w, plot_h, min_val, max_val, val_range, y_ticks, x_ticks,
      polyline_points} = compact_graph_geometry(element, points, meta)
 
     grid =
@@ -1264,6 +1273,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       y_labels: y_labels,
       x_labels: x_labels,
       value: value,
+      thresholds: alert_thresholds(alert_rules, plot_x, plot_y, plot_w, plot_h, min_val, max_val),
       value_pos: %{x: element.x + element.width - 18, y: element.y + 10}
     }
   end
@@ -1275,7 +1285,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   or `:error` — see `compact_graph_payload/3`). Mirrors the geometry the
   expanded body used to render server-side, at 2x element size.
   """
-  def expanded_graph_payload(element, graph_data, unit) do
+  def expanded_graph_payload(element, graph_data, unit, alert_rules \\ []) do
     {status, points_newest_first} = graph_data_status(graph_data)
     render_w = element.width * 2
     render_h = element.height * 2
@@ -1375,10 +1385,34 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       y_labels: y_labels,
       x_labels: x_labels,
       value: current_val,
+      thresholds: alert_thresholds(alert_rules, plot_x, plot_y, plot_w, plot_h, min_val, max_val),
       # Absolute coordinates of the legend value text (the legend chrome
       # itself is server-rendered).
       value_pos: %{x: element.x + render_w - 52, y: element.y + 13}
     }
+  end
+
+  defp alert_thresholds(rules, plot_x, plot_y, plot_w, plot_h, min_val, max_val) do
+    range = max(max_val - min_val, 0.001)
+
+    rules
+    |> Enum.filter(&(rule_value(&1, :enabled, true) && is_number(rule_value(&1, :threshold))))
+    |> Enum.map(fn rule ->
+      threshold = rule_value(rule, :threshold)
+      y = plot_y + (1 - (threshold - min_val) / range) * plot_h
+
+      %{
+        x1: plot_x,
+        x2: plot_x + plot_w,
+        y: Float.round(y, 1),
+        label: rule_value(rule, :name, "Alert")
+      }
+    end)
+    |> Enum.filter(&(&1.y >= plot_y and &1.y <= plot_y + plot_h))
+  end
+
+  defp rule_value(rule, key, default \\ nil) do
+    Map.get(rule, key, Map.get(rule, Atom.to_string(key), default))
   end
 
   # Split the graph_data assign shape into {status, point_list}: a down
@@ -1499,12 +1533,13 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     min_val = graph_bound_min(meta, data_min)
     max_val = parse_graph_bound(meta["y_max"], data_max)
     val_range = max(max_val - min_val, 0.001)
+    count = length(points)
 
     polyline_points =
       points
       |> Enum.with_index()
       |> Enum.map(fn {{_ts, val}, i} ->
-        x = plot_x + i / max(length(points) - 1, 1) * plot_w
+        x = plot_x + i / max(count - 1, 1) * plot_w
         clamped = max(min(val, max_val), min_val)
         y = plot_y + (1 - (clamped - min_val) / val_range) * plot_h
         "#{Float.round(x, 1)},#{Float.round(y, 1)}"

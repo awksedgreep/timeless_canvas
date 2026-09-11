@@ -22,17 +22,13 @@ defmodule TimelessCanvas.Persistence.Ecto do
 
   @impl true
   def save_canvas(user_id, name, data) do
-    case repo().get_by(CanvasRecord, user_id: user_id, name: name) do
-      nil ->
-        %CanvasRecord{}
-        |> CanvasRecord.changeset(%{user_id: user_id, name: name, data: data})
-        |> repo().insert()
-
-      existing ->
-        existing
-        |> CanvasRecord.changeset(%{data: data})
-        |> repo().update()
-    end
+    %CanvasRecord{}
+    |> CanvasRecord.changeset(%{user_id: user_id, name: name, data: data})
+    |> repo().insert(
+      on_conflict: {:replace, [:data, :updated_at]},
+      conflict_target: [:user_id, :name],
+      returning: true
+    )
   end
 
   @impl true
@@ -89,29 +85,35 @@ defmodule TimelessCanvas.Persistence.Ecto do
   @impl true
   def delete_canvas(id, user_id) do
     case repo().get_by(CanvasRecord, id: id, user_id: user_id) do
-      nil -> {:error, :not_found}
-      record -> repo().delete(record)
+      nil ->
+        {:error, :not_found}
+
+      record ->
+        repo().transaction(fn ->
+          from(a in CanvasAccess, where: a.canvas_id == ^record.id) |> repo().delete_all()
+
+          from(c in CanvasRecord, where: c.parent_id == ^record.id)
+          |> repo().update_all(set: [parent_id: nil])
+
+          case repo().delete(record) do
+            {:ok, deleted} -> deleted
+            {:error, reason} -> repo().rollback(reason)
+          end
+        end)
+        |> unwrap_transaction()
     end
   end
 
   @impl true
   def list_accessible_canvases(user) do
-    owned =
-      CanvasRecord
-      |> where([c], c.user_id == ^user.id)
-
-    shared_ids =
-      CanvasAccess
-      |> where([a], a.user_id == ^user.id)
-      |> select([a], a.canvas_id)
-
-    shared =
-      CanvasRecord
-      |> where([c], c.id in subquery(shared_ids))
-
-    union_query = union(owned, ^shared)
-
-    from(c in subquery(union_query), order_by: [asc: c.name])
+    from(c in CanvasRecord,
+      left_join: a in CanvasAccess,
+      on: a.canvas_id == c.id and a.user_id == ^user.id,
+      where: c.user_id == ^user.id or not is_nil(a.id),
+      distinct: true,
+      order_by: [asc: c.name, asc: c.id],
+      limit: 500
+    )
     |> repo().all()
   end
 
@@ -119,16 +121,29 @@ defmodule TimelessCanvas.Persistence.Ecto do
   def breadcrumb_chain(canvas_id) do
     case repo().get(CanvasRecord, canvas_id) do
       nil -> []
-      record -> build_chain(record, [{record.id, record.name}])
+      record -> build_chain(record, [{record.id, record.name}], MapSet.new([record.id]), 1)
     end
   end
 
-  defp build_chain(%{parent_id: nil}, acc), do: acc
+  defp build_chain(%{parent_id: nil}, acc, _visited, _depth), do: acc
+  defp build_chain(_record, acc, _visited, depth) when depth >= 50, do: acc
 
-  defp build_chain(%{parent_id: parent_id}, acc) do
-    case repo().get(CanvasRecord, parent_id) do
-      nil -> acc
-      parent -> build_chain(parent, [{parent.id, parent.name} | acc])
+  defp build_chain(%{parent_id: parent_id}, acc, visited, depth) do
+    if MapSet.member?(visited, parent_id) do
+      acc
+    else
+      case repo().get(CanvasRecord, parent_id) do
+        nil ->
+          acc
+
+        parent ->
+          build_chain(
+            parent,
+            [{parent.id, parent.name} | acc],
+            MapSet.put(visited, parent.id),
+            depth + 1
+          )
+      end
     end
   end
 
@@ -152,10 +167,19 @@ defmodule TimelessCanvas.Persistence.Ecto do
 
   @impl true
   def list_access(canvas_id) do
-    CanvasAccess
-    |> where([a], a.canvas_id == ^canvas_id)
-    |> preload(:user)
-    |> repo().all()
+    accesses = CanvasAccess |> where([a], a.canvas_id == ^canvas_id) |> repo().all()
+
+    users =
+      case TimelessCanvas.user_schema() do
+        nil ->
+          %{}
+
+        schema ->
+          ids = Enum.map(accesses, & &1.user_id)
+          schema |> where([u], u.id in ^ids) |> repo().all() |> Map.new(&{&1.id, &1})
+      end
+
+    Enum.map(accesses, &%{&1 | user: Map.get(users, &1.user_id)})
   end
 
   @impl true
@@ -165,4 +189,7 @@ defmodule TimelessCanvas.Persistence.Ecto do
       schema -> repo().get_by(schema, username: username)
     end
   end
+
+  defp unwrap_transaction({:ok, value}), do: {:ok, value}
+  defp unwrap_transaction({:error, reason}), do: {:error, reason}
 end

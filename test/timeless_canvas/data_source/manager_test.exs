@@ -33,7 +33,13 @@ defmodule TimelessCanvas.DataSource.ManagerTest do
     @moduledoc "Backend exporting none of the optional callbacks."
   end
 
+  defmodule AlertStatuses do
+    @moduledoc false
+    def statuses(elements), do: Map.new(elements, &{&1.id, :error})
+  end
+
   setup do
+    Manager.reset()
     FakeDataSource.reset()
     snapshot = snapshot_rows()
 
@@ -43,6 +49,26 @@ defmodule TimelessCanvas.DataSource.ManagerTest do
     end)
 
     :ok
+  end
+
+  test "alert status is merged with source health using the worse severity" do
+    previous = Application.get_env(:timeless_canvas, :alert_backend)
+    Application.put_env(:timeless_canvas, :alert_backend, AlertStatuses)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:timeless_canvas, :alert_backend, previous),
+        else: Application.delete_env(:timeless_canvas, :alert_backend)
+    end)
+
+    canvas_id = 88_001
+    Phoenix.PubSub.subscribe(TimelessCanvas.pubsub(), Manager.status_topic(canvas_id))
+    FakeDataSource.put(:status, :ok)
+    Manager.register_elements(canvas_id, [element("alerting-el")])
+
+    send(Manager, :poll)
+
+    assert_receive {:element_status, "alerting-el", :error}, 1_000
   end
 
   defp snapshot_rows do
@@ -155,6 +181,39 @@ defmodule TimelessCanvas.DataSource.ManagerTest do
       assert Manager.metric_range(1, "reg-el", "cpu_usage", from, to) == {:ok, []}
     end
 
+    test "backend subscribe and unsubscribe errors do not crash the singleton" do
+      FakeDataSource.put(:subscribe, {:error, :unavailable})
+      assert Manager.register_elements(1, [element("rejected")]) == :ok
+      assert Process.alive?(Process.whereis(Manager))
+      refute registered?(1, "rejected")
+
+      FakeDataSource.put(:subscribe, {:ok, %{}})
+      assert Manager.register_elements(1, [element("accepted")]) == :ok
+      FakeDataSource.put(:unsubscribe, {:error, :unavailable})
+      Manager.unregister_element(1, "accepted")
+      sync_manager()
+      assert Process.alive?(Process.whereis(Manager))
+      refute registered?(1, "accepted")
+    end
+
+    test "a slow status poll does not block registration" do
+      parent = self()
+      Manager.register_elements(1, [element("slow-status")])
+
+      FakeDataSource.put(:statuses, fn ->
+        send(parent, :status_poll_started)
+        Process.sleep(250)
+        %{"slow-status" => :ok}
+      end)
+
+      send(Manager, :poll)
+      assert_receive :status_poll_started, 1_000
+
+      started = System.monotonic_time(:millisecond)
+      assert Manager.register_elements(1, [element("while-polling")]) == :ok
+      assert System.monotonic_time(:millisecond) - started < 100
+    end
+
     test "registrations are scoped per canvas: same element id, different elements" do
       # Return each element's own host so the two registrations are
       # distinguishable through the query path.
@@ -229,8 +288,14 @@ defmodule TimelessCanvas.DataSource.ManagerTest do
       pid_b = spawn_registrant(canvas_id, [element("shared-el")])
 
       stop_registrant(pid_a)
-      # Give a stray (buggy) cleanup a chance to run before asserting.
-      Process.sleep(50)
+
+      assert wait_until(fn ->
+               registrants = :sys.get_state(Manager).registrants[canvas_id]
+
+               is_map(registrants) and map_size(registrants) == 1 and
+                 Map.has_key?(registrants, pid_b)
+             end)
+
       assert registered?(canvas_id, "shared-el")
 
       stop_registrant(pid_b)

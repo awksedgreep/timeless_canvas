@@ -72,6 +72,22 @@ defmodule TimelessCanvas.IconCatalog do
     "windows" => "logos:microsoft-windows-icon"
   }
 
+  @primary_icons Map.merge(@semantic_icons, @service_icons)
+  @allowed_icon_prefixes ["heroicons:", "logos:", "simple-icons:", "data:image/svg+xml,", "/"]
+  @primary_aliases Enum.map(@primary_icons, fn {key, icon} ->
+                     {String.split(key, " ", trim: true), icon}
+                   end)
+  @service_aliases Enum.map(@service_icons, fn {key, icon} ->
+                     {String.split(key, " ", trim: true), icon}
+                   end)
+  @os_aliases Enum.map(@os_icons, fn {key, icon} ->
+                {String.split(key, " ", trim: true), icon}
+              end)
+  @catalog_icons @primary_icons
+                 |> Map.values()
+                 |> Kernel.++(Map.values(@os_icons))
+                 |> MapSet.new()
+
   @icon_options [
     {"", "Auto"},
     {"timeless", "Timeless"},
@@ -121,6 +137,9 @@ defmodule TimelessCanvas.IconCatalog do
   def icon_options, do: @icon_options
   def os_options, do: @os_options
 
+  @doc false
+  def catalog_icon?(icon), do: MapSet.member?(@catalog_icons, icon)
+
   def element_icon_name(%Element{} = element) do
     explicit_icon(element) || inferred_primary_icon(element)
   end
@@ -139,35 +158,35 @@ defmodule TimelessCanvas.IconCatalog do
       "metric_name" => metric_name,
       "y_min" => "0"
     }
-    |> maybe_put("icon", element_icon_name(source))
+    |> maybe_put("icon", portable_icon_name(element_icon_name(source)))
   end
 
   defp explicit_icon(%Element{meta: meta}) do
-    meta
+    (meta || %{})
     |> Map.get("icon")
-    |> normalize_icon(Map.merge(@semantic_icons, @service_icons), :primary)
+    |> normalize_icon(@primary_icons, @primary_aliases)
   end
 
   defp explicit_os_icon(%Element{meta: meta}) do
-    meta
+    (meta || %{})
     |> Map.get("os_icon")
-    |> normalize_icon(@os_icons, :os)
+    |> normalize_icon(@os_icons, @os_aliases)
   end
 
   defp inferred_primary_icon(%Element{type: :service, meta: meta}) do
-    meta |> Map.get("service_name") |> normalize_icon(@service_icons, :service)
+    (meta || %{}) |> Map.get("service_name") |> normalize_icon(@service_icons, @service_aliases)
   end
 
   defp inferred_primary_icon(%Element{type: :database, meta: meta}) do
-    meta |> Map.get("engine") |> normalize_icon(@service_icons, :service)
+    (meta || %{}) |> Map.get("engine") |> normalize_icon(@service_icons, @service_aliases)
   end
 
   defp inferred_primary_icon(%Element{type: :cache, meta: meta}) do
-    meta |> Map.get("engine") |> normalize_icon(@service_icons, :service)
+    (meta || %{}) |> Map.get("engine") |> normalize_icon(@service_icons, @service_aliases)
   end
 
   defp inferred_primary_icon(%Element{type: :queue, meta: meta}) do
-    meta |> Map.get("broker") |> normalize_icon(@service_icons, :service)
+    (meta || %{}) |> Map.get("broker") |> normalize_icon(@service_icons, @service_aliases)
   end
 
   defp inferred_primary_icon(%Element{type: :graph} = element), do: inferred_graph_icon(element)
@@ -178,42 +197,39 @@ defmodule TimelessCanvas.IconCatalog do
   defp inferred_primary_icon(_element), do: nil
 
   defp inferred_graph_icon(%Element{meta: meta}) do
+    meta = meta || %{}
+
     [Map.get(meta, "service_name"), Map.get(meta, "icon"), Map.get(meta, "metric_name")]
-    |> Enum.find_value(&normalize_icon(&1, Map.merge(@semantic_icons, @service_icons), :primary))
+    |> Enum.find_value(&normalize_icon(&1, @primary_icons, @primary_aliases))
   end
 
   defp inferred_os_icon(%Element{meta: meta}) do
-    meta |> Map.get("os") |> normalize_icon(@os_icons, :os)
+    (meta || %{}) |> Map.get("os") |> normalize_icon(@os_icons, @os_aliases)
   end
 
-  defp normalize_icon(nil, _map, _domain), do: nil
-  defp normalize_icon("", _map, _domain), do: nil
+  defp normalize_icon(nil, _map, _aliases), do: nil
+  defp normalize_icon("", _map, _aliases), do: nil
 
-  defp normalize_icon(value, map, domain) when is_binary(value) do
+  defp normalize_icon(value, map, aliases) when is_binary(value) do
     value = String.trim(value)
 
     cond do
       value == "" ->
         nil
 
-      String.contains?(value, ":") ->
+      Enum.any?(@allowed_icon_prefixes, &String.starts_with?(value, &1)) ->
         value
 
+      String.contains?(value, ":") ->
+        nil
+
       true ->
-        cache_key = {__MODULE__, :normalized_icon, domain, value}
-
-        case :persistent_term.get(cache_key, :missing) do
-          :missing ->
-            normalized = normalize_key(value)
-            resolved = Map.get(map, normalized) || scan_aliases(normalized, map)
-            :persistent_term.put(cache_key, resolved)
-            resolved
-
-          resolved ->
-            resolved
-        end
+        normalized = normalize_key(value)
+        Map.get(map, normalized) || scan_aliases(normalized, aliases)
     end
   end
+
+  defp normalize_icon(_value, _map, _aliases), do: nil
 
   defp normalize_key(value) do
     value
@@ -243,11 +259,11 @@ defmodule TimelessCanvas.IconCatalog do
   # bare substrings: "cpu_temp" → ["cpu", "temp"] still matches "cpu",
   # but "diskless" must not match "disk" nor "cachet" match "cache".
   # Multi-word keys ("mac os", "red hat") match as a contiguous word run.
-  defp scan_aliases(text, map) do
+  defp scan_aliases(text, aliases) do
     words = String.split(text, " ", trim: true)
 
-    Enum.find_value(map, fn {key, icon} ->
-      if contains_word_run?(words, String.split(key, " ", trim: true)), do: icon, else: nil
+    Enum.find_value(aliases, fn {key_words, icon} ->
+      if contains_word_run?(words, key_words), do: icon, else: nil
     end)
   end
 
@@ -261,4 +277,9 @@ defmodule TimelessCanvas.IconCatalog do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # Persist stable catalog names instead of embedding the Timeless data URI
+  # into every graph copied from a Timeless element.
+  defp portable_icon_name(@timeless_icon), do: "timeless"
+  defp portable_icon_name(icon), do: icon
 end

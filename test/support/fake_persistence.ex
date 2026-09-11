@@ -10,7 +10,14 @@ defmodule TimelessCanvas.Test.FakePersistence do
 
   use Agent
 
-  @initial_state %{canvases: %{}, access: %{}, users: %{}, next_id: 1, update_error: nil}
+  @initial_state %{
+    canvases: %{},
+    access: %{},
+    users: %{},
+    next_id: 1,
+    update_error: nil,
+    update_delay_ms: 0
+  }
 
   def start_link(_opts \\ []) do
     Agent.start_link(fn -> @initial_state end, name: __MODULE__)
@@ -60,6 +67,12 @@ defmodule TimelessCanvas.Test.FakePersistence do
   """
   def fail_update_canvas_data(error \\ {:error, :forced_failure}) do
     Agent.update(__MODULE__, &Map.put(&1, :update_error, error))
+  end
+
+  @doc "Delay data updates to exercise non-blocking persistence paths."
+  def delay_update_canvas_data(milliseconds)
+      when is_integer(milliseconds) and milliseconds >= 0 do
+    Agent.update(__MODULE__, &Map.put(&1, :update_delay_ms, milliseconds))
   end
 
   @doc "All stored canvas records, for test assertions on record counts."
@@ -118,7 +131,10 @@ defmodule TimelessCanvas.Test.FakePersistence do
 
   @impl true
   def update_canvas_data(canvas_id, data) do
-    case Agent.get(__MODULE__, & &1.update_error) do
+    {delay, error} = Agent.get(__MODULE__, &{&1.update_delay_ms, &1.update_error})
+    Process.sleep(delay)
+
+    case error do
       nil -> update_record(canvas_id, fn record -> %{record | data: data} end)
       error -> error
     end
@@ -168,16 +184,29 @@ defmodule TimelessCanvas.Test.FakePersistence do
   def breadcrumb_chain(canvas_id) do
     case get_canvas(canvas_id) do
       {:error, :not_found} -> []
-      {:ok, record} -> build_chain(record, [{record.id, record.name}])
+      {:ok, record} -> build_chain(record, [{record.id, record.name}], MapSet.new([record.id]), 1)
     end
   end
 
-  defp build_chain(%{parent_id: nil}, acc), do: acc
+  defp build_chain(%{parent_id: nil}, acc, _visited, _depth), do: acc
+  defp build_chain(_record, acc, _visited, depth) when depth >= 50, do: acc
 
-  defp build_chain(%{parent_id: parent_id}, acc) do
-    case get_canvas(parent_id) do
-      {:error, :not_found} -> acc
-      {:ok, parent} -> build_chain(parent, [{parent.id, parent.name} | acc])
+  defp build_chain(%{parent_id: parent_id}, acc, visited, depth) do
+    if MapSet.member?(visited, parent_id) do
+      acc
+    else
+      case get_canvas(parent_id) do
+        {:error, :not_found} ->
+          acc
+
+        {:ok, parent} ->
+          build_chain(
+            parent,
+            [{parent.id, parent.name} | acc],
+            MapSet.put(visited, parent.id),
+            depth + 1
+          )
+      end
     end
   end
 

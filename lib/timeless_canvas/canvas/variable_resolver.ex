@@ -11,8 +11,17 @@ defmodule TimelessCanvas.Canvas.VariableResolver do
   Build a bindings map from canvas variables: `%{"host" => "prod-1.example.com"}`.
   """
   def bindings(variables) when is_map(variables) do
-    Map.new(variables, fn {name, definition} -> {name, definition["current"] || ""} end)
+    variables
+    |> Enum.reduce(%{}, fn
+      {name, definition}, acc when is_map(definition) ->
+        Map.put(acc, name, Map.get(definition, "current") || Map.get(definition, :current) || "")
+
+      _, acc ->
+        acc
+    end)
   end
+
+  def bindings(_variables), do: %{}
 
   @doc """
   Resolve all elements in a map using the given bindings.
@@ -25,7 +34,7 @@ defmodule TimelessCanvas.Canvas.VariableResolver do
   Resolve a single element's meta values and label.
   """
   def resolve_element(%Element{} = element, bindings) when is_map(bindings) do
-    meta_with_pins = apply_pins(element.pins, bindings, element.meta)
+    meta_with_pins = apply_pins(element.pins || %{}, bindings, element.meta || %{})
     resolved_meta = Map.new(meta_with_pins, fn {k, v} -> {k, resolve_value(v, bindings)} end)
     resolved_label = resolve_value(element.label, bindings)
     %{element | meta: resolved_meta, label: resolved_label}
@@ -41,7 +50,7 @@ defmodule TimelessCanvas.Canvas.VariableResolver do
     Enum.reduce(Element.pin_dimensions(), meta, fn dim_atom, acc ->
       dim = Atom.to_string(dim_atom)
 
-      case Map.get(pins, dim) do
+      case Map.get(pins, dim) || Map.get(pins, dim_atom) do
         nil ->
           acc
 

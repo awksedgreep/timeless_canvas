@@ -60,12 +60,23 @@ defmodule TimelessCanvas.StreamManagerTest do
 
       assert :ok = StreamManager.register_log_stream(1, "el-a", [level: :info], manager)
       wait_until(fn -> FakeStreamBackend.subscribe_count() == 1 end)
+      task_before = get_in(:sys.get_state(manager), [:subscriptions, "el-a", :task_pid])
 
       assert :ok = StreamManager.register_log_stream(1, "el-a", [level: :info], manager)
-      # Synchronize with the manager (call above already did) and give a
-      # would-be respawned task time to hit the backend.
-      Process.sleep(50)
+      assert get_in(:sys.get_state(manager), [:subscriptions, "el-a", :task_pid]) == task_before
       assert FakeStreamBackend.subscribe_count() == 1
+    end
+
+    test "failed subscriptions expose an error and retry with backoff" do
+      manager = start_manager(retry_ms: 20)
+      FakeStreamBackend.set_subscribe_result({:error, :unavailable})
+
+      assert :ok = StreamManager.register_log_stream(1, "el-retry", [], manager)
+      wait_until(fn -> StreamManager.get_buffer("el-retry", manager) == :error end)
+
+      FakeStreamBackend.set_subscribe_result(:ok)
+      wait_until(fn -> FakeStreamBackend.subscribe_count() >= 2 end)
+      wait_until(fn -> StreamManager.get_buffer("el-retry", manager) == [] end)
     end
 
     test "changed opts tear down and re-subscribe" do
@@ -158,9 +169,6 @@ defmodule TimelessCanvas.StreamManagerTest do
         ref = Process.monitor(pid)
         send(pid, :stop)
         assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
-        # Synchronize so the manager has processed its own DOWN.
-        :sys.get_state(manager)
-        Process.sleep(20)
       end
 
       subscriptions = fn -> :sys.get_state(manager).subscriptions end

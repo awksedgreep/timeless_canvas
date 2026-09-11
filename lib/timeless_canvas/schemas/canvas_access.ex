@@ -6,6 +6,7 @@ defmodule TimelessCanvas.Schemas.CanvasAccess do
     field(:role, Ecto.Enum, values: [:owner, :editor, :viewer])
     belongs_to(:canvas, TimelessCanvas.Schemas.CanvasRecord)
     field(:user_id, :integer)
+    field(:user, :map, virtual: true)
 
     timestamps()
   end
@@ -16,6 +17,6 @@ defmodule TimelessCanvas.Schemas.CanvasAccess do
     |> validate_required([:canvas_id, :user_id, :role])
     |> foreign_key_constraint(:canvas_id)
     |> foreign_key_constraint(:user_id)
-    |> unique_constraint([:canvas_id, :user_id])
+    |> unique_constraint(:user_id, name: :canvas_accesses_canvas_id_user_id_index)
   end
 end

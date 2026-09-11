@@ -16,12 +16,12 @@ defmodule TimelessCanvas do
 
   @doc "Returns the configured Ecto repo."
   def repo do
-    Application.fetch_env!(:timeless_canvas, :repo)
+    required_config!(:repo, "an Ecto.Repo module")
   end
 
   @doc "Returns the configured PubSub module."
   def pubsub do
-    Application.fetch_env!(:timeless_canvas, :pubsub)
+    required_config!(:pubsub, "a Phoenix.PubSub server name")
   end
 
   @doc "Returns the configured user schema module."
@@ -60,8 +60,24 @@ defmodule TimelessCanvas do
   """
   def current_user(socket_or_conn) do
     case Application.get_env(:timeless_canvas, :current_user_fn) do
-      nil -> socket_or_conn.assigns[:current_user]
+      nil -> default_current_user(socket_or_conn)
       fun when is_function(fun, 1) -> fun.(socket_or_conn)
+    end
+  end
+
+  defp default_current_user(%{assigns: assigns}) when is_map(assigns),
+    do: Map.get(assigns, :current_user)
+
+  defp default_current_user(_socket_or_conn), do: nil
+
+  defp required_config!(key, expected) do
+    case Application.fetch_env(:timeless_canvas, key) do
+      {:ok, value} ->
+        value
+
+      :error ->
+        raise ArgumentError,
+              "missing config :timeless_canvas, #{inspect(key)} (expected #{expected})"
     end
   end
 end

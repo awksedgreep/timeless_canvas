@@ -17,8 +17,18 @@ defmodule TimelessCanvas.Schemas.CanvasRecord do
     record
     |> cast(attrs, [:name, :data, :user_id, :parent_id])
     |> validate_required([:name, :data, :user_id])
+    |> validate_length(:name, max: 255)
+    |> validate_change(:data, &validate_data_size/2)
     |> foreign_key_constraint(:user_id)
     |> foreign_key_constraint(:parent_id)
-    |> unique_constraint([:user_id, :name])
+    |> unique_constraint(:name, name: :canvases_user_id_name_index)
+  end
+
+  defp validate_data_size(:data, data) do
+    case Jason.encode(data) do
+      {:ok, encoded} when byte_size(encoded) <= 1_048_576 -> []
+      {:ok, _encoded} -> [data: {"is too large", [code: :data_too_large]}]
+      {:error, _reason} -> [data: {"is invalid", [code: :invalid_data]}]
+    end
   end
 end

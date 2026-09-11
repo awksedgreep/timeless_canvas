@@ -34,6 +34,8 @@ const CanvasHook = {
     this._moveRaf = null; // pending pointermove animation frame id
     this._lastMoveEvent = null;
     this._hoverRaf = null; // pending graph-hover animation frame id
+    this._wheelRaf = null; // pending wheel animation frame id
+    this._pendingWheel = null;
     this._lastHoverEvent = null;
     this._hoverCtmInv = null; // cached inverse screen CTM for hover
     this._dragCtx = null; // cached rect/scale/CTM for the active drag
@@ -150,6 +152,7 @@ const CanvasHook = {
     // phx-update="ignore" containers; raw + scaled points are cached
     // per element id for the hover tooltip (no per-mousemove parsing).
     this.graphCache = new Map();
+    this.refreshElementGroups();
     this.handleEvent("graph:data", (payload) => this.applyGraphData(payload));
     this.handleEvent("graph:expanded", (payload) => this.applyGraphData(payload));
 
@@ -170,10 +173,12 @@ const CanvasHook = {
     this.canEdit = this.svg.dataset.canEdit !== "false";
     // A patch carries authoritative geometry; a committed resize is settled.
     this._pendingResize = null;
+    // Build one element index for cache pruning and drag reconciliation.
+    const groups = this.refreshElementGroups();
     // Drop cached graph data for elements no longer in the DOM.
     if (this.graphCache) {
       for (const id of Array.from(this.graphCache.keys())) {
-        if (!this.svg.querySelector(`[data-element-id="${id}"]`)) {
+        if (!groups.has(id)) {
           this.graphCache.delete(id);
         }
       }
@@ -193,7 +198,7 @@ const CanvasHook = {
     // After drop: server has patched new coordinates, remove drag transforms
     if (this._pendingDrop) {
       for (const id of this._pendingDrop.ids) {
-        const group = this.svg.querySelector(`[data-element-id="${id}"]`);
+        const group = groups.get(id);
         if (group) group.removeAttribute("transform");
       }
       this._pendingDrop = null;
@@ -202,7 +207,7 @@ const CanvasHook = {
     // Mid-drag: re-apply transform after LiveView patches
     if (this.dragging && this.dragging.type === "element") {
       for (const id of this.dragging.groupIds) {
-        const group = this.svg.querySelector(`[data-element-id="${id}"]`);
+        const group = groups.get(id);
         if (group) {
           group.parentNode.appendChild(group);
           group.setAttribute(
@@ -212,7 +217,7 @@ const CanvasHook = {
         }
       }
       // Update primary group reference
-      const primaryGroup = this.svg.querySelector(`[data-element-id="${this.dragging.id}"]`);
+      const primaryGroup = groups.get(this.dragging.id);
       if (primaryGroup) this.dragging.group = primaryGroup;
     }
   },
@@ -224,8 +229,11 @@ const CanvasHook = {
     document.body.classList.remove("tc-canvas-open");
     if (this._moveRaf) cancelAnimationFrame(this._moveRaf);
     if (this._hoverRaf) cancelAnimationFrame(this._hoverRaf);
+    if (this._wheelRaf) cancelAnimationFrame(this._wheelRaf);
     this._moveRaf = null;
     this._hoverRaf = null;
+    this._wheelRaf = null;
+    this._pendingWheel = null;
     this._lastMoveEvent = null;
     this._lastHoverEvent = null;
     clearTimeout(this._zoomDebounce);
@@ -264,8 +272,8 @@ const CanvasHook = {
     } else {
       const vb = this.getViewBox();
       const rect = this.svg.getBoundingClientRect();
-      scaleX = vb.width / rect.width;
-      scaleY = vb.height / rect.height;
+      scaleX = rect.width > 0 ? vb.width / rect.width : 0;
+      scaleY = rect.height > 0 ? vb.height / rect.height : 0;
     }
     return { dx: dxPx * scaleX, dy: dyPx * scaleY };
   },
@@ -303,6 +311,16 @@ const CanvasHook = {
     return this.svg.dataset.mode || "select";
   },
 
+  refreshElementGroups() {
+    this._elementGroups = new Map(
+      Array.from(this.svg.querySelectorAll("[data-element-id]")).map((group) => [
+        group.dataset.elementId,
+        group,
+      ]),
+    );
+    return this._elementGroups;
+  },
+
   // --- Pointer Events ---
 
   onPointerDown(e) {
@@ -338,8 +356,9 @@ const CanvasHook = {
       const id = elGroup?.dataset.elementId;
       if (id) {
         const body = elGroup.querySelector(".canvas-element__body");
-        let w0 = parseFloat(body.getAttribute("width") || body.getAttribute("rx")) * 2 || 160;
-        let h0 = parseFloat(body.getAttribute("height") || body.getAttribute("ry")) * 2 || 80;
+        if (!body) return;
+        let w0 = 160;
+        let h0 = 80;
         // For database cylinders, use the rect portion
         const bodyRect = elGroup.querySelector(".canvas-element__body-rect");
         if (bodyRect) {
@@ -348,7 +367,12 @@ const CanvasHook = {
         } else if (body.tagName === "rect") {
           w0 = parseFloat(body.getAttribute("width"));
           h0 = parseFloat(body.getAttribute("height"));
+        } else {
+          w0 = parseFloat(body.getAttribute("rx")) * 2;
+          h0 = parseFloat(body.getAttribute("ry")) * 2;
         }
+        if (!Number.isFinite(w0)) w0 = 160;
+        if (!Number.isFinite(h0)) h0 = 80;
         this.dragging = {
           type: "handle",
           id,
@@ -366,9 +390,9 @@ const CanvasHook = {
     // stream_data (id-based, so live prepends can't shift the target).
     const streamRow = e.target.closest("[data-entry-id]");
     if (streamRow) {
-      const entryId = parseInt(streamRow.dataset.entryId, 10);
+      const entryId = streamRow.dataset.entryId;
       const streamGroup = streamRow.closest("[data-element-id]");
-      if (streamGroup && !Number.isNaN(entryId)) {
+      if (streamGroup && entryId) {
         this.pushEvent("stream:entry_click", {
           element_id: streamGroup.dataset.elementId,
           entry_id: entryId,
@@ -409,7 +433,7 @@ const CanvasHook = {
       // (skip for viewers: their press is only ever a click/select)
       if (this.canEdit) {
         for (const gid of groupIds) {
-          const g = this.svg.querySelector(`[data-element-id="${gid}"]`);
+          const g = this._elementGroups?.get(gid);
           if (g) g.parentNode.appendChild(g);
         }
       }
@@ -494,7 +518,7 @@ const CanvasHook = {
         this.dragging.totalDy = svgNow.y - this.dragging.svgStart.y;
         // Apply transform to all elements in the drag group
         for (const gid of this.dragging.groupIds) {
-          const g = this.svg.querySelector(`[data-element-id="${gid}"]`);
+          const g = this._elementGroups?.get(gid);
           if (g) {
             g.setAttribute(
               "transform",
@@ -709,7 +733,12 @@ const CanvasHook = {
     let mult = 1;
     if (e.deltaMode === 1) mult = 16;
     else if (e.deltaMode === 2) mult = window.innerHeight;
-    const clamp = (v) => Math.max(-400, Math.min(400, v * mult));
+    const clamp = (v) => {
+      const scaled = Number(v) * mult;
+      return Number.isFinite(scaled)
+        ? Math.max(-400, Math.min(400, scaled))
+        : 0;
+    };
     return { dx: clamp(e.deltaX), dy: clamp(e.deltaY) };
   },
 
@@ -720,6 +749,35 @@ const CanvasHook = {
     if (this._inGesture) return;
 
     const { dx, dy } = this.normalizeWheelDelta(e);
+    const pending = this._pendingWheel;
+
+    if (pending && pending.ctrlKey === e.ctrlKey && pending.shiftKey === e.shiftKey) {
+      pending.dx += dx;
+      pending.dy += dy;
+      pending.clientX = e.clientX;
+      pending.clientY = e.clientY;
+    } else {
+      this._pendingWheel = {
+        dx,
+        dy,
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      };
+    }
+
+    if (this._wheelRaf) return;
+    this._wheelRaf = requestAnimationFrame(() => {
+      this._wheelRaf = null;
+      const wheel = this._pendingWheel;
+      this._pendingWheel = null;
+      if (wheel) this.processWheel(wheel);
+    });
+  },
+
+  processWheel(e) {
+    const { dx, dy } = e;
 
     if (e.ctrlKey) {
       // Trackpad pinch (Chrome/Firefox/Edge emulate ctrl+wheel) or real
@@ -738,6 +796,7 @@ const CanvasHook = {
       }
       const vb = this.getViewBox();
       const rect = this.svg.getBoundingClientRect();
+      if (!(rect.width > 0) || !(rect.height > 0)) return;
       this.setViewBox(
         vb.minX + panX * (vb.width / rect.width),
         vb.minY + panY * (vb.height / rect.height),
@@ -752,8 +811,10 @@ const CanvasHook = {
   // Zoom by `factor` (multiplies viewBox width) keeping the given client
   // point stationary. Shared by wheel zoom and Safari pinch gestures.
   zoomAtClientPoint(factor, clientX, clientY) {
+    if (!Number.isFinite(factor) || factor <= 0) return;
     const svgPt = this.clientToSvg(clientX, clientY);
     const vb = this.getViewBox();
+    if (!(vb.width > 0) || !(vb.height > 0)) return;
 
     const newWidth = this.clampZoomWidth(vb.width * factor);
     const newHeight = vb.height * (newWidth / vb.width);
@@ -903,6 +964,7 @@ const CanvasHook = {
   clampZoomWidth(width) {
     const minWidth = (this.baseViewBoxWidth * 100) / this.maxZoomPercent;
     const maxWidth = (this.baseViewBoxWidth * 100) / this.minZoomPercent;
+    if (!Number.isFinite(width)) return maxWidth;
     return Math.min(Math.max(width, minWidth), maxWidth);
   },
 
@@ -1009,7 +1071,8 @@ const CanvasHook = {
     const maxY = Math.max(start.y, end.y);
 
     const ids = [];
-    this.svg.querySelectorAll("[data-element-id]").forEach((group) => {
+    const groups = this._elementGroups || this.refreshElementGroups();
+    groups.forEach((group) => {
       const bounds = this.getElementBounds(group);
       if (!bounds) return;
 
@@ -1072,15 +1135,16 @@ const CanvasHook = {
 
     this.renderGraphInternals(container, payload);
 
+    const previous = this.graphCache.get(payload.id);
     this.graphCache.set(payload.id, {
       kind: payload.kind,
-      raw: payload.raw || [],
+      raw: payload.raw || previous?.raw || [],
       poly: this.parsePoints(payload.points),
     });
   },
 
   parsePoints(str) {
-    if (!str) return [];
+    if (typeof str !== "string" || !str.trim()) return [];
     return str
       .trim()
       .split(/\s+/)
@@ -1088,7 +1152,8 @@ const CanvasHook = {
       .map((pair) => {
         const [x, y] = pair.split(",");
         return { x: parseFloat(x), y: parseFloat(y) };
-      });
+      })
+      .filter(({ x, y }) => Number.isFinite(x) && Number.isFinite(y));
   },
 
   svgNode(tag, attrs, text) {
@@ -1111,10 +1176,33 @@ const CanvasHook = {
       ? `url(#graph-clip-${p.id})`
       : `url(#graph-plot-clip-${p.id})`;
 
-    while (container.firstChild) container.removeChild(container.firstChild);
+    const layoutKey = JSON.stringify([
+      p.kind,
+      p.color,
+      p.status,
+      p.status_pos,
+      p.grid || [],
+      p.y_labels || [],
+      p.x_labels || [],
+      p.thresholds || [],
+      p.value_pos,
+      p.value != null,
+    ]);
+
+    if (container.dataset.layoutKey === layoutKey) {
+      const line = container.querySelector(".canvas-graph__line");
+      const area = container.querySelector(".canvas-graph__area");
+      const value = container.querySelector(".canvas-graph__value");
+      if (line) line.setAttribute("points", p.points || "");
+      if (area) area.setAttribute("points", p.area || "");
+      if (value) value.textContent = p.value || "---";
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
 
     for (const g of p.grid || []) {
-      container.appendChild(
+      fragment.appendChild(
         this.svgNode("line", {
           x1: g.x1,
           y1: g.y1,
@@ -1127,7 +1215,7 @@ const CanvasHook = {
       );
     }
     for (const l of p.y_labels || []) {
-      container.appendChild(
+      fragment.appendChild(
         this.svgNode(
           "text",
           {
@@ -1143,7 +1231,7 @@ const CanvasHook = {
       );
     }
     for (const l of p.x_labels || []) {
-      container.appendChild(
+      fragment.appendChild(
         this.svgNode(
           "text",
           {
@@ -1158,18 +1246,34 @@ const CanvasHook = {
         ),
       );
     }
+    for (const threshold of p.thresholds || []) {
+      fragment.appendChild(
+        this.svgNode("line", {
+          x1: threshold.x1,
+          y1: threshold.y,
+          x2: threshold.x2,
+          y2: threshold.y,
+          stroke: "#f59e0b",
+          "stroke-width": "1",
+          "stroke-dasharray": "4 2",
+          class: "canvas-graph__alert-threshold",
+          "pointer-events": "none",
+        }),
+      );
+    }
     if (expanded && p.area) {
-      container.appendChild(
+      fragment.appendChild(
         this.svgNode("polygon", {
           points: p.area,
           fill: p.color,
           opacity: "0.12",
+          class: "canvas-graph__area",
           "clip-path": clip,
         }),
       );
     }
     if (p.points) {
-      container.appendChild(
+      fragment.appendChild(
         this.svgNode("polyline", {
           points: p.points,
           fill: "none",
@@ -1188,7 +1292,7 @@ const CanvasHook = {
     // when a later payload arrives with status "ok".
     if ((p.status === "error" || p.status === "empty") && p.status_pos) {
       const isError = p.status === "error";
-      container.appendChild(
+      fragment.appendChild(
         this.svgNode(
           "text",
           {
@@ -1207,7 +1311,7 @@ const CanvasHook = {
     }
     if (expanded) {
       // Legend current-value text (the legend chrome is server-rendered)
-      container.appendChild(
+      fragment.appendChild(
         this.svgNode(
           "text",
           {
@@ -1216,19 +1320,20 @@ const CanvasHook = {
             fill: "#e2e8f0",
             "font-size": "7",
             "font-family": "monospace",
+            class: "canvas-graph__value",
           },
           p.value || "---",
         ),
       );
     } else if (p.value != null) {
-      container.appendChild(
+      fragment.appendChild(
         this.svgNode(
           "text",
           {
             x: p.value_pos.x,
             y: p.value_pos.y,
             "text-anchor": "end",
-            class: "canvas-graph__title",
+            class: "canvas-graph__title canvas-graph__value",
             fill: p.color,
             "font-size": "8",
           },
@@ -1236,6 +1341,9 @@ const CanvasHook = {
         ),
       );
     }
+
+    container.replaceChildren(fragment);
+    container.dataset.layoutKey = layoutKey;
   },
 
   // --- Expanded Graph Tooltip ---
@@ -1348,8 +1456,10 @@ const CanvasHook = {
 
     // Get plot area bounds from the body rect
     const bodyRect = parentGroup.querySelector(".canvas-element__body");
+    if (!bodyRect) return;
     const bodyY = parseFloat(bodyRect.getAttribute("y"));
     const bodyH = parseFloat(bodyRect.getAttribute("height"));
+    if (!Number.isFinite(bodyY) || !Number.isFinite(bodyH)) return;
 
     // Crosshair line spanning the plot height
     this._tooltipLine.setAttribute("x1", x);
@@ -1415,6 +1525,7 @@ const CanvasHook = {
   // default, or a saved _pendingResize snapshot when restoring a denied
   // resize after the drag state is already gone.
   resizeElementVisual(id, width, height, state = this.dragging) {
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return;
     const group = this.svg.querySelector(`[data-element-id="${id}"]`);
     if (!group) return;
 

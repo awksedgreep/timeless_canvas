@@ -20,6 +20,11 @@ defmodule TimelessCanvas.Canvas.ViewBoxTest do
       vb = %ViewBox{min_x: 10.5, min_y: -3.25, width: 100.0, height: 50.125}
       assert ViewBox.to_string(vb) == "10.5 -3.25 100.0 50.125"
     end
+
+    test "accepts integer coordinates" do
+      assert ViewBox.to_string(%ViewBox{min_x: 0, min_y: 1, width: 200, height: 100}) ==
+               "0 1 200 100"
+    end
   end
 
   describe "pan/3" do
@@ -71,6 +76,13 @@ defmodule TimelessCanvas.Canvas.ViewBoxTest do
       vb = %ViewBox{width: 40_000.0, height: 20_000.0}
       assert ViewBox.zoom(vb, 0.0, 0.0, 2.0) == vb
     end
+
+    test "rejects invalid factors and height limit violations" do
+      vb = %ViewBox{width: 200.0, height: 150.0}
+      assert ViewBox.zoom(vb, 0.0, 0.0, 0) == vb
+      assert ViewBox.zoom(vb, 0.0, 0.0, nil) == vb
+      assert ViewBox.zoom(vb, 0.0, 0.0, 0.6) == vb
+    end
   end
 
   describe "client_to_svg/5" do
@@ -83,6 +95,11 @@ defmodule TimelessCanvas.Canvas.ViewBoxTest do
       vb = %ViewBox{min_x: 100.0, min_y: 200.0, width: 600.0, height: 400.0}
       # Client is twice the resolution of the view box
       assert ViewBox.client_to_svg(vb, 300.0, 200.0, 1200.0, 800.0) == {250.0, 300.0}
+    end
+
+    test "zero-sized clients fall back to the view-box origin" do
+      vb = %ViewBox{min_x: 100.0, min_y: 200.0}
+      assert ViewBox.client_to_svg(vb, 10.0, 10.0, 0, 0) == {100.0, 200.0}
     end
   end
 end

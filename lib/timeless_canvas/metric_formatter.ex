@@ -1,8 +1,10 @@
 defmodule TimelessCanvas.MetricFormatter do
   @moduledoc "Format metric values based on unit metadata."
 
+  def format(value, _unit) when not is_number(value), do: "---"
   def format(value, nil), do: format_number(value)
   def format(value, unit) when is_binary(unit), do: format_with_unit(value, unit)
+  def format(value, _unit), do: format_number(value)
 
   defp format_with_unit(value, unit) when unit in ["byte", "bytes"] do
     format_bytes(value)

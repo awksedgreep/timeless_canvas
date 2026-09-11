@@ -97,6 +97,12 @@ defmodule TimelessCanvas.Canvas.HistoryTest do
     assert history.past == [canvas(9), canvas(8), canvas(7)]
   end
 
+  test "max_size must be a positive integer" do
+    for invalid <- [0, -1, nil, "5"] do
+      assert_raise ArgumentError, fn -> History.new(canvas(1), max_size: invalid) end
+    end
+  end
+
   test "replace_top/2 swaps the present without touching the past" do
     history =
       History.new(canvas(1))

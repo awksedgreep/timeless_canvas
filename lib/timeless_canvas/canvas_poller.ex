@@ -78,7 +78,7 @@ defmodule TimelessCanvas.CanvasPoller do
   def update_elements(canvas_id, resolved_elements, opts \\ []) do
     case whereis(canvas_id) do
       nil -> :ok
-      pid -> GenServer.cast(pid, {:update_elements, resolved_elements, opts[:span]})
+      pid -> GenServer.cast(pid, {:update_elements, self(), resolved_elements, opts[:span]})
     end
   end
 
@@ -108,14 +108,14 @@ defmodule TimelessCanvas.CanvasPoller do
       canvas_id: Keyword.fetch!(opts, :canvas_id),
       poll_interval: poll_interval,
       linger: opts[:linger] || @default_linger,
-      span: opts[:span] || @default_span,
       elements: %{},
       subscribers: %{},
+      poll_timer: nil,
+      poll_ref: nil,
       last_graph: %{},
       last_text_values: %{}
     }
 
-    schedule_poll(poll_interval)
     # Stop eventually if nobody ever subscribes (e.g. after a crash).
     schedule_idle_check(state.linger)
     {:ok, state}
@@ -123,46 +123,94 @@ defmodule TimelessCanvas.CanvasPoller do
 
   @impl true
   def handle_call({:subscribe, pid, resolved_elements, span}, _from, state) do
+    first_subscriber? = map_size(state.subscribers) == 0
+
     subscribers =
-      if Map.has_key?(state.subscribers, pid) do
-        state.subscribers
-      else
-        Map.put(state.subscribers, pid, Process.monitor(pid))
+      case Map.get(state.subscribers, pid) do
+        nil ->
+          Map.put(state.subscribers, pid, %{
+            monitor: Process.monitor(pid),
+            span: span || @default_span
+          })
+
+        subscriber ->
+          Map.put(state.subscribers, pid, %{subscriber | span: span || subscriber.span})
       end
 
     state =
-      %{state | subscribers: subscribers, span: span || state.span}
+      %{state | subscribers: subscribers}
       |> put_elements(resolved_elements)
+      |> maybe_schedule_poll(if(first_subscriber?, do: 0, else: state.poll_interval))
 
     {:reply, :ok, state}
   end
 
   @impl true
-  def handle_cast({:update_elements, resolved_elements, span}, state) do
-    {:noreply, %{state | span: span || state.span} |> put_elements(resolved_elements)}
+  def handle_cast({:update_elements, pid, resolved_elements, span}, state) do
+    subscribers =
+      case Map.get(state.subscribers, pid) do
+        nil ->
+          state.subscribers
+
+        subscriber ->
+          Map.put(state.subscribers, pid, %{subscriber | span: span || subscriber.span})
+      end
+
+    {:noreply,
+     %{state | subscribers: subscribers}
+     |> put_elements(resolved_elements)
+     |> maybe_schedule_poll(0)}
   end
 
   @impl true
   def handle_info(:poll, state) do
     state =
-      if map_size(state.subscribers) > 0 and pollable?(state.elements) do
-        poll_and_broadcast(state)
+      %{state | poll_timer: nil}
+
+    state =
+      if map_size(state.subscribers) > 0 and pollable?(state.elements) and is_nil(state.poll_ref) do
+        start_poll(state)
       else
         state
       end
 
-    schedule_poll(state.poll_interval)
     {:noreply, state}
   end
 
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
-    subscribers = Map.delete(state.subscribers, pid)
+  def handle_info({:poll_result, ref, graph_data, text_data}, %{poll_ref: ref} = state) do
+    state = %{state | poll_ref: nil}
 
-    if map_size(subscribers) == 0 do
-      schedule_idle_check(state.linger)
-    end
+    state =
+      if map_size(state.subscribers) > 0 do
+        merge_and_broadcast(state, graph_data, text_data)
+      else
+        state
+      end
 
-    {:noreply, %{state | subscribers: subscribers}}
+    {:noreply, maybe_schedule_poll(state, state.poll_interval)}
+  end
+
+  def handle_info({:poll_result, _ref, _graph_data, _text_data}, state), do: {:noreply, state}
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    subscribers =
+      case Map.pop(state.subscribers, pid) do
+        {%{monitor: ^ref}, rest} -> rest
+        _ -> state.subscribers
+      end
+
+    state = %{state | subscribers: subscribers}
+
+    state =
+      if map_size(subscribers) == 0 do
+        state = cancel_poll_timer(state)
+        schedule_idle_check(state.linger)
+        state
+      else
+        state
+      end
+
+    {:noreply, state}
   end
 
   def handle_info(:idle_check, state) do
@@ -175,9 +223,23 @@ defmodule TimelessCanvas.CanvasPoller do
 
   # --- Private ---
 
-  defp schedule_poll(interval), do: Process.send_after(self(), :poll, interval)
-
   defp schedule_idle_check(linger), do: Process.send_after(self(), :idle_check, linger)
+
+  defp maybe_schedule_poll(state, interval) do
+    if map_size(state.subscribers) > 0 and pollable?(state.elements) and is_nil(state.poll_timer) and
+         is_nil(state.poll_ref) do
+      %{state | poll_timer: Process.send_after(self(), :poll, interval)}
+    else
+      state
+    end
+  end
+
+  defp cancel_poll_timer(%{poll_timer: nil} = state), do: state
+
+  defp cancel_poll_timer(state) do
+    Process.cancel_timer(state.poll_timer)
+    %{state | poll_timer: nil}
+  end
 
   defp put_elements(state, resolved_elements) do
     ids = Map.keys(resolved_elements)
@@ -194,11 +256,33 @@ defmodule TimelessCanvas.CanvasPoller do
     Enum.any?(elements, fn {_id, el} -> el.type in [:graph, :text_series] end)
   end
 
-  defp poll_and_broadcast(state) do
-    now = DateTime.utc_now()
-    graph_data = DataQueries.query_graph_data(state.canvas_id, state.elements, now, state.span)
-    text_data = DataQueries.query_text_data(state.canvas_id, state.elements, now)
+  defp start_poll(state) do
+    ref = make_ref()
+    parent = self()
+    canvas_id = state.canvas_id
+    elements = state.elements
+    span = effective_span(state.subscribers)
 
+    {:ok, _pid} =
+      Task.start(fn ->
+        now = DateTime.utc_now()
+        graph_data = DataQueries.query_graph_data(canvas_id, elements, now, span)
+        text_data = DataQueries.query_text_data(canvas_id, elements, now)
+        send(parent, {:poll_result, ref, graph_data, text_data})
+      end)
+
+    %{state | poll_ref: ref}
+  end
+
+  defp effective_span(subscribers) do
+    subscribers
+    |> Map.values()
+    |> Enum.map(& &1.span)
+    |> Enum.filter(&(is_number(&1) and &1 > 0))
+    |> Enum.max(fn -> @default_span end)
+  end
+
+  defp merge_and_broadcast(state, graph_data, text_data) do
     changed_graph =
       for {id, points} <- graph_data,
           Map.get(state.last_graph, id) != points,

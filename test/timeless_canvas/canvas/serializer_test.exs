@@ -111,14 +111,15 @@ defmodule TimelessCanvas.Canvas.SerializerTest do
       assert {:error, _} = Serializer.decode(%{"version" => 2, "elements" => "garbage"})
     end
 
-    test "unknown element type falls back to :rect" do
+    @tag capture_log: true
+    test "unknown element type is skipped instead of silently rewritten" do
       data = %{
         "version" => 2,
         "elements" => %{"el-1" => %{"id" => "el-1", "type" => "definitely_not_an_atom_xyz"}}
       }
 
       assert {:ok, canvas} = Serializer.decode(data)
-      assert canvas.elements["el-1"].type == :rect
+      assert canvas.elements == %{}
     end
 
     test "element status always decodes to :unknown" do
@@ -166,6 +167,40 @@ defmodule TimelessCanvas.Canvas.SerializerTest do
 
       assert {:ok, canvas} = Serializer.decode(data)
       assert canvas.elements["el-1"].pins["host"] == pin
+    end
+
+    test "repairs stale counters, string numbers, mismatched ids, and dangling connections" do
+      data = %{
+        "version" => 2,
+        "next_id" => 1,
+        "elements" => %{
+          "el-7" => %{"id" => "el-999", "type" => "graph", "x" => "12.5"},
+          "bad" => "not a map"
+        },
+        "connections" => %{
+          "conn-8" => %{"source_id" => "el-7", "target_id" => "missing"}
+        }
+      }
+
+      assert {:ok, canvas} = Serializer.decode(data)
+      assert canvas.elements["el-7"].id == "el-7"
+      assert canvas.elements["el-7"].x == 12.5
+      assert canvas.next_id == 8
+      assert canvas.connections == %{}
+
+      {canvas, element} = Canvas.add_element(canvas)
+      assert element.id == "el-8"
+      assert map_size(canvas.elements) == 2
+    end
+
+    test "integer legacy pin values are migrated without crashing" do
+      data = %{
+        "version" => 1,
+        "elements" => %{"el-1" => %{"meta" => %{"host" => 123}}}
+      }
+
+      assert {:ok, canvas} = Serializer.decode(data)
+      assert canvas.elements["el-1"].pins["host"] == %{"mode" => "literal", "value" => "123"}
     end
   end
 end

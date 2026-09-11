@@ -62,6 +62,9 @@ defmodule TimelessCanvas.DataSource.Manager do
     GenServer.cast(server, {:unregister_element, canvas_id, element_id})
   end
 
+  @doc false
+  def reset(server \\ __MODULE__), do: GenServer.call(server, :reset)
+
   # --- Client API (caller-side: reads config from ETS, queries directly) ---
 
   def statuses_at(canvas_id, time) do
@@ -313,6 +316,7 @@ defmodule TimelessCanvas.DataSource.Manager do
           # a canvas's elements are dropped when its pid set empties.
           registrants: %{},
           poll_interval: poll_interval,
+          poll_ref: nil,
           # %{{canvas_id, element_id} => status}
           last_statuses: %{},
           debug: %{
@@ -341,8 +345,10 @@ defmodule TimelessCanvas.DataSource.Manager do
   def handle_call({:register_elements, canvas_id, elements}, {caller, _tag}, state) do
     {ds_state, element_map} =
       Enum.reduce(elements, {state.ds_state, state.elements}, fn element, {ds, elmap} ->
-        {:ok, ds} = state.module.subscribe(ds, element)
-        {ds, Map.put(elmap, {canvas_id, element.id}, element)}
+        case safe_subscribe(state.module, ds, element) do
+          {:ok, next_ds} -> {next_ds, Map.put(elmap, {canvas_id, element.id}, element)}
+          :error -> {ds, elmap}
+        end
       end)
 
     debug =
@@ -359,6 +365,40 @@ defmodule TimelessCanvas.DataSource.Manager do
     {:reply, :ok, state}
   end
 
+  def handle_call(:reset, _from, state) do
+    ds_state =
+      Enum.reduce(state.elements, state.ds_state, fn {_key, element}, ds ->
+        safe_unsubscribe(state.module, ds, element)
+      end)
+
+    Enum.each(state.registrants, fn {_canvas_id, registrants} ->
+      Enum.each(registrants, fn {_pid, ref} -> Process.demonitor(ref, [:flush]) end)
+    end)
+
+    debug = %{
+      register_calls: 0,
+      registered_elements: 0,
+      polls: 0,
+      poll_time_us: 0,
+      statuses_broadcast: 0
+    }
+
+    state =
+      %{
+        state
+        | ds_state: ds_state,
+          elements: %{},
+          registrants: %{},
+          last_statuses: %{},
+          poll_ref: nil,
+          debug: debug
+      }
+      |> publish_source()
+      |> publish_elements()
+
+    {:reply, :ok, state}
+  end
+
   @impl true
   def handle_cast({:unregister_element, canvas_id, element_id}, state) do
     case Map.pop(state.elements, {canvas_id, element_id}) do
@@ -366,7 +406,7 @@ defmodule TimelessCanvas.DataSource.Manager do
         {:noreply, state}
 
       {element, elements} ->
-        {:ok, ds_state} = state.module.unsubscribe(state.ds_state, element)
+        ds_state = safe_unsubscribe(state.module, state.ds_state, element)
         last_statuses = Map.delete(state.last_statuses, {canvas_id, element_id})
 
         state =
@@ -380,18 +420,50 @@ defmodule TimelessCanvas.DataSource.Manager do
 
   @impl true
   def handle_info(:poll, state) do
-    {poll_us, state} =
-      Profiling.timed(fn ->
-        state
-        |> update_in([:debug, :polls], &(&1 + 1))
-        |> poll_all()
-      end)
+    state =
+      if is_nil(state.poll_ref) and map_size(state.elements) > 0 do
+        ref = make_ref()
+        parent = self()
+        module = state.module
+        ds_state = state.ds_state
+        elements = state.elements
 
-    state = update_in(state, [:debug, :poll_time_us], &(&1 + poll_us))
+        {:ok, _pid} =
+          Task.start(fn ->
+            {poll_us, statuses} =
+              Profiling.timed(fn -> poll_status_snapshot(module, ds_state, elements) end)
+
+            send(parent, {:poll_result, ref, poll_us, statuses})
+          end)
+
+        state
+        |> Map.put(:poll_ref, ref)
+        |> update_in([:debug, :polls], &(&1 + 1))
+      else
+        state
+      end
 
     schedule_poll(state.poll_interval)
     {:noreply, state}
   end
+
+  def handle_info({:poll_result, ref, poll_us, statuses}, %{poll_ref: ref} = state) do
+    state =
+      Enum.reduce(statuses, state, fn {canvas_id, element_id, status}, acc ->
+        if Map.has_key?(acc.elements, {canvas_id, element_id}) do
+          maybe_broadcast_status(acc, canvas_id, element_id, status)
+        else
+          acc
+        end
+      end)
+
+    {:noreply,
+     state
+     |> Map.put(:poll_ref, nil)
+     |> update_in([:debug, :poll_time_us], &(&1 + poll_us))}
+  end
+
+  def handle_info({:poll_result, _ref, _poll_us, _statuses}, state), do: {:noreply, state}
 
   def handle_info(:debug_report, state) do
     Logger.info(
@@ -496,8 +568,7 @@ defmodule TimelessCanvas.DataSource.Manager do
     else
       ds_state =
         Enum.reduce(dropped, state.ds_state, fn {_key, element}, ds ->
-          {:ok, ds} = state.module.unsubscribe(ds, element)
-          ds
+          safe_unsubscribe(state.module, ds, element)
         end)
 
       last_statuses = Map.drop(state.last_statuses, Map.keys(dropped))
@@ -512,33 +583,106 @@ defmodule TimelessCanvas.DataSource.Manager do
   # per-canvas text_metric_at diff/broadcast covers what the old
   # poll_text_metric -> {:element_text_metric, ...} path did, so the
   # Manager poll loop now only tracks statuses.
-  defp poll_all(state) do
+  defp poll_status_snapshot(module, ds_state, elements) do
     # One batch status query per canvas: the batch callback keys its
     # result by bare element id, which is only unambiguous per canvas.
-    state.elements
+    elements
     |> Enum.group_by(fn {{canvas_id, _id}, _el} -> canvas_id end, fn {{_cid, id}, el} ->
       {id, el}
     end)
-    |> Enum.reduce(state, fn {canvas_id, elements}, acc ->
-      statuses = poll_statuses(acc, Map.new(elements))
+    |> Enum.flat_map(fn {canvas_id, elements} ->
+      statuses = poll_statuses(module, ds_state, Map.new(elements))
 
-      Enum.reduce(elements, acc, fn {element_id, _element}, acc2 ->
+      Enum.flat_map(elements, fn {element_id, _element} ->
         case Map.fetch(statuses, element_id) do
-          {:ok, status} -> maybe_broadcast_status(acc2, canvas_id, element_id, status)
-          :error -> acc2
+          {:ok, status} -> [{canvas_id, element_id, status}]
+          :error -> []
         end
       end)
     end)
   end
 
-  defp poll_statuses(state, elements) do
-    if function_exported?(state.module, :statuses, 2) do
-      state.module.statuses(state.ds_state, Map.values(elements))
+  defp poll_statuses(module, ds_state, elements) do
+    source_statuses =
+      if function_exported?(module, :statuses, 2) do
+        module.statuses(ds_state, Map.values(elements))
+      else
+        Enum.reduce(elements, %{}, fn {element_id, element}, acc ->
+          Map.put(acc, element_id, module.status(ds_state, element))
+        end)
+      end
+
+    Map.merge(source_statuses, alert_statuses(Map.values(elements)), fn _id, source, alert ->
+      worse_status(source, alert)
+    end)
+  rescue
+    error ->
+      Logger.warning("TimelessCanvas status poll failed: #{Exception.message(error)}")
+      %{}
+  end
+
+  defp alert_statuses(elements) do
+    backend = TimelessCanvas.AlertSource.backend()
+
+    if backend && Code.ensure_loaded?(backend) && function_exported?(backend, :statuses, 1) do
+      case backend.statuses(elements) do
+        statuses when is_map(statuses) -> statuses
+        _ -> %{}
+      end
     else
-      Enum.reduce(elements, %{}, fn {element_id, element}, acc ->
-        Map.put(acc, element_id, state.module.status(state.ds_state, element))
-      end)
+      %{}
     end
+  rescue
+    error ->
+      Logger.warning("TimelessCanvas alert status poll failed: #{Exception.message(error)}")
+      %{}
+  end
+
+  defp worse_status(left, right) do
+    severity = %{unknown: 0, ok: 1, warning: 2, error: 3}
+    if Map.get(severity, right, 0) > Map.get(severity, left, 0), do: right, else: left
+  end
+
+  defp safe_subscribe(module, ds_state, element) do
+    case module.subscribe(ds_state, element) do
+      {:ok, next_state} ->
+        {:ok, next_state}
+
+      other ->
+        Logger.warning(
+          "TimelessCanvas data-source subscribe failed for #{element.id}: #{inspect(other)}"
+        )
+
+        :error
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "TimelessCanvas data-source subscribe raised for #{element.id}: #{Exception.message(error)}"
+      )
+
+      :error
+  end
+
+  defp safe_unsubscribe(module, ds_state, element) do
+    case module.unsubscribe(ds_state, element) do
+      {:ok, next_state} ->
+        next_state
+
+      other ->
+        Logger.warning(
+          "TimelessCanvas data-source unsubscribe failed for #{element.id}: #{inspect(other)}"
+        )
+
+        ds_state
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "TimelessCanvas data-source unsubscribe raised for #{element.id}: #{Exception.message(error)}"
+      )
+
+      ds_state
   end
 
   defp maybe_broadcast_status(state, canvas_id, element_id, status) do

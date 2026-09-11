@@ -57,6 +57,17 @@ defmodule TimelessCanvas.CanvasTest do
       assert el.height == 100.0
       assert el.color == "#6366f1"
     end
+
+    test "normalizes string-keyed attrs and never overwrites a stale id" do
+      canvas = %{bare_canvas() | next_id: 1}
+      {canvas, first} = Canvas.add_element(canvas, %{"type" => "server", "pins" => nil})
+      {canvas, second} = Canvas.add_element(%{canvas | next_id: 1}, %{})
+
+      assert first.type == :server
+      assert first.pins == %{}
+      assert second.id == "el-2"
+      assert map_size(canvas.elements) == 2
+    end
   end
 
   describe "move_element/4" do
@@ -108,6 +119,21 @@ defmodule TimelessCanvas.CanvasTest do
       updated = canvas.elements[el.id]
       assert updated.label == "web-1"
       assert updated.z_index == 5
+    end
+
+    test "drops immutable and unknown fields" do
+      {canvas, el} = Canvas.add_element(bare_canvas(), %{})
+
+      updated =
+        Canvas.update_element(canvas, el.id, %{
+          "id" => "el-999",
+          "bogus" => true,
+          "label" => "safe"
+        })
+
+      assert updated.elements[el.id].id == el.id
+      assert updated.elements[el.id].label == "safe"
+      refute Map.has_key?(updated.elements, "el-999")
     end
 
     test "unknown id is a no-op" do
@@ -219,6 +245,32 @@ defmodule TimelessCanvas.CanvasTest do
 
       assert conn == nil
       assert canvas2 == canvas
+    end
+
+    test "rejects self-loops and duplicate directed edges" do
+      {canvas, a} = Canvas.add_element(bare_canvas(), %{})
+      {canvas, b} = Canvas.add_element(canvas, %{})
+      assert {^canvas, nil} = Canvas.add_connection(canvas, a.id, a.id)
+
+      {canvas, _} = Canvas.add_connection(canvas, a.id, b.id)
+      assert {^canvas, nil} = Canvas.add_connection(canvas, a.id, b.id)
+    end
+
+    test "connection updates cannot rewrite identity or endpoints" do
+      {canvas, a} = Canvas.add_element(bare_canvas(), %{})
+      {canvas, b} = Canvas.add_element(canvas, %{})
+      {canvas, conn} = Canvas.add_connection(canvas, a.id, b.id)
+
+      updated =
+        Canvas.update_connection(canvas, conn.id, %{
+          "id" => "bad",
+          "source_id" => b.id,
+          "style" => "bad"
+        })
+
+      assert updated.connections[conn.id].id == conn.id
+      assert updated.connections[conn.id].source_id == a.id
+      assert updated.connections[conn.id].style == :solid
     end
 
     test "remove_connection and update_connection" do

@@ -58,14 +58,12 @@ const CanvasDebugCopy = {
   // consumers can style success/failure states.
   flash(ok) {
     if (this._flashTimer) clearTimeout(this._flashTimer);
-    if (this.el.dataset.copyLabel == null) {
-      this.el.dataset.copyLabel = (this.el.textContent || "").trim();
-    }
+    if (this._copyHTML == null) this._copyHTML = this.el.innerHTML;
     this.el.dataset.copied = ok ? "true" : "false";
     this.el.textContent = ok ? "Copied!" : "Copy failed";
     this._flashTimer = setTimeout(() => {
       this._flashTimer = null;
-      this.el.textContent = this.el.dataset.copyLabel;
+      this.el.innerHTML = this._copyHTML;
       delete this.el.dataset.copied;
     }, 1200);
   },

@@ -32,7 +32,17 @@ defmodule TimelessCanvas.Canvas do
   Create a new canvas with optional overrides.
   """
   def new(opts \\ []) do
-    struct!(__MODULE__, opts)
+    canvas = struct(__MODULE__, opts)
+
+    grid_size =
+      if is_number(canvas.grid_size) and canvas.grid_size > 0, do: canvas.grid_size, else: 20
+
+    %{
+      canvas
+      | grid_size: grid_size,
+        next_id: next_counter(canvas.elements, canvas.next_id, "el-"),
+        next_conn_id: next_counter(canvas.connections, canvas.next_conn_id, "conn-")
+    }
   end
 
   # --- Elements ---
@@ -42,19 +52,20 @@ defmodule TimelessCanvas.Canvas do
   Returns `{canvas, element}`.
   """
   def add_element(%__MODULE__{} = canvas, attrs \\ %{}) do
-    id = "el-#{canvas.next_id}"
+    counter = next_counter(canvas.elements, canvas.next_id, "el-")
+    id = "el-#{counter}"
 
     element =
       attrs
+      |> Element.normalize_attrs()
       |> Map.put(:id, id)
-      |> Map.put(:pins, Map.get(attrs, :pins, %{}))
       |> Element.new()
       |> maybe_snap(canvas)
 
     canvas = %{
       canvas
       | elements: Map.put(canvas.elements, id, element),
-        next_id: canvas.next_id + 1
+        next_id: counter + 1
     }
 
     {canvas, element}
@@ -97,7 +108,15 @@ defmodule TimelessCanvas.Canvas do
         canvas
 
       element ->
-        updated = struct!(element, attrs) |> maybe_snap(canvas)
+        safe_attrs = attrs |> Element.normalize_attrs() |> Map.drop([:id])
+
+        updated =
+          element
+          |> Map.from_struct()
+          |> Map.merge(safe_attrs)
+          |> Element.new()
+          |> maybe_snap(canvas)
+
         %{canvas | elements: Map.put(canvas.elements, id, updated)}
     end
   end
@@ -121,24 +140,27 @@ defmodule TimelessCanvas.Canvas do
   Returns `{updated_canvas, new_ids}`.
   """
   def duplicate_elements(%__MODULE__{} = canvas, templates, offset) when is_list(templates) do
-    Enum.reduce(templates, {canvas, []}, fn template, {acc_canvas, acc_ids} ->
-      attrs = %{
-        type: template.type,
-        x: template.x + offset,
-        y: template.y + offset,
-        width: template.width,
-        height: template.height,
-        label: template.label,
-        color: template.color,
-        meta: template.meta,
-        pins: template.pins,
-        z_index: template.z_index,
-        status: :unknown
-      }
+    {canvas, ids} =
+      Enum.reduce(templates, {canvas, []}, fn template, {acc_canvas, acc_ids} ->
+        attrs = %{
+          type: template.type,
+          x: template.x + offset,
+          y: template.y + offset,
+          width: template.width,
+          height: template.height,
+          label: template.label,
+          color: template.color,
+          meta: template.meta,
+          pins: template.pins,
+          z_index: template.z_index,
+          status: :unknown
+        }
 
-      {new_canvas, new_el} = add_element(acc_canvas, attrs)
-      {new_canvas, acc_ids ++ [new_el.id]}
-    end)
+        {new_canvas, new_el} = add_element(acc_canvas, attrs)
+        {new_canvas, [new_el.id | acc_ids]}
+      end)
+
+    {canvas, Enum.reverse(ids)}
   end
 
   @doc """
@@ -173,19 +195,30 @@ defmodule TimelessCanvas.Canvas do
   Returns `{canvas, connection}`.
   """
   def add_connection(%__MODULE__{} = canvas, source_id, target_id, attrs \\ %{}) do
-    if Map.has_key?(canvas.elements, source_id) and Map.has_key?(canvas.elements, target_id) do
-      id = "conn-#{canvas.next_conn_id}"
+    duplicate? =
+      Enum.any?(canvas.connections, fn {_id, conn} ->
+        conn.source_id == source_id and conn.target_id == target_id
+      end)
+
+    if source_id != target_id and not duplicate? and Map.has_key?(canvas.elements, source_id) and
+         Map.has_key?(canvas.elements, target_id) do
+      counter = next_counter(canvas.connections, canvas.next_conn_id, "conn-")
+      id = "conn-#{counter}"
 
       conn =
-        struct!(
+        struct(
           Connection,
-          Map.merge(attrs, %{id: id, source_id: source_id, target_id: target_id})
+          Map.merge(normalize_connection_attrs(attrs), %{
+            id: id,
+            source_id: source_id,
+            target_id: target_id
+          })
         )
 
       canvas = %{
         canvas
         | connections: Map.put(canvas.connections, id, conn),
-          next_conn_id: canvas.next_conn_id + 1
+          next_conn_id: counter + 1
       }
 
       {canvas, conn}
@@ -210,7 +243,12 @@ defmodule TimelessCanvas.Canvas do
         canvas
 
       conn ->
-        updated = struct!(conn, attrs)
+        updated =
+          struct(
+            conn,
+            normalize_connection_attrs(attrs) |> Map.drop([:id, :source_id, :target_id])
+          )
+
         %{canvas | connections: Map.put(canvas.connections, id, updated)}
     end
   end
@@ -223,6 +261,15 @@ defmodule TimelessCanvas.Canvas do
     |> Map.values()
     |> Enum.filter(fn conn ->
       conn.source_id == element_id or conn.target_id == element_id
+    end)
+  end
+
+  @doc "Build an element-id to connections index in one pass."
+  def connection_index(%__MODULE__{} = canvas) do
+    Enum.reduce(canvas.connections, %{}, fn {_id, conn}, index ->
+      index
+      |> Map.update(conn.source_id, [conn], &[conn | &1])
+      |> Map.update(conn.target_id, [conn], &[conn | &1])
     end)
   end
 
@@ -253,4 +300,46 @@ defmodule TimelessCanvas.Canvas do
   end
 
   defp maybe_snap_size(element, _canvas), do: element
+
+  defp next_counter(items, requested, prefix) do
+    requested = if is_integer(requested) and requested > 0, do: requested, else: 1
+
+    max_existing =
+      items
+      |> Map.keys()
+      |> Enum.reduce(0, fn key, max_id ->
+        if is_binary(key) and String.starts_with?(key, prefix) do
+          case key |> String.replace_prefix(prefix, "") |> Integer.parse() do
+            {id, ""} -> max(id, max_id)
+            _ -> max_id
+          end
+        else
+          max_id
+        end
+      end)
+
+    max(requested, max_existing + 1)
+  end
+
+  defp normalize_connection_attrs(attrs) when is_list(attrs),
+    do: attrs |> Map.new() |> normalize_connection_attrs()
+
+  defp normalize_connection_attrs(attrs) when is_map(attrs) do
+    fields = ~w(id source_id target_id label color style meta)a
+    names = Map.new(fields, &{Atom.to_string(&1), &1})
+
+    attrs
+    |> Map.new(fn
+      {key, value} when is_atom(key) -> {key, value}
+      {key, value} when is_binary(key) -> {Map.get(names, key, key), value}
+      pair -> pair
+    end)
+    |> Map.take(fields)
+    |> Map.update(:style, :solid, fn style ->
+      if style in [:solid, :dashed, :dotted], do: style, else: :solid
+    end)
+    |> Map.update(:meta, %{}, &if(is_map(&1), do: &1, else: %{}))
+  end
+
+  defp normalize_connection_attrs(_attrs), do: %{}
 end

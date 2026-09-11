@@ -20,7 +20,7 @@ defmodule TimelessCanvas.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger, :crypto]
     ]
   end
 
@@ -41,6 +41,7 @@ defmodule TimelessCanvas.MixProject do
       {:phoenix_live_view, "~> 1.1"},
       {:phoenix_html, "~> 4.1"},
       {:ecto_sql, "~> 3.13"},
+      {:ecto_sqlite3, "~> 0.22", only: :test},
       {:jason, "~> 1.2"},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev, optional: true},
       # Browser E2E suite only: HTTP server for the test endpoint.

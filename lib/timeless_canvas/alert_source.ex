@@ -66,7 +66,25 @@ defmodule TimelessCanvas.AlertSource do
   """
   @callback delivery_formats() :: [{String.t(), String.t()}]
 
-  @optional_callbacks [delivery_formats: 0]
+  @doc "Current alert-derived status for each supplied element id."
+  @callback statuses(elements :: [Element.t()]) :: %{optional(String.t()) => atom()}
+
+  @doc "All rules for a central alert console, including element-orphaned rules."
+  @callback list_all_rules(actor :: map()) :: {:ok, [rule()]} | {:error, term()}
+
+  @doc "Recent alert events for one rule."
+  @callback list_history(rule_id :: term(), opts :: keyword()) ::
+              {:ok, [map()]} | {:error, term()}
+
+  @doc "Acknowledge one firing/history entry as the current actor."
+  @callback acknowledge_alert(alert_id :: term(), actor :: map()) ::
+              :ok | {:error, term()}
+
+  @optional_callbacks delivery_formats: 0,
+                      statuses: 1,
+                      list_all_rules: 1,
+                      list_history: 2,
+                      acknowledge_alert: 2
 
   @doc "The configured backend, or nil when alerting is not wired up."
   def backend, do: Application.get_env(:timeless_canvas, :alert_backend)

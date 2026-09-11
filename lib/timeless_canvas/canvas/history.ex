@@ -6,6 +6,7 @@ defmodule TimelessCanvas.Canvas.History do
 
   alias TimelessCanvas.Canvas
 
+  @enforce_keys [:present]
   defstruct past: [], present: nil, future: [], max_size: 50
 
   @type t :: %__MODULE__{
@@ -20,6 +21,11 @@ defmodule TimelessCanvas.Canvas.History do
   """
   def new(%Canvas{} = canvas, opts \\ []) do
     max_size = Keyword.get(opts, :max_size, 50)
+
+    unless is_integer(max_size) and max_size > 0 do
+      raise ArgumentError, "history max_size must be a positive integer"
+    end
+
     %__MODULE__{present: canvas, max_size: max_size}
   end
 

@@ -8,6 +8,11 @@ Application.put_env(:timeless_canvas, :pubsub, TimelessCanvas.TestPubSub)
 Application.put_env(:timeless_canvas, :persistence, TimelessCanvas.Test.FakePersistence)
 Application.put_env(:timeless_canvas, :auth, TimelessCanvas.Auth.Noop)
 
+Application.put_env(:timeless_canvas, TimelessCanvas.Test.Repo,
+  database: ":memory:",
+  pool_size: 1
+)
+
 Application.put_env(:timeless_canvas, :data_source,
   module: TimelessCanvas.Test.FakeDataSource,
   config: %{},
@@ -47,6 +52,7 @@ TimelessCanvas.Test.FakeDataSource.ensure_table!()
   Supervisor.start_link(
     [
       {Phoenix.PubSub, name: TimelessCanvas.TestPubSub},
+      TimelessCanvas.Test.Repo,
       TimelessCanvas.Test.FakePersistence,
       TimelessCanvas.Supervisor,
       TimelessCanvas.Test.Endpoint
@@ -54,5 +60,15 @@ TimelessCanvas.Test.FakeDataSource.ensure_table!()
     strategy: :one_for_one,
     name: TimelessCanvas.TestSupervisor
   )
+
+for statement <- [
+      "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL)",
+      "CREATE TABLE canvases (id INTEGER PRIMARY KEY, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, parent_id INTEGER REFERENCES canvases(id) ON DELETE SET NULL, inserted_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+      "CREATE UNIQUE INDEX canvases_user_id_name_index ON canvases(user_id, name)",
+      "CREATE TABLE canvas_accesses (id INTEGER PRIMARY KEY, role TEXT NOT NULL, canvas_id INTEGER NOT NULL REFERENCES canvases(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, inserted_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+      "CREATE UNIQUE INDEX canvas_accesses_canvas_id_user_id_index ON canvas_accesses(canvas_id, user_id)"
+    ] do
+  Ecto.Adapters.SQL.query!(TimelessCanvas.Test.Repo, statement, [])
+end
 
 ExUnit.start(exclude: if(e2e?, do: [], else: [:e2e]))

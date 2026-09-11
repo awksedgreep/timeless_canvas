@@ -40,7 +40,11 @@ defmodule TimelessCanvas.Test.FakeStreamBackend do
   def subscribe(opts) do
     ensure_table!()
     :ets.insert(@table, {:subscriber, self(), opts})
-    :ok
+
+    case :ets.lookup(@table, :subscribe_result) do
+      [{:subscribe_result, result} | _] -> result
+      [] -> :ok
+    end
   end
 
   @impl true
@@ -62,6 +66,14 @@ defmodule TimelessCanvas.Test.FakeStreamBackend do
     ensure_table!()
     :ets.delete(@table, :query_result)
     :ets.insert(@table, {:query_result, result})
+    :ok
+  end
+
+  @doc "Program subscribe/1 to return an error (or restore it with :ok)."
+  def set_subscribe_result(result) do
+    ensure_table!()
+    :ets.delete(@table, :subscribe_result)
+    :ets.insert(@table, {:subscribe_result, result})
     :ok
   end
 
