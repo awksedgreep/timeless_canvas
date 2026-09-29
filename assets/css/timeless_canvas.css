@@ -905,6 +905,14 @@ body.tc-canvas-open {
   fill: rgba(99, 102, 241, 0.15);
 }
 
+.canvas-top-row {
+  cursor: pointer;
+}
+
+.canvas-top-row:hover {
+  fill: rgba(99, 102, 241, 0.15);
+}
+
 .stream-popover {
   cursor: pointer;
 }

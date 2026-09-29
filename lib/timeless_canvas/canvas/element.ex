@@ -48,7 +48,8 @@ defmodule TimelessCanvas.Canvas.Element do
     trace_stream: %{width: 280.0, height: 80.0, color: "#8b5cf6"},
     canvas: %{width: 140.0, height: 100.0, color: "#818cf8"},
     text: %{width: 200.0, height: 40.0, color: "#e2e8f0"},
-    text_series: %{width: 200.0, height: 60.0, color: "#14b8a6"}
+    text_series: %{width: 200.0, height: 60.0, color: "#14b8a6"},
+    top_n: %{width: 260.0, height: 170.0, color: "#f43f5e"}
   }
 
   @pin_dimensions ~w(host ifname)a
@@ -148,12 +149,13 @@ defmodule TimelessCanvas.Canvas.Element do
     cache: ~w(engine host port icon),
     router: ~w(host ip os role os_icon),
     network: ~w(host cidr vlan icon),
-    graph: ~w(host metric_name y_min y_max icon),
+    graph: ~w(host metric_name label_filter aggregate window y_min y_max icon),
     log_stream: ~w(host level metadata_filter),
     trace_stream: ~w(host service name kind),
     canvas: ~w(canvas_id),
     text: ~w(font_size),
-    text_series: ~w(host metric_name icon)
+    text_series: ~w(host metric_name icon),
+    top_n: ~w(host metric_name label_filter group_by limit order aggregate window)
   }
 
   @doc """
@@ -162,6 +164,109 @@ defmodule TimelessCanvas.Canvas.Element do
   """
   def meta_fields(type) do
     Map.get(@meta_fields, type, [])
+  end
+
+  @non_label_meta_keys ~w(
+    metric_name series_label_key series_label_value y_min y_max icon os_icon
+    aggregate group_by label_filter limit order window
+  )
+
+  @doc """
+  Meta keys that configure an element rather than select a series.
+
+  Every other meta key is a label filter, so a new display or query option
+  must be listed here or it silently narrows the query to nothing.
+  """
+  def non_label_meta_keys, do: @non_label_meta_keys
+
+  @doc """
+  The label filter an element's metric queries use, derived from its meta.
+
+  Accepts an element or a bare meta map. Blank values are dropped, and a
+  `series_label_key`/`series_label_value` pair is applied as one more label.
+  Data sources should call this rather than deriving labels themselves, so
+  the properties panel and the query agree on what is being selected.
+  """
+  def query_labels(%__MODULE__{meta: meta}), do: query_labels(meta)
+
+  def query_labels(meta) when is_map(meta) do
+    labels =
+      meta
+      |> Map.drop(@non_label_meta_keys)
+      |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
+      |> Map.new()
+
+    case {meta["series_label_key"], meta["series_label_value"]} do
+      {key, value} when is_binary(key) and key != "" and is_binary(value) and value != "" ->
+        Map.put(labels, key, value)
+
+      _ ->
+        labels
+    end
+  end
+
+  def query_labels(_meta), do: %{}
+
+  @doc """
+  What an element's `label_filter` adds to its labels: the things equality
+  on one value cannot say.
+
+  The filter is a comma-separated list of `key=value` and `key!=value`, and
+  a value may be several joined by `|`:
+
+      kind!=slice|manager, comm=postgres|pgbouncer
+
+  Returns `[{key, :eq | :neq, [value]}]`. Terms that do not parse are left
+  out, so a filter half typed narrows nothing rather than everything.
+  """
+  def label_filter(%__MODULE__{meta: meta}), do: label_filter(meta)
+
+  def label_filter(%{"label_filter" => filter}) when is_binary(filter) do
+    filter
+    |> String.split(",")
+    |> Enum.flat_map(&parse_matcher/1)
+    |> Enum.group_by(fn {key, op, _values} -> {key, op} end, fn {_, _, values} -> values end)
+    |> Enum.map(fn {{key, op}, values} -> {key, op, values |> List.flatten() |> Enum.uniq()} end)
+    |> Enum.sort()
+  end
+
+  def label_filter(_meta), do: []
+
+  @doc """
+  Everything an element selects by, as `[{key, :eq | :neq, [value]}]`: its
+  labels (`query_labels/1`) and its `label_filter/1`.
+
+  This is what `metric_range/6` and `top_series/5` filter by. A backend that
+  can only ask what a label equals cannot honour it, and should not export
+  them.
+  """
+  def query_matchers(element_or_meta) do
+    labels =
+      for {key, value} <- element_or_meta |> query_labels() |> Enum.sort(),
+          do: {key, :eq, [to_string(value)]}
+
+    labels ++ label_filter(element_or_meta)
+  end
+
+  @doc """
+  Whether a series' labels satisfy a list of matchers. A label the series
+  does not carry is not equal to anything, so it passes every `:neq`.
+  """
+  def matches?(labels, matchers) when is_map(labels) and is_list(matchers) do
+    Enum.all?(matchers, fn
+      {key, :eq, values} -> to_string(Map.get(labels, key, "")) in values
+      {key, :neq, values} -> to_string(Map.get(labels, key, "")) not in values
+    end)
+  end
+
+  defp parse_matcher(term) do
+    with [_, key, op, values] <- Regex.run(~r/^\s*([^=!\s]+)\s*(!=|=)(.*)$/s, term),
+         [_ | _] = values <-
+           values |> String.split("|") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) do
+      [{key, if(op == "=", do: :eq, else: :neq), values}]
+    else
+      _ -> []
+    end
   end
 
   @doc """

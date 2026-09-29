@@ -7,6 +7,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   require Logger
 
   alias TimelessCanvas.Canvas.Element
+  alias TimelessCanvas.DataQueries
   alias TimelessCanvas.IconCatalog
   alias TimelessCanvas.MetricFormatter
   alias TimelessCanvas.Profiling
@@ -17,7 +18,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   attr(:stream_entries, :any, default: [])
   attr(:expanded_graph_id, :string, default: nil)
   attr(:metric_units, :map, default: %{})
-  # value | nil (no data) | :error (backend query failure)
+  # value | nil (no data) | :error (backend query failure). A text_series
+  # value is a string; a top_n value is its list of ranked rows.
   attr(:text_value, :any, default: nil)
 
   def canvas_element(assigns) do
@@ -58,7 +60,9 @@ defmodule TimelessCanvas.Components.CanvasComponents do
           <.element_icon element={@element} />
           <.element_badge_icon element={@element} />
           <text
-            :if={@element.type not in [:graph, :log_stream, :trace_stream, :text, :text_series]}
+            :if={
+              @element.type not in [:graph, :log_stream, :trace_stream, :text, :text_series, :top_n]
+            }
             x={@element.x + @render_w / 2}
             y={@element.y + @render_h - 16}
             text-anchor="middle"
@@ -553,6 +557,130 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     """
   end
 
+  defp element_body(%{element: %{type: :top_n}} = assigns) do
+    meta = assigns.element.meta || %{}
+    metric_name = Map.get(meta, "metric_name", "")
+    opts = DataQueries.build_top_opts(meta)
+
+    title =
+      case {assigns.element.label, metric_name} do
+        {label, ""} when label in [nil, ""] -> "Top #{opts[:limit]}"
+        {label, metric} when label in [nil, ""] -> metric
+        {label, ""} -> label
+        {label, metric} -> "#{label} | #{metric}"
+      end
+
+    max_rows = max(floor((assigns.element.height - 20) / 14), 1)
+
+    {rows, notice, notice_fill} =
+      case assigns.text_value do
+        :error -> {[], "data unavailable", "#f59e0b"}
+        rows when is_list(rows) and rows != [] -> {Enum.take(rows, max_rows), nil, nil}
+        _ when metric_name == "" -> {[], "Choose a metric", "#475569"}
+        _ -> {[], "No data", "#475569"}
+      end
+
+    # Bars share one scale, so their lengths compare across rows. Negative
+    # values draw no bar rather than a misleading one.
+    scale = rows |> Enum.map(&max(&1.value, 0)) |> Enum.max(fn -> 0 end)
+    unit = Map.get(assigns.metric_units, assigns.element.id)
+    bar_width = assigns.element.width - 4
+    # Value text is right-aligned in ~11 chars; the name gets the rest
+    # (font-size 9 monospace is ~5.4px per char).
+    name_budget = max(trunc((assigns.element.width - 70) / 5.4), 4)
+
+    rows =
+      Enum.map(rows, fn row ->
+        %{
+          name: row.labels |> top_row_name(opts[:group_by]) |> truncate_text(name_budget),
+          value: MetricFormatter.format(row.value, unit),
+          bar: if(scale > 0, do: bar_width * max(row.value, 0) / scale, else: 0)
+        }
+      end)
+
+    assigns =
+      assign(assigns, title: title, rows: rows, notice: notice, notice_fill: notice_fill)
+
+    ~H"""
+    <rect
+      x={@element.x}
+      y={@element.y}
+      width={@element.width}
+      height={@element.height}
+      rx="4"
+      ry="4"
+      fill="#0f172a"
+      class="canvas-element__body"
+    />
+    <clipPath id={"top-clip-#{@element.id}"}>
+      <rect x={@element.x} y={@element.y} width={@element.width} height={@element.height} rx="4" />
+    </clipPath>
+    <text
+      x={@element.x + 4}
+      y={@element.y + 10}
+      class="canvas-graph__title"
+      fill="#94a3b8"
+      font-size="8"
+      clip-path={"url(#top-clip-#{@element.id})"}
+    >
+      {@title}
+    </text>
+    <g :for={{row, i} <- Enum.with_index(@rows)}>
+      <rect
+        x={@element.x}
+        y={@element.y + 15 + i * 14}
+        width={@element.width}
+        height="14"
+        fill="transparent"
+        class="canvas-top-row"
+        data-top-index={i}
+      />
+      <rect
+        x={@element.x + 2}
+        y={@element.y + 16 + i * 14}
+        width={row.bar}
+        height="12"
+        rx="2"
+        fill={@element.color}
+        opacity="0.3"
+        pointer-events="none"
+      />
+      <text
+        x={@element.x + 6}
+        y={@element.y + 25 + i * 14}
+        fill="#e2e8f0"
+        font-size="9"
+        font-family="monospace"
+        clip-path={"url(#top-clip-#{@element.id})"}
+        pointer-events="none"
+      >
+        {row.name}
+      </text>
+      <text
+        x={@element.x + @element.width - 6}
+        y={@element.y + 25 + i * 14}
+        text-anchor="end"
+        fill="#e2e8f0"
+        font-size="9"
+        font-family="monospace"
+        pointer-events="none"
+      >
+        {row.value}
+      </text>
+    </g>
+    <text
+      :if={@notice}
+      x={@element.x + @element.width / 2}
+      y={@element.y + @element.height / 2 + 4}
+      text-anchor="middle"
+      fill={@notice_fill}
+      font-size="9"
+    >
+      {@notice}
+    </text>
+    """
+  end
+
   defp element_body(%{element: %{type: :text}} = assigns) do
     font_size = Map.get(assigns.element.meta, "font_size", "16")
 
@@ -639,6 +767,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   defp element_icon(%{element: %{type: :graph}} = assigns), do: ~H""
   defp element_icon(%{element: %{type: :text}} = assigns), do: ~H""
   defp element_icon(%{element: %{type: :text_series}} = assigns), do: ~H""
+  defp element_icon(%{element: %{type: :top_n}} = assigns), do: ~H""
 
   defp element_icon(%{element: %{type: :database}} = assigns) do
     case IconCatalog.element_icon_name(assigns.element) do
@@ -1425,6 +1554,26 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   # for the pushed current-value text (~8 chars + its 18px inset).
   defp compact_title_budget(width, title_offset) do
     max(trunc((width - title_offset - 56) / 4.8), 4)
+  end
+
+  # A grouped row is named by its group's values; an ungrouped one is a
+  # single series, so it needs every label to be told apart.
+  defp top_row_name(labels, [_ | _] = group_by) do
+    group_by
+    |> Enum.map(&Map.get(labels, &1))
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> case do
+      [] -> "(none)"
+      values -> Enum.map_join(values, " / ", &to_string/1)
+    end
+  end
+
+  defp top_row_name(labels, _group_by) when map_size(labels) == 0, do: "(all)"
+
+  defp top_row_name(labels, _group_by) do
+    labels
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_join(", ", fn {key, value} -> "#{key}=#{value}" end)
   end
 
   defp truncate_text(text, max_chars) do

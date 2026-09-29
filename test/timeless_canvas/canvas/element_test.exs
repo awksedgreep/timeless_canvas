@@ -79,8 +79,169 @@ defmodule TimelessCanvas.Canvas.ElementTest do
       assert Element.meta_fields(:unknown_type) == []
     end
 
+    test "a top_n element carries its ranking options" do
+      assert :top_n in Element.element_types()
+      assert Element.new(%{type: "top_n"}).type == :top_n
+
+      for field <- ~w(metric_name group_by limit order aggregate window) do
+        assert field in Element.meta_fields(:top_n)
+      end
+
+      assert "aggregate" in Element.meta_fields(:graph)
+    end
+
     test "pin dimensions" do
       assert Element.pin_dimensions() == [:host, :ifname]
+    end
+  end
+
+  describe "query_labels/1" do
+    test "every meta key outside the non-label list is a label filter" do
+      meta = %{"host" => "web-01", "comm" => "beam.smp", "metric_name" => "cpu_usage"}
+
+      assert Element.query_labels(meta) == %{"host" => "web-01", "comm" => "beam.smp"}
+    end
+
+    test "drops every non-label key" do
+      meta = Map.new(Element.non_label_meta_keys(), &{&1, "set"})
+
+      # series_label_key/value are both "set", so the pair is the only label
+      assert Element.query_labels(meta) == %{"set" => "set"}
+    end
+
+    test "drops blank values" do
+      assert Element.query_labels(%{"host" => "web-01", "ifname" => "", "env" => nil}) ==
+               %{"host" => "web-01"}
+    end
+
+    test "applies the series label pair as a label" do
+      meta = %{
+        "host" => "web-01",
+        "series_label_key" => "ifname",
+        "series_label_value" => "eth0"
+      }
+
+      assert Element.query_labels(meta) == %{"host" => "web-01", "ifname" => "eth0"}
+    end
+
+    test "ignores an incomplete series label pair" do
+      assert Element.query_labels(%{"series_label_key" => "ifname"}) == %{}
+
+      assert Element.query_labels(%{"series_label_key" => "", "series_label_value" => "eth0"}) ==
+               %{}
+    end
+
+    test "ranking and aggregate options never narrow the query" do
+      meta = %{
+        "host" => "web-01",
+        "metric_name" => "proc_cpu",
+        "group_by" => "comm",
+        "limit" => "10",
+        "order" => "desc",
+        "aggregate" => "sum",
+        "window" => "300"
+      }
+
+      assert Element.query_labels(meta) == %{"host" => "web-01"}
+    end
+
+    test "accepts an element, and tolerates meta that is not a map" do
+      el = Element.new(%{type: :graph, meta: %{"host" => "web-01", "y_max" => "100"}})
+
+      assert Element.query_labels(el) == %{"host" => "web-01"}
+      assert Element.query_labels(%Element{meta: nil}) == %{}
+      assert Element.query_labels(nil) == %{}
+    end
+  end
+
+  describe "label_filter/1" do
+    defp filter(text), do: Element.label_filter(%{"label_filter" => text})
+
+    test "reads equality, inequality, and several values" do
+      assert filter("kind!=slice") == [{"kind", :neq, ["slice"]}]
+      assert filter("comm=postgres") == [{"comm", :eq, ["postgres"]}]
+
+      assert filter("kind!=slice|manager, comm=postgres|pgbouncer") == [
+               {"comm", :eq, ["postgres", "pgbouncer"]},
+               {"kind", :neq, ["slice", "manager"]}
+             ]
+    end
+
+    test "is forgiving of spacing, and of a term said twice" do
+      assert filter("  kind != slice | manager ,kind!=slice") ==
+               [{"kind", :neq, ["slice", "manager"]}]
+    end
+
+    test "keeps what a value is made of" do
+      assert filter("proc=MyApp.Repo<0.512.0>") == [{"proc", :eq, ["MyApp.Repo<0.512.0>"]}]
+
+      assert filter("group=fn in MyApp.Report.build/2") ==
+               [{"group", :eq, ["fn in MyApp.Report.build/2"]}]
+
+      assert filter("unit=mcotner/app=x.scope") == [{"unit", :eq, ["mcotner/app=x.scope"]}]
+    end
+
+    test "leaves out what does not parse, and narrows nothing when there is nothing" do
+      assert filter("kind") == []
+      assert filter("kind!=") == []
+      assert filter("=slice") == []
+      assert filter("kind!=|") == []
+      assert filter("kind!=slice, nonsense, ,") == [{"kind", :neq, ["slice"]}]
+      assert filter("") == []
+      assert Element.label_filter(%{}) == []
+      assert Element.label_filter(%{"label_filter" => nil}) == []
+      assert Element.label_filter(nil) == []
+    end
+
+    test "is not itself a label" do
+      assert Element.query_labels(%{"host" => "a", "label_filter" => "kind!=slice"}) ==
+               %{"host" => "a"}
+    end
+  end
+
+  describe "query_matchers/1" do
+    test "is the labels and then the label filter" do
+      element =
+        Element.new(%{
+          type: :top_n,
+          meta: %{
+            "host" => "web-01",
+            "metric_name" => "unit_memory_bytes",
+            "group_by" => "unit",
+            "label_filter" => "kind!=slice|manager",
+            "series_label_key" => "node",
+            "series_label_value" => "app@web-01"
+          }
+        })
+
+      assert Element.query_matchers(element) == [
+               {"host", :eq, ["web-01"]},
+               {"node", :eq, ["app@web-01"]},
+               {"kind", :neq, ["slice", "manager"]}
+             ]
+    end
+
+    test "is only the labels when there is no filter" do
+      assert Element.query_matchers(%{"host" => "web-01", "limit" => "5"}) ==
+               [{"host", :eq, ["web-01"]}]
+
+      assert Element.query_matchers(nil) == []
+    end
+  end
+
+  describe "matches?/2" do
+    test "a series has to satisfy every matcher" do
+      matchers = [{"host", :eq, ["a"]}, {"kind", :neq, ["slice", "manager"]}]
+
+      assert Element.matches?(%{"host" => "a", "kind" => "service"}, matchers)
+      refute Element.matches?(%{"host" => "a", "kind" => "slice"}, matchers)
+      refute Element.matches?(%{"host" => "b", "kind" => "service"}, matchers)
+      assert Element.matches?(%{"host" => "a", "kind" => "scope"}, [])
+    end
+
+    test "a label a series does not carry is unequal to everything" do
+      assert Element.matches?(%{"host" => "a"}, [{"kind", :neq, ["slice"]}])
+      refute Element.matches?(%{"host" => "a"}, [{"kind", :eq, ["service"]}])
     end
   end
 

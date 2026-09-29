@@ -31,6 +31,7 @@ defmodule TimelessCanvas.DataSource.Manager do
   use GenServer
   require Logger
 
+  alias TimelessCanvas.Canvas.Element
   alias TimelessCanvas.DataSource
   alias TimelessCanvas.Profiling
 
@@ -94,12 +95,55 @@ defmodule TimelessCanvas.DataSource.Manager do
     end
   end
 
-  def metric_range(canvas_id, element_id, metric_name, from, to) do
+  # An aggregate, a window, and a label filter reach the backend only
+  # through metric_range/6. A backend without it keeps drawing the first
+  # series the labels match, which is what it did before they existed.
+  def metric_range(canvas_id, element_id, metric_name, from, to, opts \\ []) do
     with {:ok, module, ds_state} <- lookup_source(),
          {:ok, element} <- lookup_element(canvas_id, element_id) do
-      module.metric_range(ds_state, element, metric_name, from, to)
+      if (opts != [] or Element.label_filter(element) != []) and
+           function_exported?(module, :metric_range, 6) do
+        module.metric_range(ds_state, element, metric_name, from, to, opts)
+      else
+        module.metric_range(ds_state, element, metric_name, from, to)
+      end
     else
       _ -> {:ok, []}
+    end
+  end
+
+  @doc """
+  Ranked groups for a `top_n` element, per `c:TimelessCanvas.DataSource.top_series/5`.
+
+  `:unsupported` when the backend does not export the callback, so callers can
+  tell a missing capability from a failed query.
+  """
+  def top_series(canvas_id, element_id, metric_name, time, opts) do
+    with {:ok, module, ds_state} <- lookup_source(),
+         {:ok, element} <- lookup_element(canvas_id, element_id) do
+      if function_exported?(module, :top_series, 5) do
+        module.top_series(ds_state, element, metric_name, time, opts)
+      else
+        :unsupported
+      end
+    else
+      _ -> {:ok, []}
+    end
+  end
+
+  @doc """
+  Whether the active backend exports an optional cross-series callback.
+  """
+  def supports?(capability) when capability in [:aggregate, :top_series] do
+    {function, arity} =
+      case capability do
+        :aggregate -> {:metric_range, 6}
+        :top_series -> {:top_series, 5}
+      end
+
+    case lookup_source() do
+      {:ok, module, _ds_state} -> function_exported?(module, function, arity)
+      :error -> false
     end
   end
 

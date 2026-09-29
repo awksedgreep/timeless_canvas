@@ -24,6 +24,20 @@ configured. Data access goes through a `TimelessCanvas.DataSource` behaviour
 with a bounded discovery contract (`:filter`/`:limit`), so the host
 application decides where metrics come from.
 
+Two optional `DataSource` callbacks work across series rather than on one:
+`metric_range/6` combines every series a graph's labels match, and
+`top_series/5` ranks a metric's groups for the `top_n` element. Exporting them
+is what offers those features in the UI. They filter by
+`TimelessCanvas.Canvas.Element.query_matchers/1`, which is the element's labels
+and its `label_filter` (`kind!=slice|manager`), so a backend that can only ask
+what a label equals should not export them. The older callbacks filter by
+`Element.query_labels/1`.
+
+When an element sets no `window`, the backend chooses how far back a sample
+still counts as the present. Two or three times the sampling interval is
+right. A store's own default is often five minutes, and with series sampled
+every ten seconds that counts a process for five minutes after it has ended.
+
 Alert creation, rule status, history, and acknowledgement are exposed through
 the optional callbacks in `TimelessCanvas.AlertSource`. The alert backend owns
 rule storage and the evaluation schedule; the canvas deliberately does not

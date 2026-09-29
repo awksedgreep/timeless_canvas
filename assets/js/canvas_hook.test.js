@@ -137,3 +137,24 @@ test("graph rendering updates dynamic nodes without rebuilding a stable layout",
   assert.equal(area.points, p.area);
   assert.equal(value.textContent, "42");
 });
+
+test("topRowClick resolves a ranked row to its element and index", () => {
+  const hook = Object.create(CanvasHook);
+  const group = { dataset: { elementId: "el-7" } };
+  const row = (topIndex, parent = group) => ({
+    dataset: { topIndex },
+    closest: (selector) => (selector === "[data-element-id]" ? parent : null),
+  });
+  const target = (found) => ({
+    closest: (selector) => (selector === "[data-top-index]" ? found : null),
+  });
+
+  assert.deepEqual(hook.topRowClick(target(row("2"))), {
+    element_id: "el-7",
+    index: 2,
+  });
+  assert.equal(hook.topRowClick(target(null)), null);
+  assert.equal(hook.topRowClick(target(row("nope"))), null);
+  assert.equal(hook.topRowClick(target(row("-1"))), null);
+  assert.equal(hook.topRowClick(target(row("0", null))), null);
+});

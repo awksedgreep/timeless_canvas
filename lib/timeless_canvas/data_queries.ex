@@ -15,6 +15,10 @@ defmodule TimelessCanvas.DataQueries do
   @max_graph_points 60
   @max_graph_points_expanded 300
   @max_stream_entries 50
+  @default_top_limit 10
+  @max_top_limit 50
+  @max_window 86_400
+  @aggregates ~w(sum avg max min)
   # Per-element queries run in the caller process; fan them out with
   # bounded concurrency so backend I/O overlaps.
   @element_query_concurrency 8
@@ -62,9 +66,10 @@ defmodule TimelessCanvas.DataQueries do
     |> Enum.filter(fn {_id, el} -> el.type == :graph end)
     |> concurrent_element_query(fn {id, element} ->
       metric_name = Map.get(element.meta || %{}, "metric_name", "default")
+      opts = build_range_opts(element.meta)
 
       points =
-        case Manager.metric_range(canvas_id, id, metric_name, from, time) do
+        case Manager.metric_range(canvas_id, id, metric_name, from, time, opts) do
           {:ok, pts} -> downsample(pts, @max_graph_points)
           {:error, _reason} -> :error
           _ -> []
@@ -96,6 +101,50 @@ defmodule TimelessCanvas.DataQueries do
   end
 
   @doc """
+  Ranked rows for every top_n element: `%{id => {unix_ms, [row]} | :error}`,
+  each row `%{labels: map, value: number}` in rank order.
+
+  Elements with no metric chosen are omitted, as are all of them when the
+  backend cannot rank (the element type is not offered then, but a canvas
+  authored against another backend may still hold one).
+  """
+  def query_top_data(canvas_id, resolved_elements, time) do
+    timestamp = DateTime.to_unix(time, :millisecond)
+
+    resolved_elements
+    |> Enum.filter(fn {_id, el} -> el.type == :top_n end)
+    |> concurrent_element_query(fn {id, element} ->
+      meta = element.meta || %{}
+
+      case Map.get(meta, "metric_name") do
+        metric_name when is_binary(metric_name) and metric_name != "" ->
+          opts = build_top_opts(meta)
+
+          case Manager.top_series(canvas_id, id, metric_name, time, opts) do
+            {:ok, rows} when is_list(rows) -> {id, {timestamp, top_rows(rows, opts[:limit])}}
+            :unsupported -> :skip
+            _ -> {id, :error}
+          end
+
+        _ ->
+          :skip
+      end
+    end)
+  end
+
+  @doc """
+  Latest value for every element that shows one: text_series and top_n,
+  keyed by element id. Both refresh on the same tick and travel in the same
+  diff, so callers query and merge them together.
+  """
+  def query_value_data(canvas_id, resolved_elements, time) do
+    Map.merge(
+      query_text_data(canvas_id, resolved_elements, time),
+      query_top_data(canvas_id, resolved_elements, time)
+    )
+  end
+
+  @doc """
   Historical stream entries for every log/trace stream element:
   `%{id => [entry_map] | :error}`. A backend query error maps the element
   to `:error` (distinct from an empty backfill); a missing backend maps
@@ -121,8 +170,9 @@ defmodule TimelessCanvas.DataQueries do
       %{type: :graph} = element ->
         metric_name = Map.get(element.meta || %{}, "metric_name", "default")
         from = DateTime.add(time, -span, :second)
+        opts = build_range_opts(element.meta)
 
-        case Manager.metric_range(canvas_id, element_id, metric_name, from, time) do
+        case Manager.metric_range(canvas_id, element_id, metric_name, from, time, opts) do
           {:ok, pts} -> downsample(pts, @max_graph_points_expanded)
           {:error, _reason} -> :error
           _ -> []
@@ -153,23 +203,34 @@ defmodule TimelessCanvas.DataQueries do
     {hosts != [], List.first(hosts)}
   end
 
-  @doc "Metric units per graph element id, from metric metadata."
+  @doc """
+  Metric units per graph and top_n element id, from metric metadata.
+
+  A top_n element ranks counters by rate, so a counter's unit would mislabel
+  its values (CPU seconds per second are not seconds) and is left out.
+  """
   def query_metric_units(resolved_elements) do
     resolved_elements
-    |> Enum.filter(fn {_id, el} -> el.type == :graph end)
+    |> Enum.filter(fn {_id, el} -> el.type in [:graph, :top_n] end)
     |> concurrent_element_query(fn {id, el} ->
       metric_name = Map.get(el.meta || %{}, "metric_name")
 
       if metric_name do
         case Manager.metric_metadata(metric_name) do
-          {:ok, %{unit: unit}} when not is_nil(unit) -> {id, unit}
-          {:ok, %{"unit" => unit}} when not is_nil(unit) -> {id, unit}
+          {:ok, %{} = metadata} -> unit_for(id, el.type, metadata)
           _ -> :skip
         end
       else
         :skip
       end
     end)
+  end
+
+  defp unit_for(id, type, metadata) do
+    unit = Map.get(metadata, :unit) || Map.get(metadata, "unit")
+    counter? = to_string(Map.get(metadata, :type) || Map.get(metadata, "type")) == "counter"
+
+    if is_nil(unit) or (type == :top_n and counter?), do: :skip, else: {id, unit}
   end
 
   @doc "Event density buckets over a data range (empty list without one)."
@@ -212,6 +273,43 @@ defmodule TimelessCanvas.DataQueries do
     _error -> {:query_error, id}
   catch
     _kind, _reason -> {:query_error, id}
+  end
+
+  @doc """
+  Build `metric_range/6` opts from a graph element's meta: `:aggregate` and
+  `:window`, each only when the element sets it.
+  """
+  def build_range_opts(meta) do
+    meta = if is_map(meta), do: meta, else: %{}
+
+    meta
+    |> window_opts()
+    |> maybe_put_known_atom(:aggregate, Map.get(meta, "aggregate"), @aggregates)
+  end
+
+  @doc """
+  Build `top_series/5` opts from a top_n element's meta. Every option but
+  `:window` is present, and all are bounded, so a backend never has to defend
+  against a blank or oversized value typed into the properties panel.
+
+  `:window` has no default here. How long a sample stays current depends on
+  how often the series are sampled, which the backend knows and the canvas
+  does not.
+  """
+  def build_top_opts(meta) do
+    meta = if is_map(meta), do: meta, else: %{}
+
+    [
+      group_by: parse_group_by(Map.get(meta, "group_by")),
+      limit: bounded_integer(Map.get(meta, "limit"), @default_top_limit, @max_top_limit)
+    ]
+    |> Keyword.merge(window_opts(meta))
+    |> Keyword.merge(
+      maybe_put_known_atom([order: :desc], :order, Map.get(meta, "order"), ~w(desc asc))
+    )
+    |> Keyword.merge(
+      maybe_put_known_atom([aggregate: :sum], :aggregate, Map.get(meta, "aggregate"), @aggregates)
+    )
   end
 
   @doc "Build stream-backend query opts from a log_stream element's meta."
@@ -313,6 +411,44 @@ defmodule TimelessCanvas.DataQueries do
   end
 
   # --- Private ---
+
+  defp parse_group_by(value) when is_binary(value) do
+    value
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp parse_group_by(_value), do: []
+
+  defp window_opts(meta) do
+    case bounded_integer(Map.get(meta, "window"), nil, @max_window) do
+      nil -> []
+      seconds -> [window: seconds]
+    end
+  end
+
+  defp bounded_integer(value, default, max) do
+    case Integer.parse(to_string(value || "")) do
+      {n, ""} when n > 0 -> min(n, max)
+      _ -> default
+    end
+  end
+
+  # Rows cross a behaviour boundary, so keep only well-formed ones and never
+  # more than were asked for.
+  defp top_rows(rows, limit) do
+    rows
+    |> Enum.flat_map(fn
+      %{labels: labels, value: value} when is_map(labels) and is_number(value) ->
+        [%{labels: labels, value: value}]
+
+      _ ->
+        []
+    end)
+    |> Enum.take(limit)
+  end
 
   defp downsample(points, max_count)
        when is_list(points) and is_integer(max_count) and max_count > 1 do

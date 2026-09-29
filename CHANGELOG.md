@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Added
+- A `top_n` element ranks the groups of a metric: a table of rows with a bar
+  per row, grouped by one or more label keys, live and through the timeline
+  scrubber. Clicking a row points any canvas variable bound to one of its
+  group-by labels at that row, so the graphs and streams following those
+  variables follow the click.
+- A graph can combine every series its labels match (`sum`, `avg`, `max`,
+  `min`) instead of drawing the first. The properties panel says so when more
+  than one series matches and none is combined.
+- A `label_filter` on a graph or a `top_n` element says what equality on one
+  value cannot: `kind!=slice|manager`, `comm=postgres|pgbouncer`. Backends
+  read it, with the element's labels, from `Element.query_matchers/1`.
+- A `window` on either says how far back a sample still counts as the
+  present. There is no default: a backend uses its own unless the element
+  sets one, since only it knows how often its series are sampled.
+- These are backed by optional `DataSource` callbacks, `top_series/5` and
+  `metric_range/6`. The element type and the aggregate option are only offered
+  when the backend exports them, so an existing backend sees no change.
+- `Element.query_labels/1` is the one place an element's meta becomes a label
+  filter. Backends should call it rather than keep their own list of meta keys
+  that are not labels; a key missing from such a list silently narrows the
+  query to nothing.
+
+### Fixed
+- A text series had no field for its metric name in the properties panel.
+
 ## v0.5.5 (2026-09-11)
 
 ### Changed

@@ -30,6 +30,31 @@ defmodule TimelessCanvas.DataSource do
   `status/2` and `status_at/3`. When exported, callers use them to fetch
   statuses for many elements in one backend round trip; otherwise the
   per-element callbacks are used as a fallback.
+
+  ## Cross-series queries
+
+  `metric_range/6` and `top_series/5` are optional and combine every series
+  an element's labels match, where `metric_range/5` draws one. Exporting them
+  is how a backend advertises the capability: the graph aggregate option and
+  the `top_n` element type are only offered when they are present.
+
+  Both receive the element, and filter by
+  `TimelessCanvas.Canvas.Element.query_matchers/1`: the element's labels, and
+  what its `label_filter` adds that equality cannot say (`kind!=slice`,
+  `comm=a|b`). A backend that can only ask what a label equals should not
+  export them.
+
+  `:window` is how far back a sample still counts as the present, in
+  seconds, and for a counter the stretch its rate is taken over. It is absent
+  unless the element sets one, and the backend then uses its own. That should
+  be two or three times the interval the series are sampled at: shorter finds
+  nothing between two samples, and longer goes on counting what has stopped
+  reporting. A store's own default is often five minutes, which is too long
+  for series sampled every few seconds.
+
+  Ranking and grouping should happen in the store. A backend that fetches
+  every matching series to rank them here defeats the bounded-query contract
+  above.
   """
 
   alias TimelessCanvas.Canvas.Element
@@ -37,6 +62,16 @@ defmodule TimelessCanvas.DataSource do
   @type status :: :ok | :warning | :error | :unknown
   @type element_id :: String.t()
   @type query_opts :: [filter: String.t() | nil, limit: pos_integer()]
+  @type aggregate :: :sum | :avg | :max | :min
+  @type range_opts :: [aggregate: aggregate(), window: pos_integer()]
+  @type top_opts :: [
+          group_by: [String.t()],
+          limit: pos_integer(),
+          order: :desc | :asc,
+          aggregate: aggregate(),
+          window: pos_integer()
+        ]
+  @type top_row :: %{labels: %{String.t() => String.t()}, value: number()}
 
   @callback init(config :: map()) :: {:ok, state :: term()} | {:error, term()}
 
@@ -68,6 +103,38 @@ defmodule TimelessCanvas.DataSource do
               from :: DateTime.t(),
               to :: DateTime.t()
             ) :: {:ok, [{integer(), float()}]}
+
+  @doc """
+  `metric_range/5` for an element that asks for more than it can give:
+  every matching series combined by `opts[:aggregate]`, a `label_filter`, or
+  a `:window`. With no aggregate, it draws one series as `metric_range/5`
+  does.
+  """
+  @callback metric_range(
+              state :: term(),
+              element :: Element.t(),
+              metric :: String.t(),
+              from :: DateTime.t(),
+              to :: DateTime.t(),
+              opts :: range_opts()
+            ) :: {:ok, [{integer(), float()}]} | {:error, term()}
+
+  @doc """
+  The highest (or lowest) ranked groups for `metric` at `time`.
+
+  Matching series are grouped by the `:group_by` label keys and combined with
+  `:aggregate`; an empty `:group_by` ranks the series themselves. Counters are
+  ranked by their rate, gauges by their value at `time`. At most `:limit`
+  rows come back, already in `:order`. Every option but `:window` is always
+  present.
+  """
+  @callback top_series(
+              state :: term(),
+              element :: Element.t(),
+              metric :: String.t(),
+              time :: DateTime.t(),
+              opts :: top_opts()
+            ) :: {:ok, [top_row()]} | {:error, term()}
 
   @callback status_at(state :: term(), element :: Element.t(), time :: DateTime.t()) ::
               status()
@@ -131,10 +198,12 @@ defmodule TimelessCanvas.DataSource do
     list_hosts: 2,
     list_label_values: 3,
     metric_metadata: 2,
+    metric_range: 6,
     statuses: 2,
     statuses_at: 3,
     text_metric: 3,
-    text_metric_at: 4
+    text_metric_at: 4,
+    top_series: 5
   ]
 
   @doc """

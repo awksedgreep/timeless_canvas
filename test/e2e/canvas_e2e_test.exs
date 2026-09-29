@@ -197,6 +197,61 @@ defmodule TimelessCanvas.CanvasE2ETest do
     run_flow("split_canvas", path: "/canvas/25")
   end
 
+  test "top_n rows render, and clicking one sets its variable" do
+    FakeDataSource.put(
+      :top_series,
+      {:ok,
+       [
+         %{labels: %{"comm" => "beam.smp"}, value: 3.5},
+         %{labels: %{"comm" => "postgres"}, value: 1.75},
+         %{labels: %{"comm" => "sshd"}, value: 0.2}
+       ]}
+    )
+
+    program_graph_points()
+    canvas = Canvas.new(snap_to_grid: false)
+
+    {canvas, _} =
+      Canvas.add_element(canvas, %{
+        type: :top_n,
+        x: 200.0,
+        y: 160.0,
+        width: 260.0,
+        height: 170.0,
+        label: "CPU by command",
+        meta: %{
+          "host" => "web-1",
+          "metric_name" => "proc_cpu_seconds_total",
+          "group_by" => "comm"
+        }
+      })
+
+    {canvas, _} =
+      Canvas.add_element(canvas, %{
+        type: :graph,
+        x: 520.0,
+        y: 160.0,
+        width: 260.0,
+        height: 170.0,
+        label: "selected",
+        meta: %{
+          "host" => "web-1",
+          "metric_name" => "proc_cpu_seconds_total",
+          "comm" => "$comm",
+          "aggregate" => "sum"
+        }
+      })
+
+    canvas = %{
+      canvas
+      | variables: %{"comm" => %{"type" => "label", "label_key" => "comm", "current" => ""}}
+    }
+
+    seed(27, canvas)
+
+    run_flow("top_n_row_click", path: "/canvas/27")
+  end
+
   test "visual regression: reference canvas screenshot" do
     canvas = Canvas.new(snap_to_grid: false)
     {canvas, r} = Canvas.add_element(canvas, %{type: :rect, x: 140.0, y: 140.0, label: "Zone A"})

@@ -63,6 +63,38 @@ defmodule TimelessCanvas.DataSource.Random do
     {:ok, points}
   end
 
+  # The demo series are already one line per element, so combining them
+  # changes nothing; exporting this is what offers the option in the UI.
+  @impl true
+  def metric_range(state, element, metric, from, to, _opts),
+    do: metric_range(state, element, metric, from, to)
+
+  @impl true
+  def top_series(_state, element, metric, %DateTime{} = time, opts) do
+    bucket = div(DateTime.to_unix(time, :second), 10)
+
+    label_key =
+      case opts[:group_by] do
+        [key | _] -> key
+        _ -> "host"
+      end
+
+    names = Map.get(@demo_label_values, label_key, @demo_hosts)
+
+    rows =
+      names
+      |> Enum.map(fn name ->
+        seed = :erlang.phash2({element.id, metric, name})
+        phase = seed / 65535.0 * 2 * :math.pi()
+        value = 50.0 + 45.0 * :math.sin(bucket / 15.0 + phase)
+        %{labels: %{label_key => name}, value: Float.round(value, 1)}
+      end)
+      |> Enum.sort_by(& &1.value, opts[:order] || :desc)
+      |> Enum.take(opts[:limit] || 10)
+
+    {:ok, rows}
+  end
+
   @impl true
   def metric_at(_state, element, metric, %DateTime{} = time) do
     bucket = div(DateTime.to_unix(time, :millisecond), 2000)

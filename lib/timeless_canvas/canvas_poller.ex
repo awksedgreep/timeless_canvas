@@ -5,7 +5,7 @@ defmodule TimelessCanvas.CanvasPoller do
   One poller process runs per open canvas (registered in
   `TimelessCanvas.CanvasRegistry`, started under
   `TimelessCanvas.PollerSupervisor`). Each tick it queries graph and
-  text-series data once for the whole canvas via
+  latest-value (text-series and top-n) data once for the whole canvas via
   `TimelessCanvas.DataQueries`, diffs the results against the last
   broadcast, and publishes only changed entries as
 
@@ -253,7 +253,7 @@ defmodule TimelessCanvas.CanvasPoller do
   end
 
   defp pollable?(elements) do
-    Enum.any?(elements, fn {_id, el} -> el.type in [:graph, :text_series] end)
+    Enum.any?(elements, fn {_id, el} -> el.type in [:graph, :text_series, :top_n] end)
   end
 
   defp start_poll(state) do
@@ -267,7 +267,7 @@ defmodule TimelessCanvas.CanvasPoller do
       Task.start(fn ->
         now = DateTime.utc_now()
         graph_data = DataQueries.query_graph_data(canvas_id, elements, now, span)
-        text_data = DataQueries.query_text_data(canvas_id, elements, now)
+        text_data = DataQueries.query_value_data(canvas_id, elements, now)
         send(parent, {:poll_result, ref, graph_data, text_data})
       end)
 
@@ -289,7 +289,7 @@ defmodule TimelessCanvas.CanvasPoller do
           into: %{},
           do: {id, points}
 
-    # Text results are stamped with the query time, so diff on the value
+    # Value results are stamped with the query time, so diff on the value
     # alone — otherwise every tick would look changed. Entries may also be
     # `:error` (backend failure), which must broadcast on transition too so
     # viewers can show — and later clear — the error state.

@@ -444,6 +444,50 @@ defmodule TimelessCanvas.DataSource.ManagerTest do
       assert Manager.series_loaded?("anything")
     end
 
+    test "cross-series capabilities follow what the backend exports" do
+      assert Manager.supports?(:aggregate)
+      assert Manager.supports?(:top_series)
+
+      put_source(NoOptionalDS)
+      refute Manager.supports?(:aggregate)
+      refute Manager.supports?(:top_series)
+
+      :ets.delete(@table, :source)
+      refute Manager.supports?(:aggregate)
+      refute Manager.supports?(:top_series)
+    end
+
+    test "top_series tells a missing capability from an unknown element" do
+      put_elements(7, %{"top" => element("top", %{type: :top_n})})
+      now = DateTime.utc_now()
+      FakeDataSource.put(:top_series, {:ok, [%{labels: %{}, value: 1.0}]})
+
+      assert Manager.top_series(7, "top", "m", now, []) == {:ok, [%{labels: %{}, value: 1.0}]}
+      assert Manager.top_series(7, "absent", "m", now, []) == {:ok, []}
+
+      put_source(NoOptionalDS)
+      assert Manager.top_series(7, "top", "m", now, []) == :unsupported
+    end
+
+    test "an aggregate reaches only a backend that can honour it" do
+      put_elements(7, %{"graph" => element("graph", %{type: :graph})})
+      now = DateTime.utc_now()
+      FakeDataSource.put(:metric_range, {:ok, [{1_000, 1.0}]})
+
+      assert Manager.metric_range(7, "graph", "m", now, now) == {:ok, [{1_000, 1.0}]}
+      assert :ets.lookup(:timeless_canvas_fake_data_source, :metric_range_opts) == []
+
+      assert Manager.metric_range(7, "graph", "m", now, now, aggregate: :sum) ==
+               {:ok, [{1_000, 1.0}]}
+
+      assert [{_, [aggregate: :sum]}] =
+               :ets.lookup(:timeless_canvas_fake_data_source, :metric_range_opts)
+
+      # A backend with only metric_range/5 still answers.
+      put_source(TimelessCanvas.DataSource.Stub)
+      assert Manager.metric_range(7, "graph", "m", now, now, aggregate: :sum) == {:ok, []}
+    end
+
     test "the series topic is stable" do
       # Backends broadcast on it from another application; renaming it
       # silently stops the panel from ever hearing that a fetch landed.

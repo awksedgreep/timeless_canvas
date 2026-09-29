@@ -402,6 +402,15 @@ const CanvasHook = {
       return;
     }
 
+    // Check if clicking a ranked row of a top_n element. The server looks
+    // the row up by index in the rows it last sent for that element.
+    const topRow = this.topRowClick(e.target);
+    if (topRow) {
+      this.pushEvent("top:row_click", topRow);
+      this.dragging = { type: "stream_click" };
+      return;
+    }
+
     // Check if clicking a connection
     const connGroup = e.target.closest("[data-connection-id]");
     if (connGroup) {
@@ -1141,6 +1150,16 @@ const CanvasHook = {
       raw: payload.raw || previous?.raw || [],
       poly: this.parsePoints(payload.points),
     });
+  },
+
+
+  topRowClick(target) {
+    const row = target.closest("[data-top-index]");
+    if (!row) return null;
+    const group = row.closest("[data-element-id]");
+    const index = Number.parseInt(row.dataset.topIndex, 10);
+    if (!group || !Number.isInteger(index) || index < 0) return null;
+    return { element_id: group.dataset.elementId, index };
   },
 
   parsePoints(str) {

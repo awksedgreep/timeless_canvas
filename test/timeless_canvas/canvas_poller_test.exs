@@ -152,6 +152,36 @@ defmodule TimelessCanvas.CanvasPollerTest do
     send(other, :done)
   end
 
+  test "a canvas holding only a top_n element is polled, and diffed on its rows", %{
+    canvas_id: canvas_id
+  } do
+    top_id = "poller-top-#{canvas_id}"
+
+    top =
+      Element.new(%{
+        id: top_id,
+        type: :top_n,
+        meta: %{"host" => "web-1", "metric_name" => "proc_cpu", "group_by" => "comm"}
+      })
+
+    elements = register_and_map(canvas_id, [top])
+    rows = [%{labels: %{"comm" => "beam.smp"}, value: 2.5}]
+    FakeDataSource.put(:top_series, {:ok, rows})
+
+    Phoenix.PubSub.subscribe(@pubsub, CanvasPoller.data_topic(canvas_id))
+    :ok = CanvasPoller.subscribe(canvas_id, elements, poll_interval: 50, linger: 60_000)
+
+    assert_receive {:canvas_data, ^canvas_id, %{text_data: %{^top_id => {_ts, ^rows}}}}, 1_000
+
+    # Same rows on later ticks, stamped with a later time: silence.
+    refute_receive {:canvas_data, _, _}, 300
+
+    changed = [%{labels: %{"comm" => "postgres"}, value: 9.0}]
+    FakeDataSource.put(:top_series, {:ok, changed})
+
+    assert_receive {:canvas_data, ^canvas_id, %{text_data: %{^top_id => {_ts, ^changed}}}}, 1_000
+  end
+
   test "no broadcast when nothing changed", %{canvas_id: canvas_id} do
     graph_id = "poller-static-#{canvas_id}"
     elements = register_and_map(canvas_id, [graph_element(graph_id)])

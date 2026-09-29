@@ -43,7 +43,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
     trace_stream: "Traces",
     canvas: "Canvas",
     text: "Text",
-    text_series: "TextSeries"
+    text_series: "TextSeries",
+    top_n: "Top N"
   }
 
   @default_timeline_span 3600
@@ -401,7 +402,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           </span>
           <span class="canvas-toolbar__sep"></span>
           <button
-            :for={kind <- ~w(rect canvas text text_series)a}
+            :for={kind <- placeable_kinds()}
             phx-click="set_place_kind"
             phx-value-kind={kind}
             class={"canvas-toolbar__btn canvas-type-btn#{if @place_kind == kind, do: " canvas-toolbar__btn--active", else: ""}"}
@@ -720,6 +721,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         alert_error={@alert_error}
         alert_enabled={TimelessCanvas.AlertSource.configured?()}
         alert_formats={delivery_formats()}
+        aggregate_enabled={StatusManager.supports?(:aggregate)}
         can_edit={@can_edit}
         ta_open={@ta_open}
         ta_filter={@ta_filter}
@@ -838,7 +840,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
         meta_fields: base_fields ++ var_fields,
         series_limit: @series_limit,
         display_meta_fields:
-          display_meta_fields(base_fields ++ var_fields, assigns.selected.type),
+          display_meta_fields(
+            base_fields ++ var_fields,
+            assigns.selected.type,
+            assigns.aggregate_enabled
+          ),
         icon_select_options:
           icon_options("icon", assigns.selected.meta["icon"], IconCatalog.icon_options()),
         os_icon_options:
@@ -848,10 +854,16 @@ defmodule TimelessCanvas.Web.CanvasLive do
     assigns =
       if assigns.selected.type == :graph do
         selected_metric = assigns.selected.meta["metric_name"] || ""
-        selected_labels = graph_query_labels_from_meta(assigns.selected.meta)
+        selected_labels = Element.query_labels(assigns.selected.meta)
+
+        # What the list shows is what the query would select, so the label
+        # filter narrows it as the labels do.
+        label_filter = Element.label_filter(assigns.selected.meta)
 
         matching_series =
-          matching_graph_series(assigns.available_series, selected_metric, selected_labels)
+          assigns.available_series
+          |> matching_graph_series(selected_metric, selected_labels)
+          |> Enum.filter(fn {_metric, labels} -> Element.matches?(labels, label_filter) end)
 
         assign(assigns,
           graph_metric_options: graph_metric_options(assigns.available_series, selected_metric),
@@ -995,14 +1007,30 @@ defmodule TimelessCanvas.Web.CanvasLive do
                 {label}
               </option>
             </select>
+            <select :if={field == "aggregate"} name={field}>
+              <option
+                :for={{value, label} <- aggregate_options(@selected.type)}
+                value={value}
+                selected={value == (@selected.meta[field] || default_meta_value(@selected.type, field))}
+              >
+                {label}
+              </option>
+            </select>
+            <select :if={@selected.type == :top_n && field == "order"} name={field}>
+              <option
+                :for={{value, label} <- [{"desc", "highest first"}, {"asc", "lowest first"}]}
+                value={value}
+                selected={value == (@selected.meta[field] || "desc")}
+              >
+                {label}
+              </option>
+            </select>
             <input
-              :if={
-                field not in
-                  ["icon", "os_icon", "host", "metric_name", "graph_series"]
-              }
+              :if={text_meta_field?(@selected.type, field)}
               type="text"
               name={field}
               value={@selected.meta[field] || ""}
+              placeholder={meta_placeholder(@selected.type, field)}
               phx-debounce="300"
             />
           </div>
@@ -1096,6 +1124,13 @@ defmodule TimelessCanvas.Web.CanvasLive do
         </div>
         <div :if={@selected.type == :graph} class="properties-panel__field">
           <label>Matching Series</label>
+          <span
+            :if={length(@graph_matching_series) > 1 and (@selected.meta["aggregate"] || "") == ""}
+            class="properties-panel__hint"
+          >
+            {length(@graph_matching_series)} series match; the graph draws the first.
+            {if @aggregate_enabled, do: "Set an aggregate to combine them.", else: "Pick one series."}
+          </span>
           <div class="properties-panel__series-list">
             <div
               :for={{metric_name, labels} <- @graph_matching_series}
@@ -1939,38 +1974,99 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # Series leads the list so it sits directly beneath the filter that narrows it.
   # It was previously placed next to y_min, which put the list far enough below
   # the filter that the two did not read as related.
-  defp display_meta_fields(fields, :graph) do
+  #
+  # A graph's aggregate, window, and label filter are only offered when the
+  # backend can honour them; one that cannot would go on drawing the first
+  # series its labels match, whatever was chosen.
+  defp display_meta_fields(fields, :graph, aggregate_enabled) do
+    fields =
+      if aggregate_enabled,
+        do: fields,
+        else: fields -- ["aggregate", "window", "label_filter"]
+
     ["graph_series" | fields]
     |> Enum.uniq()
   end
 
-  defp display_meta_fields(fields, _type), do: fields
+  defp display_meta_fields(fields, _type, _aggregate_enabled), do: fields
 
-  defp graph_query_labels_from_meta(meta) when is_map(meta) do
-    base_meta =
-      meta
-      |> Map.drop([
-        "metric_name",
-        "series_label_key",
-        "series_label_value",
-        "y_min",
-        "y_max",
-        "icon",
-        "os_icon"
-      ])
-      |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
-      |> Map.new()
+  # Fields with a control of their own are excluded. A graph picks its metric
+  # from the host's series; every other type names it directly.
+  defp text_meta_field?(type, "metric_name"), do: type != :graph
+  defp text_meta_field?(:top_n, "order"), do: false
 
-    case {meta["series_label_key"], meta["series_label_value"]} do
-      {key, value} when is_binary(key) and key != "" and is_binary(value) and value != "" ->
-        Map.put(base_meta, key, value)
+  defp text_meta_field?(_type, field),
+    do: field not in ["icon", "os_icon", "host", "graph_series", "aggregate"]
 
-      _ ->
-        base_meta
-    end
+  defp default_meta_value(:top_n, "aggregate"), do: "sum"
+  defp default_meta_value(_type, _field), do: ""
+
+  defp meta_placeholder(:top_n, "group_by"), do: "label, label"
+  defp meta_placeholder(:top_n, "limit"), do: "10"
+  defp meta_placeholder(_type, "window"), do: "seconds; the backend's if blank"
+  defp meta_placeholder(_type, "label_filter"), do: "kind!=slice|manager, comm=a|b"
+  defp meta_placeholder(_type, _field), do: nil
+
+  defp set_variables(socket, changes) do
+    canvas = socket.assigns.canvas
+
+    variables =
+      Enum.reduce(changes, canvas.variables, fn {name, value}, acc ->
+        Map.update!(acc, name, &Map.put(&1, "current", value))
+      end)
+
+    canvas = %{canvas | variables: variables}
+    time = socket.assigns.timeline_time || DateTime.utc_now()
+
+    socket =
+      socket
+      |> push_canvas(canvas)
+      |> schedule_autosave()
+
+    canvas_id = socket.assigns.canvas_id
+    resolved = socket.assigns.resolved_elements
+    span = socket.assigns.timeline_span
+    fingerprint = socket.assigns.registration_fingerprint
+
+    start_async(socket, :variable_data, fn ->
+      load_element_data(canvas_id, resolved, time, span)
+      |> Map.put(:fingerprint, fingerprint)
+    end)
   end
 
-  defp graph_query_labels_from_meta(_meta), do: %{}
+  # `%{variable_name => value}` for the variables a clicked row should set:
+  # those bound to a group-by label the row carries, and not already on it.
+  defp row_variable_changes(variables, meta, labels) do
+    group_by = DataQueries.build_top_opts(meta)[:group_by]
+
+    for {name, definition} <- variables,
+        is_map(definition),
+        key = variable_label_key(name, definition),
+        key in group_by,
+        value = labels[key],
+        is_binary(value) and value != "",
+        value != definition["current"],
+        into: %{},
+        do: {name, value}
+  end
+
+  defp variable_label_key(_name, %{"type" => "host"}), do: "host"
+
+  defp variable_label_key(name, %{"type" => "label"} = definition),
+    do: definition["label_key"] || name
+
+  defp variable_label_key(_name, _definition), do: nil
+
+  defp placeable_kinds do
+    if StatusManager.supports?(:top_series),
+      do: ~w(rect canvas text text_series top_n)a,
+      else: ~w(rect canvas text text_series)a
+  end
+
+  defp aggregate_options(:graph),
+    do: [{"", "first series"} | aggregate_options(:top_n)]
+
+  defp aggregate_options(_type), do: Enum.map(~w(sum avg max min), &{&1, &1})
 
   # Autosave gives up after this many consecutive failed writes; the
   # error indicator stays until the next user edit re-arms the timer.
@@ -2272,7 +2368,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
                   {:noreply, socket}
                 end
 
-              type when type in [:rect, :canvas, :text, :text_series] ->
+              type when type in [:rect, :canvas, :text, :text_series, :top_n] ->
                 place_typed_element(socket, type, x, y)
             end
           end)
@@ -2608,7 +2704,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   def handle_event("set_place_kind", %{"kind" => kind}, socket)
-      when kind in ~w(rect canvas text text_series) do
+      when kind in ~w(rect canvas text text_series top_n) do
     {:noreply, assign(socket, place_kind: Element.normalize_type(kind))}
   end
 
@@ -3131,34 +3227,30 @@ defmodule TimelessCanvas.Web.CanvasLive do
         end)
 
       if var_name do
-        canvas = socket.assigns.canvas
-        var_def = Map.put(canvas.variables[var_name], "current", new_value)
-        variables = Map.put(canvas.variables, var_name, var_def)
-        canvas = %{canvas | variables: variables}
-        time = socket.assigns.timeline_time || DateTime.utc_now()
-
-        socket =
-          socket
-          |> push_canvas(canvas)
-          |> schedule_autosave()
-
-        canvas_id = socket.assigns.canvas_id
-        resolved = socket.assigns.resolved_elements
-        span = socket.assigns.timeline_span
-        fingerprint = socket.assigns.registration_fingerprint
-
-        socket =
-          start_async(socket, :variable_data, fn ->
-            load_element_data(canvas_id, resolved, time, span)
-            |> Map.put(:fingerprint, fingerprint)
-          end)
-
-        {:noreply, socket}
+        {:noreply, set_variables(socket, %{var_name => new_value})}
       else
         {:noreply, socket}
       end
     end)
   end
+
+  # Clicking a ranked row points the canvas at it: every canvas variable
+  # bound to one of the row's group-by labels takes that row's value, so the
+  # graphs and streams that follow those variables follow the click.
+  def handle_event("top:row_click", %{"element_id" => element_id, "index" => index}, socket)
+      when is_integer(index) and index >= 0 do
+    with %Element{type: :top_n, meta: meta} <- socket.assigns.resolved_elements[element_id],
+         {_ts, rows} when is_list(rows) <- socket.assigns.text_data[element_id],
+         %{labels: labels} <- Enum.at(rows, index),
+         changes when changes != %{} <-
+           row_variable_changes(socket.assigns.canvas.variables, meta, labels) do
+      require_edit(socket, fn -> {:noreply, set_variables(socket, changes)} end)
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("top:row_click", _params, socket), do: {:noreply, socket}
 
   def handle_event("var:show_add", _params, socket) do
     {:noreply, assign(socket, show_add_variable: true)}
@@ -3551,7 +3643,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
     old_label_keys =
       old_meta
-      |> graph_query_labels_from_meta()
+      |> Element.query_labels()
       |> Map.keys()
 
     meta
@@ -3575,7 +3667,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
     |> fill_graph_data_at(time)
   end
 
-  defp maybe_refresh_element_data(socket, _id, :text_series, time) do
+  defp maybe_refresh_element_data(socket, _id, type, time)
+       when type in [:text_series, :top_n] do
     socket
     |> fetch_metric_units()
     |> fill_text_data_at(time)
@@ -4113,7 +4206,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
         "canvas.timeline_span_seconds" => socket.assigns.timeline_span,
         "canvas.query_time_unix_ms" => DateTime.to_unix(time, :millisecond),
         "canvas.text_series_count" =>
-          count_elements(socket.assigns.resolved_elements, :text_series)
+          count_elements(socket.assigns.resolved_elements, :text_series),
+        "canvas.top_n_count" => count_elements(socket.assigns.resolved_elements, :top_n)
       },
       fn ->
         text_data =
@@ -4195,8 +4289,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
   defp query_graph_data(canvas_id, resolved_elements, time, span),
     do: DataQueries.query_graph_data(canvas_id, resolved_elements, time, span)
 
+  # text_data holds the latest value of every element that shows one:
+  # a string for text_series, ranked rows for top_n.
   defp query_text_data(canvas_id, resolved_elements, time),
-    do: DataQueries.query_text_data(canvas_id, resolved_elements, time)
+    do: DataQueries.query_value_data(canvas_id, resolved_elements, time)
 
   defp query_stream_data(resolved_elements, time, span),
     do: DataQueries.query_stream_data(resolved_elements, time, span)
@@ -4452,7 +4548,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
-  defp text_value_for(%{type: :text_series} = element, text_data) do
+  defp text_value_for(%{type: type} = element, text_data)
+       when type in [:text_series, :top_n] do
     case Map.get(text_data, element.id) do
       {_ts, val} -> val
       :error -> :error

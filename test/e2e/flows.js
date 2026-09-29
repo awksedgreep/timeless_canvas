@@ -408,6 +408,45 @@ const flows = {
   },
 
   /**
+   * A top_n element draws its ranked rows; clicking one points the canvas
+   * variable bound to its group-by label at that row.
+   */
+  async top_n_row_click(page, h) {
+    await h.login();
+    await h.waitLoaded();
+
+    await page.waitForFunction(
+      () => document.querySelectorAll(".canvas-top-row").length === 3,
+      null,
+      { timeout: 10000 },
+    );
+
+    const text = await page.locator('[data-element-id="el-1"]').textContent();
+    h.assert(text.includes("beam.smp"), `first row is named by its group, got: ${text}`);
+
+    const variable = page.locator(".canvas-var-item .host-combobox__input");
+    h.assert(
+      (await variable.getAttribute("placeholder")) !== "postgres",
+      "variable starts unset",
+    );
+
+    await page.locator(".canvas-top-row").nth(1).click();
+
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector(".canvas-var-item .host-combobox__input")
+          .getAttribute("placeholder") === "postgres",
+      null,
+      { timeout: 5000 },
+    );
+
+    // The click is not a drag: the element has not moved.
+    const body = await h.bodyAttrs("el-1");
+    h.assert(body.x === 200 && body.y === 160, `element stayed put, got ${JSON.stringify(body)}`);
+  },
+
+  /**
    * Flow 12: Escape cascade — share overlay, then typeahead dropdown,
    * then place mode, then selection.
    */

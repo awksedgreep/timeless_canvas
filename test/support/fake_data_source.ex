@@ -22,6 +22,10 @@ defmodule TimelessCanvas.Test.FakeDataSource do
   `list_series_for_host/3`) apply `:filter` / `:limit` opts to the canned
   list, so tests can program a full list and assert bounding.
 
+  `metric_range/6` and `top_series/5` are always exported, so this source
+  always advertises the cross-series capabilities. Use
+  `TimelessCanvas.DataSource.Stub` to test a backend without them.
+
   The batch callbacks `statuses/2` and `statuses_at/3` default to mapping
   each element to the canned `:status` / `:status_at` value; program
   `:statuses` / `:statuses_at` with a full `%{id => status}` map to
@@ -99,6 +103,24 @@ defmodule TimelessCanvas.Test.FakeDataSource do
   def metric_range(_state, element, _metric, _from, _to) do
     case get(:metric_range, {:ok, []}) do
       fun when is_function(fun, 1) -> fun.(element)
+      other -> other
+    end
+  end
+
+  # Records the opts it was called with under :metric_range_opts, so tests
+  # can assert an aggregate reached the backend.
+  @impl true
+  def metric_range(state, element, metric, from, to, opts) do
+    put(:metric_range_opts, opts)
+    metric_range(state, element, metric, from, to)
+  end
+
+  # A canned :top_series value that is a 2-arity function receives the
+  # element and the opts.
+  @impl true
+  def top_series(_state, element, _metric, _time, opts) do
+    case get(:top_series, {:ok, []}) do
+      fun when is_function(fun, 2) -> fun.(element, opts)
       other -> other
     end
   end

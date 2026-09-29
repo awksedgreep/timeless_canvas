@@ -48,6 +48,33 @@ defmodule TimelessCanvas.DataSource.RandomTest do
       assert Enum.all?(series, fn {_name, labels} -> labels["host"] == "web-01" end)
     end
 
+    test "ranked rows are ordered, bounded, and stable for a given time" do
+      element = %TimelessCanvas.Canvas.Element{id: "top"}
+      time = ~U[2026-09-29 12:00:00Z]
+      opts = [group_by: ["ifname"], limit: 3, order: :desc]
+
+      assert {:ok, rows} = Random.top_series(%{}, element, "cpu_usage", time, opts)
+      assert {:ok, ^rows} = Random.top_series(%{}, element, "cpu_usage", time, opts)
+
+      assert length(rows) == 3
+      assert Enum.all?(rows, &(Map.keys(&1.labels) == ["ifname"]))
+      values = Enum.map(rows, & &1.value)
+      assert values == Enum.sort(values, :desc)
+
+      assert {:ok, ascending} =
+               Random.top_series(%{}, element, "cpu_usage", time, Keyword.put(opts, :order, :asc))
+
+      ascending = Enum.map(ascending, & &1.value)
+      assert ascending == Enum.sort(ascending, :asc)
+    end
+
+    test "ranks hosts when there is nothing to group by" do
+      element = %TimelessCanvas.Canvas.Element{id: "top"}
+
+      assert {:ok, [%{labels: %{"host" => _}} | _]} =
+               Random.top_series(%{}, element, "cpu_usage", DateTime.utc_now(), group_by: [])
+    end
+
     test "filter matches against the metric name, limit bounds the result" do
       series = Random.list_series_for_host(%{}, "web-01", filter: "network")
       assert Enum.map(series, &elem(&1, 0)) == ["network_rx_bytes", "network_tx_bytes"]
