@@ -158,3 +158,115 @@ test("topRowClick resolves a ranked row to its element and index", () => {
   assert.equal(hook.topRowClick(target(row("-1"))), null);
   assert.equal(hook.topRowClick(target(row("0", null))), null);
 });
+
+test("clientTimezone reports minutes east of UTC, and a zone where there is one", () => {
+  const hook = Object.create(CanvasHook);
+  const at = (minutesWest) => ({ getTimezoneOffset: () => minutesWest });
+
+  assert.equal(hook.clientTimezone(at(240)).offset_minutes, -240);
+  assert.equal(hook.clientTimezone(at(-330)).offset_minutes, 330);
+  assert.equal(hook.clientTimezone(at(0)).offset_minutes, 0);
+  assert.equal(hook.clientTimezone(at(Number.NaN)).offset_minutes, 0);
+
+  const zone = hook.clientTimezone(at(0)).zone;
+  assert.ok(zone === null || (typeof zone === "string" && zone.length > 0));
+});
+
+test("clientTimezone survives a browser with no zone to give", () => {
+  const hook = Object.create(CanvasHook);
+  const previous = Intl.DateTimeFormat;
+  Intl.DateTimeFormat = () => {
+    throw new Error("no Intl");
+  };
+
+  try {
+    assert.deepEqual(hook.clientTimezone({ getTimezoneOffset: () => 60 }), {
+      zone: null,
+      offset_minutes: -60,
+    });
+  } finally {
+    Intl.DateTimeFormat = previous;
+  }
+});
+
+test("the clock is reported when the hook reconnects, before the graphs are asked for", () => {
+  const events = [];
+  const hook = Object.assign(Object.create(CanvasHook), {
+    pushEvent: (name) => events.push(name),
+  });
+
+  hook.reconnected();
+
+  assert.deepEqual(events, ["client:timezone", "graph:resync"]);
+});
+
+test("events are sent from the element outside the SVG, so the SVG is not locked", () => {
+  const pushed = [];
+  const fallback = [];
+  const source = { id: "canvas-event-source" };
+  const previous = globalThis.document;
+  globalThis.document = {
+    getElementById: (id) => (id === "canvas-event-source" ? source : null),
+  };
+
+  try {
+    const hook = Object.assign(Object.create(CanvasHook), {
+      el: { dataset: { eventSource: "canvas-event-source" }, contains: () => false },
+      js: () => ({ push: (el, event, opts) => pushed.push([el, event, opts]) }),
+      pushEvent: (event, payload) => fallback.push([event, payload]),
+    });
+
+    hook.send("element:move", { id: "el-1", dx: 4.5, dy: -2 });
+
+    assert.deepEqual(pushed, [
+      [source, "element:move", { value: { id: "el-1", dx: 4.5, dy: -2 } }],
+    ]);
+    assert.deepEqual(fallback, []);
+  } finally {
+    globalThis.document = previous;
+  }
+});
+
+test("events fall back to the hook's own push where there is nowhere else to send from", () => {
+  const previous = globalThis.document;
+  const cases = [
+    // No element named.
+    { dataset: {}, found: null, inside: false, js: true },
+    // Named, and not on the page.
+    { dataset: { eventSource: "gone" }, found: null, inside: false, js: true },
+    // Inside the SVG: sending from it would lock the SVG again.
+    { dataset: { eventSource: "inner" }, found: { id: "inner" }, inside: true, js: true },
+    // A LiveView with no js() for hooks.
+    { dataset: { eventSource: "outer" }, found: { id: "outer" }, inside: false, js: false },
+  ];
+
+  try {
+    for (const c of cases) {
+      const pushed = [];
+      const fallback = [];
+      globalThis.document = { getElementById: () => c.found };
+      const hook = Object.assign(Object.create(CanvasHook), {
+        el: { dataset: c.dataset, contains: () => c.inside },
+        pushEvent: (event, payload) => fallback.push([event, payload]),
+      });
+      if (c.js) hook.js = () => ({ push: (...args) => pushed.push(args) });
+
+      hook.send("canvas:escape", {});
+
+      assert.deepEqual(pushed, [], JSON.stringify(c));
+      assert.deepEqual(fallback, [["canvas:escape", {}]], JSON.stringify(c));
+    }
+  } finally {
+    globalThis.document = previous;
+  }
+});
+
+test("nothing in the hook sends an event from the SVG itself", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./canvas_hook.js", import.meta.url), "utf8");
+  const direct = source.match(/this\.pushEvent\(/g) || [];
+
+  // The one call left is the fallback inside send().
+  assert.equal(direct.length, 1);
+});
+

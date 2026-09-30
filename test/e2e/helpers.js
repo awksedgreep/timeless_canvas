@@ -4,6 +4,21 @@
  */
 module.exports = (page) => {
   const h = {
+    /**
+     * Hold every event this page sends for `ms` before it goes, as a slow
+     * network would. LiveView reads the setting when the page loads, so it
+     * has to be asked for before `login`.
+     */
+    async slowNetwork(ms) {
+      await page.addInitScript((latency) => {
+        try {
+          sessionStorage.setItem("phx:live-socket:latency-sim", String(latency));
+        } catch (_error) {
+          // No storage: the flow runs at the speed of the loopback.
+        }
+      }, ms);
+    },
+
     /** Log in via the session route and wait for the canvas to be live. */
     async login() {
       await page.goto(process.env.LOGIN_URL, { waitUntil: "load" });

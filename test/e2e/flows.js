@@ -447,6 +447,171 @@ const flows = {
   },
 
   /**
+   * Every time on the canvas is on one clock, the browser's: the ends of
+   * the timeline (written by the server) beside its ticks (written here),
+   * and a graph's axis (the server) under its tooltip (here).
+   */
+  async one_clock(page, h) {
+    await h.login();
+    await h.waitLoaded();
+
+    // A browser may call a zone by an older name (Asia/Calcutta), so it is
+    // the distance from UTC that says the browser is where it was put.
+    const zone = await page.evaluate(
+      () => Intl.DateTimeFormat().resolvedOptions().timeZone,
+    );
+    const east = await page.evaluate(() => 0 - new Date().getTimezoneOffset());
+    h.assert(Math.abs(east) >= 60, `the test needs a zone away from UTC, got ${zone} (${east}m)`);
+
+    // Minutes since midnight of "HH:MM" or "HH:MM:SS", wherever it is in the text.
+    const minutes = (text) => {
+      const m = /(\d{2}):(\d{2})(?::\d{2})?\s*$/.exec(text.trim());
+      if (!m) throw new Error(`no time in "${text}"`);
+      return Number(m[1]) * 60 + Number(m[2]);
+    };
+    const apart = (a, b) => Math.min(Math.abs(a - b), 1440 - Math.abs(a - b));
+
+    // The end of a live track is now.
+    await page.waitForFunction(
+      (offset) => {
+        const end = document.querySelector(".timeline-bar__time--end");
+        const m = end && /(\d{2}):(\d{2})\s*$/.exec(end.textContent.trim());
+        if (!m) return false;
+        const shown = Number(m[1]) * 60 + Number(m[2]);
+        const d = new Date();
+        const local = d.getHours() * 60 + d.getMinutes();
+        const gap = Math.min(Math.abs(shown - local), 1440 - Math.abs(shown - local));
+        return gap <= offset;
+      },
+      2,
+      { timeout: 10000 },
+    );
+
+    // The last label of a graph's axis is its newest point, which is now.
+    await page.waitForFunction(
+      () => document.querySelectorAll("#graph-dyn-el-1 text").length > 0,
+      null,
+      { timeout: 10000 },
+    );
+    const local = await page.evaluate(() => {
+      const d = new Date();
+      return d.getHours() * 60 + d.getMinutes();
+    });
+
+    await page.waitForFunction(
+      (now) => {
+        const texts = [...document.querySelectorAll("#graph-dyn-el-1 text")]
+          .map((t) => t.textContent.trim())
+          .filter((t) => /^\d{2}:\d{2}:\d{2}$/.test(t));
+        if (texts.length === 0) return false;
+        const last = texts[texts.length - 1];
+        const shown = Number(last.slice(0, 2)) * 60 + Number(last.slice(3, 5));
+        const gap = Math.min(Math.abs(shown - now), 1440 - Math.abs(shown - now));
+        return gap <= 3;
+      },
+      local,
+      { timeout: 10000 },
+    );
+
+    // A log row written at this moment reads as this moment.
+    const row = await page.locator('[data-element-id="el-2"]').textContent();
+    const stamp = /(\d{2}:\d{2}:\d{2}) \[INFO\]/.exec(row);
+    h.assert(stamp, `log row has a time, got: ${row.slice(0, 120)}`);
+    h.assert(
+      apart(minutes(stamp[1]), local) <= 3,
+      `log row ${stamp[1]} is on the browser's clock (${Math.floor(local / 60)}:${local % 60})`,
+    );
+
+    // And the ticks the hook wrote are on the clock the ends are on: the
+    // last tick is before the end of the track, and less than a tick away.
+    const ticks = (await page.locator(".timeline-bar__tick").allTextContents()).filter(
+      (t) => /\d{2}:\d{2}/.test(t),
+    );
+    h.assert(ticks.length >= 2, `timeline has ticks, got ${ticks.length}`);
+    const end = minutes(await page.locator(".timeline-bar__time--end").textContent());
+    const lastTick = minutes(ticks[ticks.length - 1]);
+    const step = apart(minutes(ticks[ticks.length - 1]), minutes(ticks[ticks.length - 2]));
+    const behind = (end - lastTick + 1440) % 1440;
+    h.assert(
+      behind <= step,
+      `last tick ${ticks[ticks.length - 1]} is within one tick (${step}m) before the end, ${behind}m`,
+    );
+  },
+
+  /**
+   * A value that arrives while an event is in flight is kept.
+   *
+   * LiveView locks what an event was sent from until it is acknowledged,
+   * and its morphdom cannot hold an update back from a locked <svg>: the
+   * update went to the page, and the acknowledgement put the page back.
+   * Over a loopback an event is in flight for a millisecond; here it is
+   * held for a quarter of a second, as over a network.
+   */
+  async update_survives_event_in_flight(page, h) {
+    await h.slowNetwork(250);
+    await h.login();
+    await h.waitLoaded();
+
+    const shown = () =>
+      page.evaluate(() => {
+        const texts = [...document.querySelectorAll('[data-element-id="el-1"] text')];
+        return texts.map((t) => t.textContent.trim()).pop();
+      });
+
+    // The value changes on each tick of the poller, eight times, and then
+    // is FINAL for good. Clicks on empty canvas keep events in flight.
+    const box = await page.locator("#canvas-svg").boundingBox();
+    const until = Date.now() + 4000;
+    while (Date.now() < until) {
+      await page.mouse.click(box.x + 900, box.y + 500);
+      await page.waitForTimeout(300);
+    }
+
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll('[data-element-id="el-1"] text')]
+          .map((t) => t.textContent.trim())
+          .pop() === "FINAL",
+      null,
+      { timeout: 8000 },
+    );
+
+    // Every event has been acknowledged by now. It was an acknowledgement
+    // that put the old value back, so it is after them that it is looked at.
+    await page.waitForTimeout(3000);
+    const settled = await shown();
+    h.assert(settled === "FINAL", `value is still FINAL once events are acknowledged, got ${settled}`);
+  },
+
+  /**
+   * What arrives with the first data is kept. The hook says what the
+   * browser's clock is as soon as it mounts, so an event is in flight when
+   * the first data arrives, every time.
+   */
+  async first_data_survives_mount_event(page, h) {
+    await h.slowNetwork(250);
+    await h.login();
+    await h.waitLoaded();
+
+    await page.waitForFunction(
+      () => document.querySelectorAll(".canvas-top-row").length === 2,
+      null,
+      { timeout: 10000 },
+    );
+    await page.waitForFunction(
+      () => document.querySelectorAll(".canvas-stream-row").length === 1,
+      null,
+      { timeout: 10000 },
+    );
+
+    await page.waitForTimeout(2000);
+    const rows = await page.locator(".canvas-top-row").count();
+    const entries = await page.locator(".canvas-stream-row").count();
+    h.assert(rows === 2, `ranked rows are still there once the event is acknowledged, got ${rows}`);
+    h.assert(entries === 1, `log rows are still there once the event is acknowledged, got ${entries}`);
+  },
+
+  /**
    * Flow 12: Escape cascade — share overlay, then typeahead dropdown,
    * then place mode, then selection.
    */

@@ -17,6 +17,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
   alias TimelessCanvas.DataQueries
   alias TimelessCanvas.DataSource.Manager, as: StatusManager
   alias TimelessCanvas.IconCatalog
+  alias TimelessCanvas.LocalTime
   alias TimelessCanvas.Presence
   alias TimelessCanvas.Profiling
   alias TimelessCanvas.StreamManager
@@ -163,6 +164,8 @@ defmodule TimelessCanvas.Web.CanvasLive do
           graph_data: %{},
           graph_push_cache: %{},
           text_data: %{},
+          # UTC until the Canvas hook says what the browser's clock is.
+          tz: LocalTime.utc(),
           stream_data: stream_data,
           hosts_available?: false,
           loading_data?: true,
@@ -640,9 +643,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
         </div>
       </div>
 
+      <%!-- What the Canvas hook sends its events from, so that the SVG is
+           not what LiveView locks while one is in flight. See `send` in
+           canvas_hook.js. --%>
+      <span id="canvas-event-source" hidden></span>
       <svg
         id="canvas-svg"
         phx-hook="Canvas"
+        data-event-source="canvas-event-source"
         viewBox={ViewBox.to_string(@canvas.view_box)}
         class="canvas-svg"
         tabindex="-1"
@@ -701,9 +709,14 @@ defmodule TimelessCanvas.Web.CanvasLive do
           expanded_graph_id={@expanded_graph_id}
           metric_units={@metric_units}
           text_value={text_value_for(element, @text_data)}
+          tz={@tz}
         />
 
-        <.stream_popover :if={!@profile_hide_canvas_scene && @stream_popover} popover={@stream_popover} />
+        <.stream_popover
+          :if={!@profile_hide_canvas_scene && @stream_popover}
+          popover={@stream_popover}
+          tz={@tz}
+        />
       </svg>
 
       <.shortcut_legend :if={!@profile_hide_canvas_scene} />
@@ -735,6 +748,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         timeline_span={@timeline_span}
         timeline_range={@timeline_range}
         timeline_data_range={@timeline_data_range}
+        tz={@tz}
       />
 
       <div class="canvas-zoom-indicator">
@@ -1235,7 +1249,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
     x = assigns.popover.x
     y = assigns.popover.y
 
-    ts = format_popover_timestamp(entry[:timestamp])
+    ts = format_popover_timestamp(entry[:timestamp], assigns.tz)
     level = entry[:level] |> to_string() |> String.upcase()
     msg = entry[:message] || ""
 
@@ -1306,7 +1320,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
     x = assigns.popover.x
     y = assigns.popover.y
 
-    ts = format_popover_timestamp(span[:timestamp])
+    ts = format_popover_timestamp(span[:timestamp], assigns.tz)
     duration = format_popover_duration(span[:duration_ns])
     status = span[:status]
     status_ok = status == :ok || status == "ok"
@@ -1374,19 +1388,20 @@ defmodule TimelessCanvas.Web.CanvasLive do
     """
   end
 
-  defp format_popover_timestamp(nil), do: nil
+  defp format_popover_timestamp(nil, _tz), do: nil
 
-  defp format_popover_timestamp(ts) when is_integer(ts) do
-    case DateTime.from_unix(ts, :millisecond) do
-      {:ok, dt} ->
-        Calendar.strftime(dt, "%H:%M:%S.") <> String.pad_leading("#{rem(ts, 1000)}", 3, "0")
-
-      _ ->
-        "#{ts}"
+  # A store keeps time in its own unit, and the row this was opened from
+  # was written from the same timestamp, so both read it the same way.
+  defp format_popover_timestamp(ts, tz) when is_integer(ts) do
+    with {:ok, ms} <- LocalTime.to_ms(ts),
+         {:ok, local} <- LocalTime.shift(ms, tz) do
+      Calendar.strftime(local, "%H:%M:%S.") <> String.pad_leading("#{rem(ms, 1000)}", 3, "0")
+    else
+      _ -> "#{ts}"
     end
   end
 
-  defp format_popover_timestamp(ts), do: "#{ts}"
+  defp format_popover_timestamp(ts, _tz), do: "#{ts}"
 
   defp format_popover_duration(nil), do: "?"
 
@@ -1698,9 +1713,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
 
       payload =
         if assigns.expanded_graph_id == id do
-          expanded_graph_payload(el, assigns.expanded_graph_data, unit, rules)
+          expanded_graph_payload(el, assigns.expanded_graph_data, unit, rules, assigns.tz)
         else
-          compact_graph_payload(el, Map.get(assigns.graph_data, id, []), unit, rules)
+          compact_graph_payload(el, Map.get(assigns.graph_data, id, []), unit, rules, assigns.tz)
         end
 
       {id, payload}
@@ -2923,6 +2938,20 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # Sent by the Canvas hook from reconnected(): ignored graph containers
   # survive the reconnect patch but their contents (and the JS point
   # cache) may be stale, so drop the diff cache and re-push everything.
+  # Sent by the Canvas hook when it mounts, and again when it reconnects.
+  # The hooks write times in the browser's zone, so the server has to be told
+  # it to write the same ones. Graph payloads carry their axis labels, so
+  # they are made again.
+  def handle_event("client:timezone", params, socket) do
+    tz = LocalTime.from_client(params)
+
+    if tz == socket.assigns.tz do
+      {:noreply, socket}
+    else
+      {:noreply, socket |> assign(tz: tz) |> push_graph_data()}
+    end
+  end
+
   def handle_event("graph:resync", _params, socket) do
     {:noreply,
      socket

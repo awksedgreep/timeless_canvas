@@ -26,6 +26,21 @@
   query to nothing.
 
 ### Fixed
+- A value that changed while an event was in flight changed back, and stayed
+  so until it changed again: the value of a text series, the rows of a stream,
+  the colour of a status. LiveView locks what an event is sent from until it
+  is acknowledged, and cannot hold an update back from a locked `<svg>`, so
+  the update went to the page and the acknowledgement put the page back. The
+  Canvas hook now sends its events from an element outside the SVG. It took an
+  event in flight when an update arrived, which is seldom on a loopback and
+  often over a network (#25).
+- Every time is on one clock, the browser's. The server wrote times in UTC
+  and the hooks in the browser's zone, so the timeline's ticks disagreed with
+  its ends, and a graph's tooltip with the axis under it. Where the host
+  application has a time zone database, a time on the other side of a change
+  to or from summer time is right as well (#18).
+- The popover of a log or a trace row read its timestamp as milliseconds,
+  whatever it was in. It reads it as the row does.
 - A text series had no field for its metric name in the properties panel.
 
 ## v0.5.5 (2026-09-11)

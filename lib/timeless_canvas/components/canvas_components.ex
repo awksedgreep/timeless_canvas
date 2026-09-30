@@ -9,6 +9,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   alias TimelessCanvas.Canvas.Element
   alias TimelessCanvas.DataQueries
   alias TimelessCanvas.IconCatalog
+  alias TimelessCanvas.LocalTime
   alias TimelessCanvas.MetricFormatter
   alias TimelessCanvas.Profiling
 
@@ -18,6 +19,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   attr(:stream_entries, :any, default: [])
   attr(:expanded_graph_id, :string, default: nil)
   attr(:metric_units, :map, default: %{})
+  # The viewer's clock: what the times in log and trace rows are written in.
+  attr(:tz, :map, default: %{zone: nil, offset: 0})
   # value | nil (no data) | :error (backend query failure). A text_series
   # value is a string; a top_n value is its list of ranked rows.
   attr(:text_value, :any, default: nil)
@@ -56,6 +59,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             render_h={@render_h}
             metric_units={@metric_units}
             text_value={@text_value}
+            tz={@tz}
           />
           <.element_icon element={@element} />
           <.element_badge_icon element={@element} />
@@ -214,7 +218,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             clip-path={"url(#log-clip-#{@element.id})"}
             pointer-events="none"
           >
-            {format_log_entry(entry)}
+            {format_log_entry(entry, @tz)}
           </text>
         </g>
         <text
@@ -313,7 +317,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             clip-path={"url(#trace-clip-#{@element.id})"}
             pointer-events="none"
           >
-            <tspan fill="#94a3b8">{format_stream_timestamp(Map.get(span, :timestamp))}</tspan>
+            <tspan fill="#94a3b8">{format_stream_timestamp(Map.get(span, :timestamp), @tz)}</tspan>
             <tspan dx="6" fill="#e2e8f0">{span.name}</tspan>
             <tspan dx="6" fill={duration_color(span.duration_ns)}>
               {format_duration(span.duration_ns)}
@@ -1265,38 +1269,20 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   defp log_level_color(:debug), do: "#94a3b8"
   defp log_level_color(_), do: "#94a3b8"
 
-  defp format_log_entry(entry) do
-    ts = format_stream_timestamp(entry.timestamp)
+  defp format_log_entry(entry, tz) do
+    ts = format_stream_timestamp(entry.timestamp, tz)
     level = entry.level |> to_string() |> String.upcase() |> String.slice(0, 4)
     "#{ts} [#{level}] #{entry.message}"
   end
 
-  defp format_stream_timestamp(ts) when is_integer(ts) do
-    case normalize_stream_timestamp(ts) do
-      {:ok, dt} -> Calendar.strftime(dt, "%H:%M:%S")
+  defp format_stream_timestamp(ts, tz) when is_integer(ts) do
+    case LocalTime.to_ms(ts) do
+      {:ok, ms} -> LocalTime.format(ms, tz, "%H:%M:%S", "??:??:??")
       :error -> "??:??:??"
     end
   end
 
-  defp format_stream_timestamp(_), do: "??:??:??"
-
-  defp normalize_stream_timestamp(ts) when ts > 10_000_000_000_000_000 do
-    DateTime.from_unix(ts, :nanosecond)
-  end
-
-  defp normalize_stream_timestamp(ts) when ts > 10_000_000_000_000 do
-    DateTime.from_unix(ts, :microsecond)
-  end
-
-  defp normalize_stream_timestamp(ts) when ts > 10_000_000_000 do
-    DateTime.from_unix(ts, :millisecond)
-  end
-
-  defp normalize_stream_timestamp(ts) when ts > 0 do
-    DateTime.from_unix(ts, :second)
-  end
-
-  defp normalize_stream_timestamp(_), do: :error
+  defp format_stream_timestamp(_ts, _tz), do: "??:??:??"
 
   defp duration_color(nil), do: "#94a3b8"
 
@@ -1352,7 +1338,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   `status` field ("ok" | "empty" | "error") plus a `status_pos` so the
   client hook can draw a distinct "no data" / "data unavailable" state.
   """
-  def compact_graph_payload(element, graph_data, unit, alert_rules \\ []) do
+  def compact_graph_payload(element, graph_data, unit, alert_rules \\ [], tz \\ LocalTime.utc()) do
     {status, points_newest_first} = graph_data_status(graph_data)
     points = Enum.reverse(points_newest_first)
     meta = element.meta || %{}
@@ -1380,7 +1366,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         %{
           x: compact_x_tick_label_x(frac, plot_x, plot_w),
           y: element.y + element.height - 2,
-          text: format_time(ts)
+          text: format_time(ts, tz)
         }
       end)
 
@@ -1414,7 +1400,13 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   or `:error` — see `compact_graph_payload/3`). Mirrors the geometry the
   expanded body used to render server-side, at 2x element size.
   """
-  def expanded_graph_payload(element, graph_data, unit, alert_rules \\ []) do
+  def expanded_graph_payload(
+        element,
+        graph_data,
+        unit,
+        alert_rules \\ [],
+        tz \\ LocalTime.utc()
+      ) do
     {status, points_newest_first} = graph_data_status(graph_data)
     render_w = element.width * 2
     render_h = element.height * 2
@@ -1498,7 +1490,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
     x_labels =
       Enum.map(x_ticks, fn {ts, frac} ->
-        %{x: plot_x + frac * plot_w, y: plot_y + plot_h + 14, text: format_time(ts)}
+        %{x: plot_x + frac * plot_w, y: plot_y + plot_h + 14, text: format_time(ts, tz)}
       end)
 
     %{
@@ -1595,7 +1587,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   # --- Graph detail helpers ---
 
-  defp format_time(ts) do
+  defp format_time(ts, tz) do
     ms =
       case ts do
         %DateTime{} -> DateTime.to_unix(ts, :millisecond)
@@ -1603,9 +1595,7 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         _ -> 0
       end
 
-    ms
-    |> DateTime.from_unix!(:millisecond)
-    |> Calendar.strftime("%H:%M:%S")
+    LocalTime.format(ms, tz, "%H:%M:%S")
   end
 
   defp y_axis_ticks(min_val, max_val) do
@@ -1743,6 +1733,9 @@ defmodule TimelessCanvas.Components.CanvasComponents do
   attr(:timeline_span, :integer, default: 3600)
   attr(:timeline_range, :any, default: 86_400)
   attr(:timeline_data_range, :any, default: nil)
+  # The viewer's clock. The hook writes the ticks in the browser's zone, so
+  # the times at the ends of the track have to be in the same one.
+  attr(:tz, :map, default: %{zone: nil, offset: 0})
 
   def timeline_bar(assigns) do
     now_ms = System.system_time(:millisecond)
@@ -1782,11 +1775,11 @@ defmodule TimelessCanvas.Components.CanvasComponents do
         slider_value: slider_value,
         window_ratio: min(window_ratio, 1.0),
         is_live: is_live,
-        track_start: format_track_ts(slider_min),
-        track_end: format_track_ts(slider_max),
+        track_start: format_track_ts(slider_min, assigns.tz),
+        track_end: format_track_ts(slider_max, assigns.tz),
         # Persistent readout of the viewed (window-center) time while
         # scrubbed into history — same instant the drag bubble shows.
-        historical_readout: if(!is_live, do: format_readout_ts(window_center_ms))
+        historical_readout: if(!is_live, do: format_readout_ts(window_center_ms, assigns.tz))
       )
 
     ~H"""
@@ -1839,20 +1832,18 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     """
   end
 
-  defp format_readout_ts(ms) do
-    ms
-    |> DateTime.from_unix!(:millisecond)
-    |> Calendar.strftime("%b %-d %H:%M:%S")
-  end
+  defp format_readout_ts(ms, tz), do: LocalTime.format(ms, tz, "%b %-d %H:%M:%S")
 
-  defp format_track_ts(ms) do
-    dt = DateTime.from_unix!(ms, :millisecond)
-    today = Date.utc_today()
+  # "Today" is the viewer's day, which is not UTC's for part of every day.
+  defp format_track_ts(ms, tz) do
+    case LocalTime.shift(ms, tz) do
+      {:ok, local} ->
+        if NaiveDateTime.to_date(local) == LocalTime.today(tz),
+          do: Calendar.strftime(local, "%H:%M"),
+          else: Calendar.strftime(local, "%b %-d %H:%M")
 
-    if Date.compare(DateTime.to_date(dt), today) == :eq do
-      Calendar.strftime(dt, "%H:%M")
-    else
-      Calendar.strftime(dt, "%b %-d %H:%M")
+      :error ->
+        ""
     end
   end
 

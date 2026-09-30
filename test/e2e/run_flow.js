@@ -8,6 +8,7 @@
  *   LOGIN_URL     /e2e/login?token=...&to=... (session login + redirect)
  *   E2E_BROWSER   chromium (default) | firefox | webkit
  *   FLOW_PARAMS   JSON params for the flow
+ *   E2E_TZ        time zone the browser is in (its own, if unset)
  *   ARTIFACT_DIR  where failure screenshots land
  *
  * Exits 0 iff the flow ran without throwing. On failure it prints the
@@ -46,7 +47,10 @@ async function launch() {
   }
 
   const browser = await launch();
-  const page = await browser.newPage({ viewport: { width: 1600, height: 950 } });
+  const page = await browser.newPage({
+    viewport: { width: 1600, height: 950 },
+    ...(process.env.E2E_TZ ? { timezoneId: process.env.E2E_TZ } : {}),
+  });
 
   const consoleLines = [];
   page.on("console", (m) => consoleLines.push(`[console:${m.type()}] ${m.text()}`));

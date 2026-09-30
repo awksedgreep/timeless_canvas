@@ -160,12 +160,64 @@ const CanvasHook = {
     // lingering client-side transform/size for that element — no patch
     // with authoritative coordinates is coming.
     this.handleEvent("canvas:reset-element", ({ id }) => this.resetElement(id));
+    this.pushTimezone();
   },
 
   reconnected() {
+    // A reconnected LiveView is a new process, and knows no clock but UTC.
+    this.pushTimezone();
     // Ignored graph containers survive the reconnect patch but their
     // contents (and our cache) may be stale; ask for a full snapshot.
-    this.pushEvent("graph:resync", {});
+    this.send("graph:resync", {});
+  },
+
+  // The tooltip and the timeline's ticks are written here, in the browser's
+  // zone. The server writes the rest, and has to be told the zone to write
+  // the same times.
+  // Every event this hook sends goes through an element outside the SVG.
+  //
+  // LiveView locks the element an event is sent from until the event is
+  // acknowledged, and means to apply what the server sends meanwhile to a
+  // copy of it, and the copy to the page at the acknowledgement. Its
+  // morphdom takes the copy only if it is an HTMLElement, which an <svg> is
+  // not. So with events sent from the SVG, what arrived meanwhile was put on
+  // the page, the copy stayed as it was, and the acknowledgement put the
+  // page back to the copy: a value that had just changed changed back, and
+  // stayed so until it changed again. It took an event in flight when an
+  // update arrived, which is seldom on a loopback and often over a network.
+  //
+  // Sent from elsewhere, the SVG is never locked, and updates go to the
+  // page as they always appeared to.
+  send(event, payload) {
+    const source = this.eventSource();
+    if (source && typeof this.js === "function") {
+      this.js().push(source, event, { value: payload });
+    } else {
+      this.pushEvent(event, payload);
+    }
+  },
+
+  eventSource() {
+    const id = this.el && this.el.dataset ? this.el.dataset.eventSource : null;
+    const source = id && typeof document !== "undefined" ? document.getElementById(id) : null;
+    // An element inside the SVG, or the SVG itself, would lock it again.
+    return source && !this.el.contains(source) ? source : null;
+  },
+
+  pushTimezone() {
+    this.send("client:timezone", this.clientTimezone());
+  },
+
+  clientTimezone(now = new Date()) {
+    let zone = null;
+    try {
+      zone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+    } catch (_error) {
+      zone = null;
+    }
+    // getTimezoneOffset is minutes west of UTC; the server wants east.
+    const offset = 0 - now.getTimezoneOffset();
+    return { zone, offset_minutes: Number.isFinite(offset) ? offset : 0 };
   },
 
   updated() {
@@ -393,7 +445,7 @@ const CanvasHook = {
       const entryId = streamRow.dataset.entryId;
       const streamGroup = streamRow.closest("[data-element-id]");
       if (streamGroup && entryId) {
-        this.pushEvent("stream:entry_click", {
+        this.send("stream:entry_click", {
           element_id: streamGroup.dataset.elementId,
           entry_id: entryId,
         });
@@ -406,7 +458,7 @@ const CanvasHook = {
     // the row up by index in the rows it last sent for that element.
     const topRow = this.topRowClick(e.target);
     if (topRow) {
-      this.pushEvent("top:row_click", topRow);
+      this.send("top:row_click", topRow);
       this.dragging = { type: "stream_click" };
       return;
     }
@@ -579,13 +631,13 @@ const CanvasHook = {
         // Click on empty canvas (middle-mouse pans never count as clicks)
         if (!this.dragging.noClick) {
           const svgPt = this.clientToSvg(e.clientX, e.clientY);
-          this.pushEvent("canvas:click", { x: svgPt.x, y: svgPt.y });
+          this.send("canvas:click", { x: svgPt.x, y: svgPt.y });
           this.removeTempLine();
         }
       } else {
         // Push final pan position
         const vb = this.getViewBox();
-        this.pushEvent("canvas:zoom", {
+        this.send("canvas:zoom", {
           min_x: vb.minX,
           min_y: vb.minY,
           width: vb.width,
@@ -597,15 +649,15 @@ const CanvasHook = {
       if (isClick) {
         // Click on empty canvas - clear selection
         const svgPt = this.clientToSvg(e.clientX, e.clientY);
-        this.pushEvent("canvas:click", { x: svgPt.x, y: svgPt.y });
+        this.send("canvas:click", { x: svgPt.x, y: svgPt.y });
       } else {
         // Compute which elements intersect the marquee
         const svgEnd = this.clientToSvg(e.clientX, e.clientY);
         const ids = this.getElementsInRect(this.dragging.svgStart, svgEnd);
         if (ids.length > 0) {
-          this.pushEvent("marquee:select", { ids });
+          this.send("marquee:select", { ids });
         } else {
-          this.pushEvent("canvas:deselect", {});
+          this.send("canvas:deselect", {});
         }
       }
     } else if (this.dragging.type === "element") {
@@ -620,22 +672,22 @@ const CanvasHook = {
         const now = Date.now();
         const id = this.dragging.id;
         if (this._lastClickId === id && now - this._lastClickTime < 400) {
-          this.pushEvent("element:dblclick", { id });
+          this.send("element:dblclick", { id });
           this._lastClickId = null;
           this._lastClickTime = 0;
         } else {
           this._lastClickId = id;
           this._lastClickTime = now;
           if (this.dragging.shiftKey) {
-            this.pushEvent("element:shift_select", { id });
+            this.send("element:shift_select", { id });
           } else {
-            this.pushEvent("element:select", { id });
+            this.send("element:select", { id });
           }
         }
       } else if (this.getMode() !== "connect" && !this.dragging.viewOnly) {
         // Keep transform until server patches with new coordinates
         this._pendingDrop = { ids: this.dragging.groupIds };
-        this.pushEvent("element:move", {
+        this.send("element:move", {
           id: this.dragging.id,
           dx: this.dragging.totalDx,
           dy: this.dragging.totalDy,
@@ -656,14 +708,14 @@ const CanvasHook = {
         origHeight: this.dragging.origHeight,
         _iconOrig: this.dragging._iconOrig,
       };
-      this.pushEvent("element:resize", {
+      this.send("element:resize", {
         id: this.dragging.id,
         width: Math.max(this.dragging.startWidth, 20),
         height: Math.max(this.dragging.startHeight, 20),
       });
     } else if (this.dragging.type === "connection_click") {
       if (isClick) {
-        this.pushEvent("connection:select", { id: this.dragging.id });
+        this.send("connection:select", { id: this.dragging.id });
       }
     }
 
@@ -841,7 +893,7 @@ const CanvasHook = {
     this._zoomDebounce = setTimeout(() => {
       this._zoomDebounce = null;
       const final = this.getViewBox();
-      this.pushEvent("canvas:zoom", {
+      this.send("canvas:zoom", {
         min_x: final.minX,
         min_y: final.minY,
         width: final.width,
@@ -891,32 +943,32 @@ const CanvasHook = {
     if (e.key === "Delete" || e.key === "Backspace") {
       if (!this.canEdit) return;
       e.preventDefault();
-      this.pushEvent("delete_selected", {});
+      this.send("delete_selected", {});
     } else if (e.key === "Escape") {
       e.preventDefault();
       // The server cascades: share overlay → stream popover → typeahead
       // dropdown → exit place/connect mode → deselect.
-      this.pushEvent("canvas:escape", {});
+      this.send("canvas:escape", {});
       this.removeTempLine();
     } else if (e.key === "a" && ctrl) {
       e.preventDefault();
-      this.pushEvent("select_all", {});
+      this.send("select_all", {});
     } else if (e.key === "ArrowUp") {
       if (!this.canEdit) return;
       e.preventDefault();
-      this.pushEvent("element:nudge", { dx: 0, dy: -this.nudgeAmount(e.shiftKey) });
+      this.send("element:nudge", { dx: 0, dy: -this.nudgeAmount(e.shiftKey) });
     } else if (e.key === "ArrowDown") {
       if (!this.canEdit) return;
       e.preventDefault();
-      this.pushEvent("element:nudge", { dx: 0, dy: this.nudgeAmount(e.shiftKey) });
+      this.send("element:nudge", { dx: 0, dy: this.nudgeAmount(e.shiftKey) });
     } else if (e.key === "ArrowLeft") {
       if (!this.canEdit) return;
       e.preventDefault();
-      this.pushEvent("element:nudge", { dx: -this.nudgeAmount(e.shiftKey), dy: 0 });
+      this.send("element:nudge", { dx: -this.nudgeAmount(e.shiftKey), dy: 0 });
     } else if (e.key === "ArrowRight") {
       if (!this.canEdit) return;
       e.preventDefault();
-      this.pushEvent("element:nudge", { dx: this.nudgeAmount(e.shiftKey), dy: 0 });
+      this.send("element:nudge", { dx: this.nudgeAmount(e.shiftKey), dy: 0 });
     } else if ((e.key === "+" || e.key === "=") && !ctrl) {
       e.preventDefault();
       this.zoomByFactor(0.97);
@@ -925,33 +977,33 @@ const CanvasHook = {
       this.zoomByFactor(1.03);
     } else if (e.key === "z" && ctrl && e.shiftKey) {
       e.preventDefault();
-      this.pushEvent("canvas:redo", {});
+      this.send("canvas:redo", {});
     } else if (e.key === "y" && ctrl) {
       e.preventDefault();
-      this.pushEvent("canvas:redo", {});
+      this.send("canvas:redo", {});
     } else if (e.key === "z" && ctrl) {
       e.preventDefault();
-      this.pushEvent("canvas:undo", {});
+      this.send("canvas:undo", {});
     } else if (e.key === "c" && ctrl) {
       // Only hijack copy when a canvas element is selected and no page
       // text is selected (copying log/trace text must keep working).
       if (this.hasElementSelection() && this.textSelectionCollapsed()) {
         e.preventDefault();
-        this.pushEvent("canvas:copy", {});
+        this.send("canvas:copy", {});
       }
     } else if (e.key === "x" && ctrl) {
       if (this.canEdit && this.hasElementSelection() && this.textSelectionCollapsed()) {
         e.preventDefault();
-        this.pushEvent("canvas:cut", {});
+        this.send("canvas:cut", {});
       }
     } else if (e.key === "v" && ctrl) {
       if (this.canEdit && this.textSelectionCollapsed()) {
         e.preventDefault();
-        this.pushEvent("canvas:paste", {});
+        this.send("canvas:paste", {});
       }
     } else if (e.key === "s" && ctrl) {
       e.preventDefault();
-      this.pushEvent("canvas:save", {});
+      this.send("canvas:save", {});
     }
   },
 
@@ -962,7 +1014,7 @@ const CanvasHook = {
     this.zoomAtClientPoint(factor, centerX, centerY);
 
     const vb = this.getViewBox();
-    this.pushEvent("canvas:zoom", {
+    this.send("canvas:zoom", {
       min_x: vb.minX,
       min_y: vb.minY,
       width: vb.width,

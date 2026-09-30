@@ -252,6 +252,171 @@ defmodule TimelessCanvas.CanvasE2ETest do
     run_flow("top_n_row_click", path: "/canvas/27")
   end
 
+  test "a value that arrives while an event is in flight is kept" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    FakeDataSource.put(:text_metric_at, fn ->
+      n = Agent.get_and_update(counter, &{&1, &1 + 1})
+      if n < 8, do: {:ok, "value-#{n}"}, else: {:ok, "FINAL"}
+    end)
+
+    canvas = Canvas.new(snap_to_grid: false)
+
+    {canvas, _} =
+      Canvas.add_element(canvas, %{
+        type: :text_series,
+        x: 200.0,
+        y: 160.0,
+        label: "fan",
+        meta: %{"host" => "web-1", "metric_name" => "fan_speed"}
+      })
+
+    seed(29, canvas)
+    run_flow("update_survives_event_in_flight", path: "/canvas/29")
+  end
+
+  # The first data is ready at once, before the browser has mounted the
+  # hook, and later, after the hook's first event has gone: either side of
+  # the event, and with it in flight.
+  #
+  # The browser is in UTC, which is the clock the server starts with, so the
+  # event is acknowledged with nothing. An acknowledgement that writes the
+  # elements again would hide a page that had been put back.
+  for delay <- [0, 100, 400] do
+    test "the first data is kept, arriving #{delay}ms after mount" do
+      FakeDataSource.put(:top_series, fn _element, _opts ->
+        Process.sleep(unquote(delay))
+        {:ok, [%{labels: %{"comm" => "a"}, value: 3.0}, %{labels: %{"comm" => "b"}, value: 1.0}]}
+      end)
+
+      FakeStreamBackend.reset()
+
+      FakeStreamBackend.set_query_result(
+        {:ok,
+         %{
+           entries: [
+             %{
+               timestamp: System.system_time(:millisecond),
+               level: :info,
+               message: "there from the start",
+               metadata: %{}
+             }
+           ]
+         }}
+      )
+
+      previous = Application.get_env(:timeless_canvas, :stream_backends)
+
+      Application.put_env(:timeless_canvas, :stream_backends,
+        log: FakeStreamBackend,
+        trace: FakeStreamBackend
+      )
+
+      on_exit(fn ->
+        FakeStreamBackend.reset()
+
+        if previous,
+          do: Application.put_env(:timeless_canvas, :stream_backends, previous),
+          else: Application.delete_env(:timeless_canvas, :stream_backends)
+      end)
+
+      canvas = Canvas.new(snap_to_grid: false)
+
+      {canvas, _} =
+        Canvas.add_element(canvas, %{
+          type: :top_n,
+          x: 200.0,
+          y: 160.0,
+          label: "cpu",
+          meta: %{"host" => "web-1", "metric_name" => "m", "group_by" => "comm"}
+        })
+
+      {canvas, el} =
+        Canvas.add_element(canvas, %{
+          type: :log_stream,
+          x: 520.0,
+          y: 160.0,
+          width: 320.0,
+          height: 160.0,
+          label: "logs",
+          meta: %{"host" => "web-1"}
+        })
+
+      on_exit(fn -> StreamManager.unregister_stream(el.id) end)
+
+      seed(30, canvas)
+      run_flow("first_data_survives_mount_event", path: "/canvas/30", timezone: "UTC")
+    end
+  end
+
+  # Behind UTC, ahead by a half hour, and ahead by most of a day. None of
+  # the three changes its clock between late September and early October
+  # in a way that matters here: the offsets are read from the browser.
+  for zone <- ["America/New_York", "Asia/Kolkata", "Pacific/Auckland"] do
+    test "every time is on the browser's clock, in #{zone}" do
+      program_graph_points()
+      now = System.system_time(:millisecond)
+
+      FakeStreamBackend.reset()
+
+      FakeStreamBackend.set_query_result(
+        {:ok,
+         %{
+           entries: [
+             %{timestamp: now, level: :info, message: "written now", metadata: %{}}
+           ]
+         }}
+      )
+
+      previous = Application.get_env(:timeless_canvas, :stream_backends)
+
+      Application.put_env(:timeless_canvas, :stream_backends,
+        log: FakeStreamBackend,
+        trace: FakeStreamBackend
+      )
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:timeless_canvas, :stream_backends, previous),
+          else: Application.delete_env(:timeless_canvas, :stream_backends)
+      end)
+
+      canvas = Canvas.new(snap_to_grid: false)
+
+      {canvas, _} =
+        Canvas.add_element(canvas, %{
+          type: :graph,
+          x: 200.0,
+          y: 160.0,
+          width: 300.0,
+          height: 160.0,
+          label: "cpu",
+          meta: %{"host" => "web-1", "metric_name" => "cpu_usage"}
+        })
+
+      {canvas, el} =
+        Canvas.add_element(canvas, %{
+          type: :log_stream,
+          x: 560.0,
+          y: 160.0,
+          width: 320.0,
+          height: 160.0,
+          label: "logs",
+          meta: %{"host" => "web-1"}
+        })
+
+      on_exit(fn -> StreamManager.unregister_stream(el.id) end)
+
+      seed(28, canvas)
+
+      run_flow("one_clock",
+        path: "/canvas/28",
+        timezone: unquote(zone),
+        params: %{}
+      )
+    end
+  end
+
   test "visual regression: reference canvas screenshot" do
     canvas = Canvas.new(snap_to_grid: false)
     {canvas, r} = Canvas.add_element(canvas, %{type: :rect, x: 140.0, y: 140.0, label: "Zone A"})

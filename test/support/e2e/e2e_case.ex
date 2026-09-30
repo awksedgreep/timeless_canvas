@@ -68,6 +68,8 @@ defmodule TimelessCanvas.E2ECase do
     * `:path`  — where the browser lands after login (default `"/canvas/1"`)
     * `:user`  — session user (default `e2e_user/0`)
     * `:params` — map passed to the flow as JSON (FLOW_PARAMS)
+    * `:timezone` — the zone the browser is in (default: `E2E_TZ`, or the
+      machine's own)
   """
   def run_flow(flow, opts \\ []) do
     ensure_node_modules!()
@@ -83,6 +85,12 @@ defmodule TimelessCanvas.E2ECase do
       {"FLOW_PARAMS", Jason.encode!(params)},
       {"ARTIFACT_DIR", Path.join(@e2e_dir, "artifacts")}
     ]
+
+    env =
+      case Keyword.get(opts, :timezone, System.get_env("E2E_TZ")) do
+        nil -> env
+        zone -> [{"E2E_TZ", zone} | env]
+      end
 
     {output, status} =
       System.cmd("node", ["run_flow.js", flow],

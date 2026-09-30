@@ -727,12 +727,19 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       })
     end
 
-    defp prepend_entry(canvas_id, element_id, entry) do
+    # The view queues what arrives and merges it on a message it sends
+    # itself. A render asked for straight after a broadcast can be in the
+    # mailbox before that message is, and would not have the entry. One
+    # round trip to the view puts the merge ahead of whatever is asked next.
+    defp prepend_entry(view, canvas_id, element_id, entry) do
       Phoenix.PubSub.broadcast(
         TimelessCanvas.TestPubSub,
         StreamManager.stream_topic(canvas_id),
         {:stream_entries, element_id, [entry]}
       )
+
+      :sys.get_state(view.pid)
+      :ok
     end
 
     defp popover_message(view) do
@@ -752,7 +759,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       render_async(view)
 
       first = log_entry("first-entry")
-      prepend_entry(record.id, el.id, first)
+      prepend_entry(view, record.id, el.id, first)
 
       html = render(view)
       assert html =~ "first-entry"
@@ -772,7 +779,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       # still resolve the originally clicked entry (the old index-based
       # code would have shown "second-entry" here).
       second = log_entry("second-entry", :error)
-      prepend_entry(record.id, el.id, second)
+      prepend_entry(view, record.id, el.id, second)
       assert render(view) =~ "second-entry"
 
       render_hook(view, "stream:entry_click", %{
@@ -789,7 +796,7 @@ defmodule TimelessCanvas.Web.CanvasLiveTest do
       {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
       render_async(view)
 
-      prepend_entry(record.id, el.id, log_entry("only-entry"))
+      prepend_entry(view, record.id, el.id, log_entry("only-entry"))
       render(view)
 
       render_hook(view, "stream:entry_click", %{

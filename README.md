@@ -96,6 +96,13 @@ The hook names must match the `phx-hook` attributes in the templates exactly:
 
 Note that `CanvasHook` is registered under the name `Canvas`.
 
+Times are written on the browser's clock. The hook tells the server the
+browser's zone and how far it is from UTC. With a time zone database
+configured (`config :elixir, :time_zone_database, Tz.TimeZoneDatabase`, or
+`Tzdata.TimeZoneDatabase`), the zone is used, and a time on the other side of
+a change to or from summer time is right. Without one, the distance from UTC
+when the page was opened is used for every time.
+
 Also import the stylesheet in your `assets/css/app.css`:
 
 ```css
