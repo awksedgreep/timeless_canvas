@@ -270,3 +270,55 @@ test("nothing in the hook sends an event from the SVG itself", async () => {
   assert.equal(direct.length, 1);
 });
 
+test("formatValue writes a value in its unit", () => {
+  const hook = Object.create(CanvasHook);
+  const cases = [
+    // No unit: as the tooltip always wrote a number.
+    [0, null, "0"],
+    [0.1234, undefined, "0.123"],
+    [2.5, null, "2.50"],
+    [150.4, null, "150"],
+    [15000, null, "15.0K"],
+    [2500000, null, "2.5M"],
+    [3e9, null, "3.0G"],
+    [-2500000, null, "-2.5M"],
+    [42, "furlongs", "42.00"],
+    // Bytes, and what is a multiple of them.
+    [512, "bytes", "512 B"],
+    [1536, "bytes", "1.5 KB"],
+    [752000000, "bytes", "717.2 MB"],
+    [3 * 1073741824, "byte", "3.0 GB"],
+    [2, "kilobytes", "2.0 KB"],
+    [1536, "bytes_per_second", "1.5 KB/s"],
+    // Shares.
+    [12.34, "percent", "12.3%"],
+    [0.5, "ratio", "50.0%"],
+    // Lengths of time.
+    [7200, "seconds", "2.0h"],
+    [90, "seconds", "1.5m"],
+    [2.5, "seconds", "2.5s"],
+    [0.25, "seconds", "250.0ms"],
+    [1500, "milliseconds", "1.5s"],
+    [12.5, "milliseconds", "12.5ms"],
+    [2500, "microseconds", "2.5ms"],
+    // The rest.
+    [12.5, "per_second", "12.50/s"],
+    [61.26, "celsius", "61.3\u00b0C"],
+    [1200, "rpm", "1200 rpm"],
+    [45.5, "watts", "45.50 W"],
+    [3400, "megahertz", "3400 MHz"],
+  ];
+
+  for (const [value, unit, written] of cases) {
+    assert.equal(hook.formatValue(value, unit), written, `${value} ${unit}`);
+  }
+});
+
+test("formatValue writes what is not a number as a gap", () => {
+  const hook = Object.create(CanvasHook);
+
+  for (const value of [null, undefined, "12", Number.NaN, Infinity, {}]) {
+    assert.equal(hook.formatValue(value, "bytes"), "---");
+  }
+});
+

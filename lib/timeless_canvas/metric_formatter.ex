@@ -1,5 +1,52 @@
 defmodule TimelessCanvas.MetricFormatter do
-  @moduledoc "Format metric values based on unit metadata."
+  @moduledoc """
+  Format metric values based on unit metadata, or on the unit a metric is
+  named for where there is no metadata.
+  """
+
+  # Longest first: `_bytes_per_sec` is not `_per_sec`, nor `_bytes`.
+  @suffix_units [
+    {"_bytes_per_second", "bytes_per_second"},
+    {"_bytes_per_sec", "bytes_per_second"},
+    {"_milliseconds", "milliseconds"},
+    {"_per_second", "per_second"},
+    {"_per_sec", "per_second"},
+    {"_percent", "percent"},
+    {"_celsius", "celsius"},
+    {"_seconds", "seconds"},
+    {"_bytes", "bytes"},
+    {"_watts", "watts"},
+    {"_mhz", "megahertz"},
+    {"_pct", "percent"},
+    {"_rpm", "rpm"},
+    {"_ms", "milliseconds"}
+  ]
+
+  # Seconds since 1970, and not a length of time.
+  @moments ["_timestamp_seconds", "_time_seconds"]
+
+  @doc """
+  The unit a metric is named for, by the convention that a name ends in its
+  unit: `proc_rss_bytes`, `sys_cpu_busy_pct`, `sys_net_rx_bytes_per_sec`.
+  `nil` for a name that ends in none.
+
+  A series written through a Prometheus import route has no metadata, and
+  its name is all there is to say what it counts.
+  """
+  @spec unit_from_name(term()) :: String.t() | nil
+  def unit_from_name(name) when is_binary(name) do
+    name = String.downcase(name)
+
+    if String.ends_with?(name, @moments) do
+      nil
+    else
+      Enum.find_value(@suffix_units, fn {suffix, unit} ->
+        if String.ends_with?(name, suffix), do: unit
+      end)
+    end
+  end
+
+  def unit_from_name(_name), do: nil
 
   def format(value, _unit) when not is_number(value), do: "---"
   def format(value, nil), do: format_number(value)
@@ -37,6 +84,19 @@ defmodule TimelessCanvas.MetricFormatter do
   defp format_with_unit(value, "ratio") do
     "#{Float.round(value * 100, 1)}%"
   end
+
+  defp format_with_unit(value, unit) when unit in ["bytes_per_second", "bytes/s"] do
+    format_bytes(value) <> "/s"
+  end
+
+  defp format_with_unit(value, unit) when unit in ["per_second", "/s"] do
+    format_number(value) <> "/s"
+  end
+
+  defp format_with_unit(value, "celsius"), do: "#{Float.round(value / 1, 1)}°C"
+  defp format_with_unit(value, "rpm"), do: format_number(value) <> " rpm"
+  defp format_with_unit(value, "watts"), do: format_number(value) <> " W"
+  defp format_with_unit(value, "megahertz"), do: format_number(value) <> " MHz"
 
   defp format_with_unit(value, _unit), do: format_number(value)
 

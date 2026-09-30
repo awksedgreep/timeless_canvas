@@ -33,6 +33,14 @@
   matching for a backend that has the series in memory, and the behaviour says
   what `list_series_for_host/3` is to match (#20).
 
+- A value is written in the unit its metric is named for, where the backend
+  has no metadata for it: `_bytes`, `_pct`, `_per_sec`, `_bytes_per_sec`,
+  `_seconds`, `_ms`, `_celsius`, `_rpm`, `_watts`, `_mhz`. A series written
+  through a Prometheus import route has no metadata, and was written as a
+  bare number: 752,000,000 bytes as `752.0M`. Metadata, where there is some,
+  comes first. The tooltip of an expanded graph is in the unit of its axis
+  (#21).
+
 ### Fixed
 - A value that changed while an event was in flight changed back, and stayed
   so until it changed again: the value of a text series, the rows of a stream,

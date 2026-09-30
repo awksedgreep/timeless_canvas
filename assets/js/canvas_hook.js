@@ -1201,6 +1201,7 @@ const CanvasHook = {
       kind: payload.kind,
       raw: payload.raw || previous?.raw || [],
       poly: this.parsePoints(payload.points),
+      unit: payload.unit || null,
     });
   },
 
@@ -1212,6 +1213,85 @@ const CanvasHook = {
     const index = Number.parseInt(row.dataset.topIndex, 10);
     if (!group || !Number.isInteger(index) || index < 0) return null;
     return { element_id: group.dataset.elementId, index };
+  },
+
+  // A value in the unit the server writes it in
+  // (TimelessCanvas.MetricFormatter), so that a graph's tooltip and its axis
+  // are in the same one. A bare number is written as the tooltip always
+  // wrote it, which is to two places where the server writes as many as
+  // there are.
+  formatValue(val, unit) {
+    if (typeof val !== "number" || !Number.isFinite(val)) return "---";
+    const bytes = (b) => {
+      if (b >= 1099511627776) return (b / 1099511627776).toFixed(1) + " TB";
+      if (b >= 1073741824) return (b / 1073741824).toFixed(1) + " GB";
+      if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB";
+      if (b >= 1024) return (b / 1024).toFixed(1) + " KB";
+      return Math.round(b) + " B";
+    };
+    const number = (v) => {
+      const abs = Math.abs(v);
+      if (abs >= 1e9) return (v / 1e9).toFixed(1) + "G";
+      if (abs >= 1e6) return (v / 1e6).toFixed(1) + "M";
+      if (abs >= 1e4) return (v / 1e3).toFixed(1) + "K";
+      if (abs >= 100) return Math.round(v).toString();
+      if (abs >= 1) return v.toFixed(2);
+      if (abs === 0) return "0";
+      return v.toFixed(3);
+    };
+    const milliseconds = (ms) => {
+      if (ms >= 60000) return (ms / 60000).toFixed(1) + "m";
+      if (ms >= 1000) return (ms / 1000).toFixed(1) + "s";
+      if (ms >= 1) return ms.toFixed(1) + "ms";
+      return (ms * 1000).toFixed(1) + "us";
+    };
+
+    switch (unit) {
+      case "byte":
+      case "bytes":
+        return bytes(val);
+      case "kilobyte":
+      case "kilobytes":
+        return bytes(val * 1024);
+      case "megabyte":
+      case "megabytes":
+        return bytes(val * 1024 * 1024);
+      case "bytes_per_second":
+      case "bytes/s":
+        return bytes(val) + "/s";
+      case "per_second":
+      case "/s":
+        return number(val) + "/s";
+      case "percent":
+      case "%":
+        return val.toFixed(1) + "%";
+      case "ratio":
+        return (val * 100).toFixed(1) + "%";
+      case "second":
+      case "seconds":
+        if (val >= 3600) return (val / 3600).toFixed(1) + "h";
+        if (val >= 60) return (val / 60).toFixed(1) + "m";
+        if (val >= 1) return val.toFixed(1) + "s";
+        return (val * 1000).toFixed(1) + "ms";
+      case "millisecond":
+      case "milliseconds":
+        return milliseconds(val);
+      case "microsecond":
+      case "microseconds":
+        if (val >= 1e6) return (val / 1e6).toFixed(1) + "s";
+        if (val >= 1000) return (val / 1000).toFixed(1) + "ms";
+        return val.toFixed(1) + "us";
+      case "celsius":
+        return val.toFixed(1) + "\u00b0C";
+      case "rpm":
+        return number(val) + " rpm";
+      case "watts":
+        return number(val) + " W";
+      case "megahertz":
+        return number(val) + " MHz";
+      default:
+        return number(val);
+    }
   },
 
   parsePoints(str) {
@@ -1478,7 +1558,7 @@ const CanvasHook = {
     this.showTooltip(
       nearPt.x,
       nearPt.y,
-      { t: rawPoint[0], v: rawPoint[1] },
+      { t: rawPoint[0], v: rawPoint[1], unit: cached.unit },
       expandedGroup,
     );
   },
@@ -1542,17 +1622,7 @@ const CanvasHook = {
     this._tooltipDot.setAttribute("cx", x);
     this._tooltipDot.setAttribute("cy", y);
 
-    // Format value
-    const val = dataPoint.v;
-    let valStr;
-    const abs = Math.abs(val);
-    if (abs >= 1e9) valStr = (val / 1e9).toFixed(1) + "G";
-    else if (abs >= 1e6) valStr = (val / 1e6).toFixed(1) + "M";
-    else if (abs >= 1e4) valStr = (val / 1e3).toFixed(1) + "K";
-    else if (abs >= 100) valStr = Math.round(val).toString();
-    else if (abs >= 1) valStr = val.toFixed(2);
-    else if (abs === 0) valStr = "0";
-    else valStr = val.toFixed(3);
+    const valStr = this.formatValue(dataPoint.v, dataPoint.unit);
 
     // Format time
     const d = new Date(dataPoint.t);

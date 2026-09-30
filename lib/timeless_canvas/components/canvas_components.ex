@@ -1506,6 +1506,8 @@ defmodule TimelessCanvas.Components.CanvasComponents do
       y_labels: y_labels,
       x_labels: x_labels,
       value: current_val,
+      # What the hook's tooltip writes its values in.
+      unit: unit,
       thresholds: alert_thresholds(alert_rules, plot_x, plot_y, plot_w, plot_h, min_val, max_val),
       # Absolute coordinates of the legend value text (the legend chrome
       # itself is server-rendered).

@@ -247,6 +247,51 @@ defmodule TimelessCanvas.DataQueriesTest do
     end
   end
 
+  describe "query_metric_units/1 with no metadata" do
+    defp units_for(metric_name) do
+      top = Element.new(%{id: "top", type: :top_n, meta: %{"metric_name" => metric_name}})
+      graph = Element.new(%{id: "graph", type: :graph, meta: %{"metric_name" => metric_name}})
+      DataQueries.query_metric_units(%{"top" => top, "graph" => graph})
+    end
+
+    test "the unit is the one the metric is named for" do
+      for reply <- [{:ok, nil}, {:ok, %{}}, {:ok, %{type: :gauge, unit: nil}}, {:error, :down}] do
+        FakeDataSource.put(:metric_metadata, reply)
+
+        assert units_for("proc_rss_bytes") == %{"graph" => "bytes", "top" => "bytes"},
+               inspect(reply)
+      end
+    end
+
+    test "a metric named for no unit has none" do
+      FakeDataSource.put(:metric_metadata, {:ok, nil})
+      assert units_for("sys_load1") == %{}
+    end
+
+    test "what the metadata says comes before what the name says" do
+      FakeDataSource.put(:metric_metadata, {:ok, %{type: :gauge, unit: "kilobytes"}})
+      assert units_for("proc_rss_bytes") == %{"graph" => "kilobytes", "top" => "kilobytes"}
+    end
+
+    test "a counter by its name is ranked by rate, and carries no unit there" do
+      FakeDataSource.put(:metric_metadata, {:ok, nil})
+      assert units_for("node_cpu_seconds_total") == %{}
+      assert units_for("http_response_bytes_total") == %{}
+
+      FakeDataSource.put(:metric_metadata, {:ok, %{type: :gauge, unit: "seconds"}})
+      assert units_for("node_cpu_seconds_total") == %{"graph" => "seconds"}
+    end
+
+    test "an element with no metric has no unit, and the backend is not asked" do
+      FakeDataSource.put(:metric_metadata, fn -> flunk("asked for the metadata of nothing") end)
+
+      for meta <- [%{}, %{"metric_name" => ""}, %{"metric_name" => nil}, nil] do
+        graph = Element.new(%{id: "graph", type: :graph, meta: meta})
+        assert DataQueries.query_metric_units(%{"graph" => graph}) == %{}
+      end
+    end
+  end
+
   describe "query_metric_units/1" do
     test "a ranked counter carries no unit, a ranked gauge does" do
       top = Element.new(%{id: "top", type: :top_n, meta: %{"metric_name" => "m"}})

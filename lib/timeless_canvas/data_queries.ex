@@ -11,6 +11,7 @@ defmodule TimelessCanvas.DataQueries do
   """
 
   alias TimelessCanvas.DataSource.Manager
+  alias TimelessCanvas.MetricFormatter
 
   @max_graph_points 60
   @max_graph_points_expanded 300
@@ -204,10 +205,12 @@ defmodule TimelessCanvas.DataQueries do
   end
 
   @doc """
-  Metric units per graph and top_n element id, from metric metadata.
+  Metric units per graph and top_n element id: from the metric's metadata,
+  or from its name where the metadata has none (`MetricFormatter.unit_from_name/1`).
 
   A top_n element ranks counters by rate, so a counter's unit would mislabel
-  its values (CPU seconds per second are not seconds) and is left out.
+  its values (CPU seconds per second are not seconds) and is left out. A
+  counter is what its metadata says is one, or what is named `_total`.
   """
   def query_metric_units(resolved_elements) do
     resolved_elements
@@ -215,10 +218,10 @@ defmodule TimelessCanvas.DataQueries do
     |> concurrent_element_query(fn {id, el} ->
       metric_name = Map.get(el.meta || %{}, "metric_name")
 
-      if metric_name do
+      if is_binary(metric_name) and metric_name != "" do
         case Manager.metric_metadata(metric_name) do
-          {:ok, %{} = metadata} -> unit_for(id, el.type, metadata)
-          _ -> :skip
+          {:ok, %{} = metadata} -> unit_for(id, el.type, metric_name, metadata)
+          _ -> unit_for(id, el.type, metric_name, %{})
         end
       else
         :skip
@@ -226,9 +229,14 @@ defmodule TimelessCanvas.DataQueries do
     end)
   end
 
-  defp unit_for(id, type, metadata) do
-    unit = Map.get(metadata, :unit) || Map.get(metadata, "unit")
-    counter? = to_string(Map.get(metadata, :type) || Map.get(metadata, "type")) == "counter"
+  defp unit_for(id, type, metric_name, metadata) do
+    unit =
+      Map.get(metadata, :unit) || Map.get(metadata, "unit") ||
+        MetricFormatter.unit_from_name(metric_name)
+
+    counter? =
+      to_string(Map.get(metadata, :type) || Map.get(metadata, "type")) == "counter" or
+        String.ends_with?(metric_name, "_total")
 
     if is_nil(unit) or (type == :top_n and counter?), do: :skip, else: {id, unit}
   end
