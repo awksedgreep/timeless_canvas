@@ -2,12 +2,15 @@
 
 ## Unreleased
 
+## v0.5.6 (2026-09-29)
+
 ### Added
 - A `top_n` element ranks the groups of a metric: a table of rows with a bar
   per row, grouped by one or more label keys, live and through the timeline
   scrubber. Clicking a row points any canvas variable bound to one of its
   group-by labels at that row, so the graphs and streams following those
-  variables follow the click.
+  variables follow the click. With nothing to group by it ranks the series
+  themselves, and names each row by what tells it from the others.
 - A graph can combine every series its labels match (`sum`, `avg`, `max`,
   `min`) instead of drawing the first. The properties panel says so when more
   than one series matches and none is combined.
@@ -24,7 +27,6 @@
   filter. Backends should call it rather than keep their own list of meta keys
   that are not labels; a key missing from such a list silently narrows the
   query to nothing.
-
 - The properties panel lists the labels the series of a `top_n` element's
   metric have, under `group_by`, and says so when a key in `group_by` or in a
   `label_filter` is one that none of them has. A key that was misspelt
@@ -37,7 +39,6 @@
   metric could not be found before. `DataSource.filter_series/2` does the
   matching for a backend that has the series in memory, and the behaviour says
   what `list_series_for_host/3` is to match (#20).
-
 - A value is written in the unit its metric is named for, where the backend
   has no metadata for it: `_bytes`, `_pct`, `_per_sec`, `_bytes_per_sec`,
   `_seconds`, `_ms`, `_celsius`, `_rpm`, `_watts`, `_mhz`. A series written
@@ -65,9 +66,6 @@
   a graph it would watch each series on its own, and not the line drawn. The
   rules an element already has are still listed, so that they can be removed
   (#19).
-- The rows of a `top_n` element that ranks series, with nothing to group by,
-  were named by every label they had and cut off before they said which
-  series they were. They are named by what tells them apart (#22).
 - A log stream knows the eight levels of syslog. It knew four, and `notice`,
   which both Timeless collectors write, was not one: a stream could not be
   filtered to it, and its rows were the grey of a level that is not known.
