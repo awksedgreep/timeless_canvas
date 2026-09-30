@@ -249,6 +249,27 @@ defmodule TimelessCanvas.Canvas.Element do
   end
 
   @doc """
+  Whether an element asks for more than one series as it is: every series
+  combined, or a filter or a window that equality on labels cannot say.
+
+  An alert rule is a metric, labels that must be equal, and an aggregate over
+  time. It can watch what such an element selects, and not what it draws.
+  """
+  def combines?(%__MODULE__{meta: meta}), do: combines?(meta)
+
+  def combines?(meta) when is_map(meta) do
+    Enum.any?(~w(aggregate label_filter window), fn key ->
+      case Map.get(meta, key) do
+        value when is_binary(value) -> String.trim(value) != ""
+        nil -> false
+        _other -> true
+      end
+    end)
+  end
+
+  def combines?(_meta), do: false
+
+  @doc """
   Whether a series' labels satisfy a list of matchers. A label the series
   does not carry is not equal to anything, so it passes every `:neq`.
   """

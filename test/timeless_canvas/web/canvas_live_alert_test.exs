@@ -286,6 +286,109 @@ defmodule TimelessCanvas.Web.CanvasLiveAlertTest do
     assert assigns(view).alert_error =~ "Name"
   end
 
+  describe "an element that combines or filters series" do
+    @combining [
+      %{"aggregate" => "sum"},
+      %{"label_filter" => "kind!=slice"},
+      %{"window" => "30"}
+    ]
+
+    test "is not offered an alert, and says why", %{conn: conn, user: user} do
+      for extra <- @combining do
+        meta = Map.merge(%{"metric_name" => "cpu_usage", "host" => "web-1"}, extra)
+        {record, el} = graph_canvas(user, meta)
+        {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+        html = render_hook(view, "element:select", %{"id" => el.id})
+
+        assert html =~ "would not watch what it draws", inspect(extra)
+        refute has_element?(view, ~s{button[phx-click="alert:new"]}), inspect(extra)
+      end
+    end
+
+    test "refuses a rule that is asked for anyway", %{conn: conn, user: user} do
+      for extra <- @combining do
+        meta = Map.merge(%{"metric_name" => "cpu_usage", "host" => "web-1"}, extra)
+        {record, el} = graph_canvas(user, meta)
+        {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+        render_hook(view, "element:select", %{"id" => el.id})
+
+        render_hook(view, "alert:new", %{})
+        assert assigns(view).alert_form == nil
+        refute has_element?(view, "#alert-form")
+
+        render_hook(view, "alert:save", %{
+          "name" => "CPU high",
+          "condition" => "above",
+          "threshold" => "90",
+          "duration" => "60",
+          "aggregate" => "avg",
+          "webhook_url" => "",
+          "webhook_format" => "ntfy"
+        })
+
+        refute_received {:create, _element, _attrs}
+        assert assigns(view).alert_error =~ "would not watch what it draws"
+      end
+    end
+
+    test "still lists the rules it has, so that they can be removed", %{conn: conn, user: user} do
+      Agent.update(StubBackend, fn _ ->
+        [
+          %{
+            id: 7,
+            name: "made before",
+            enabled: true,
+            aggregate: "avg",
+            condition: "above",
+            threshold: 90.0,
+            duration: 0
+          }
+        ]
+      end)
+
+      meta = %{"metric_name" => "cpu_usage", "host" => "web-1", "aggregate" => "sum"}
+      {record, el} = graph_canvas(user, meta)
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = render_hook(view, "element:select", %{"id" => el.id})
+
+      assert html =~ "made before"
+      assert has_element?(view, ~s{button[phx-click="alert:delete"][phx-value-id="7"]})
+      refute has_element?(view, ~s{button[phx-click="alert:new"]})
+    end
+
+    test "setting an aggregate withdraws a form that was open", %{conn: conn, user: user} do
+      {record, el} = graph_canvas(user, %{"metric_name" => "cpu_usage", "host" => "web-1"})
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_hook(view, "element:select", %{"id" => el.id})
+      render_hook(view, "alert:new", %{})
+      assert has_element?(view, "#alert-form")
+
+      render_hook(view, "property:update_meta", %{"element_id" => el.id, "aggregate" => "sum"})
+
+      refute has_element?(view, "#alert-form")
+      assert render(view) =~ "would not watch what it draws"
+    end
+
+    test "blank options do not count", %{conn: conn, user: user} do
+      meta = %{
+        "metric_name" => "cpu_usage",
+        "host" => "web-1",
+        "aggregate" => "",
+        "label_filter" => "  ",
+        "window" => ""
+      }
+
+      {record, el} = graph_canvas(user, meta)
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      html = render_hook(view, "element:select", %{"id" => el.id})
+
+      refute html =~ "would not watch what it draws"
+      assert has_element?(view, ~s{button[phx-click="alert:new"]})
+    end
+  end
+
   test "an element with no metric offers no alert controls", %{conn: conn, user: user} do
     {record, el} = graph_canvas(user, %{})
     {:ok, view, _html} = live(conn, "/canvas/#{record.id}")

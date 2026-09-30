@@ -39,6 +39,11 @@
   its ends, and a graph's tooltip with the axis under it. Where the host
   application has a time zone database, a time on the other side of a change
   to or from summer time is right as well (#18).
+- An alert is not offered on a graph that combines or filters series. A rule
+  is a metric, labels that must be equal, and an aggregate over time: of such
+  a graph it would watch each series on its own, and not the line drawn. The
+  rules an element already has are still listed, so that they can be removed
+  (#19).
 - The popover of a log or a trace row read its timestamp as milliseconds,
   whatever it was in. It reads it as the row does.
 - A text series had no field for its metric name in the properties panel.

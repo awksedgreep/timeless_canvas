@@ -1087,8 +1087,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
             </button>
           </div>
 
+          <div :if={Element.combines?(@selected)} class="properties-panel__hint">
+            {alert_combines_message()}
+          </div>
+
           <button
-            :if={@can_edit and !@alert_form}
+            :if={@can_edit and !@alert_form and !Element.combines?(@selected)}
             type="button"
             class="properties-panel__series-btn"
             phx-click="alert:new"
@@ -1096,7 +1100,12 @@ defmodule TimelessCanvas.Web.CanvasLive do
             Add alert
           </button>
 
-          <form id="alert-form" :if={@alert_form} phx-submit="alert:save" phx-change="alert:change">
+          <form
+            :if={@alert_form && !Element.combines?(@selected)}
+            id="alert-form"
+            phx-submit="alert:save"
+            phx-change="alert:change"
+          >
             <input type="text" name="name" value={@alert_form["name"]} placeholder="Name" />
             <select name="aggregate">
               <option :for={agg <- ~w(avg max min last)} value={agg} selected={agg == @alert_form["aggregate"]}>
@@ -2407,7 +2416,11 @@ defmodule TimelessCanvas.Web.CanvasLive do
   def handle_event("alert:new", _params, socket) do
     case sole_selected_object(socket.assigns.selected_ids, socket.assigns.canvas) do
       %Element{} = element ->
-        {:noreply, assign(socket, alert_form: default_alert_form(element), alert_error: nil)}
+        if Element.combines?(element) do
+          {:noreply, assign(socket, alert_form: nil, alert_error: alert_combines_message())}
+        else
+          {:noreply, assign(socket, alert_form: default_alert_form(element), alert_error: nil)}
+        end
 
       _ ->
         {:noreply, socket}
@@ -2433,6 +2446,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
       attrs = Map.take(params, alert_form_fields())
 
       with %Element{} <- element,
+           :ok <- alert_watches_what_is_drawn(element),
            backend when not is_nil(backend) <- TimelessCanvas.AlertSource.backend(),
            {:ok, attrs} <- validate_alert(attrs),
            {:ok, _id} <- backend.create_rule(element, attrs) do
@@ -4887,6 +4901,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
       )
 
     push_graph_data(socket, Enum.reject([previous_id, element_id], &is_nil/1))
+  end
+
+  # A rule is a metric, labels that must be equal, and an aggregate over
+  # time. Of a graph that combines series, or filters them by what equality
+  # cannot say, it would watch each series it selects and not the line drawn.
+  defp alert_combines_message do
+    "An alert watches each series on its own. This element combines or " <>
+      "filters series, so an alert here would not watch what it draws."
+  end
+
+  defp alert_watches_what_is_drawn(element) do
+    if Element.combines?(element), do: {:error, alert_combines_message()}, else: :ok
   end
 
   # Only elements that select a metric can carry a threshold.
