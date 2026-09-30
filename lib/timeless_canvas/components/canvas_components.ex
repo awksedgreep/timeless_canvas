@@ -593,10 +593,12 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     # (font-size 9 monospace is ~5.4px per char).
     name_budget = max(trunc((assigns.element.width - 70) / 5.4), 4)
 
+    naming = top_row_naming(rows, opts[:group_by], assigns.element)
+
     rows =
       Enum.map(rows, fn row ->
         %{
-          name: row.labels |> top_row_name(opts[:group_by]) |> truncate_text(name_budget),
+          name: row.labels |> top_row_name(naming) |> truncate_text(name_budget),
           value: MetricFormatter.format(row.value, unit),
           bar: if(scale > 0, do: bar_width * max(row.value, 0) / scale, else: 0)
         }
@@ -1550,10 +1552,62 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     max(trunc((width - title_offset - 56) / 4.8), 4)
   end
 
-  # A grouped row is named by its group's values; an ungrouped one is a
-  # single series, so it needs every label to be told apart.
-  defp top_row_name(labels, [_ | _] = group_by) do
-    group_by
+  # Which labels name a row, and in what order: `{:grouped, keys}` or
+  # `{:series, keys}`.
+  #
+  # A grouped row is named by its group. An ungrouped one is a series, which
+  # has every label it was written with, and most of them say nothing of
+  # which series it is. What is left out:
+  #
+  #   * what the element selects by: `host` is the same in every row;
+  #   * what is the same in every row shown;
+  #   * what another label says already: `comm` and `pid`, beside
+  #     `proc` = `postgres[4548]`.
+  #
+  # What is left is in the order of how many rows it tells apart.
+  defp top_row_naming(_rows, [_ | _] = group_by, _element), do: {:grouped, group_by}
+
+  defp top_row_naming(rows, _group_by, element) do
+    selected =
+      for {key, :eq, [_one]} <- Element.query_matchers(element), into: MapSet.new(), do: key
+
+    labels = Enum.map(rows, &Map.new(&1.labels, fn {k, v} -> {to_string(k), to_string(v)} end))
+
+    keys =
+      labels
+      |> Enum.flat_map(&Map.keys/1)
+      |> Enum.uniq()
+      |> Enum.reject(&MapSet.member?(selected, &1))
+      |> Enum.sort()
+
+    told_apart = Map.new(keys, fn key -> {key, labels |> Enum.map(& &1[key]) |> Enum.uniq()} end)
+
+    varying =
+      if length(labels) > 1,
+        do: Enum.filter(keys, &(length(told_apart[&1]) > 1)),
+        else: keys
+
+    kept = Enum.reject(varying, &said_by_another?(&1, varying, labels))
+
+    {:series, Enum.sort_by(kept, &{-length(told_apart[&1]), &1})}
+  end
+
+  # A label says nothing new if, in every row, its value is part of one
+  # other label's value. Of two that are equal in every row, the first by
+  # name is kept.
+  defp said_by_another?(key, keys, labels) do
+    Enum.any?(keys, fn other ->
+      other != key and
+        Enum.all?(labels, fn row ->
+          mine = Map.get(row, key, "")
+          theirs = Map.get(row, other, "")
+          mine != "" and String.contains?(theirs, mine) and (mine != theirs or other < key)
+        end)
+    end)
+  end
+
+  defp top_row_name(labels, {:grouped, keys}) do
+    keys
     |> Enum.map(&Map.get(labels, &1))
     |> Enum.reject(&(&1 in [nil, ""]))
     |> case do
@@ -1562,12 +1616,14 @@ defmodule TimelessCanvas.Components.CanvasComponents do
     end
   end
 
-  defp top_row_name(labels, _group_by) when map_size(labels) == 0, do: "(all)"
-
-  defp top_row_name(labels, _group_by) do
-    labels
-    |> Enum.sort_by(fn {key, _value} -> key end)
-    |> Enum.map_join(", ", fn {key, value} -> "#{key}=#{value}" end)
+  defp top_row_name(labels, {:series, keys}) do
+    keys
+    |> Enum.map(&Map.get(labels, &1))
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> case do
+      [] -> "(all)"
+      values -> Enum.map_join(values, "  ", &to_string/1)
+    end
   end
 
   defp truncate_text(text, max_chars) do

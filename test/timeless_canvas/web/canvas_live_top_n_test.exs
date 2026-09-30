@@ -184,6 +184,156 @@ defmodule TimelessCanvas.Web.CanvasLiveTopNTest do
     end
   end
 
+  describe "rows of an ungrouped ranking" do
+    defp row_names(view) do
+      view
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-element-id="el-1"] text[font-family="monospace"]))
+      |> Enum.map(&(&1 |> LazyHTML.text() |> String.trim()))
+      |> Enum.take_every(2)
+    end
+
+    defp ungrouped(user, rows, meta \\ %{}) do
+      FakeDataSource.put(:top_series, {:ok, rows})
+
+      element =
+        top_n(Map.merge(%{"group_by" => "", "metric_name" => "proc_cpu_pct"}, meta))
+        |> Map.put(:width, 420.0)
+
+      seed(user, [element])
+    end
+
+    test "are named by what tells them apart", %{conn: conn, user: user} do
+      record =
+        ungrouped(user, [
+          %{
+            labels: %{
+              "host" => "web-01",
+              "proc" => "postgres[4548]",
+              "pid" => "4548",
+              "comm" => "postgres",
+              "user" => "postgres",
+              "unit" => "postgresql.service"
+            },
+            value: 3.0
+          },
+          %{
+            labels: %{
+              "host" => "web-01",
+              "proc" => "postgres[4550]",
+              "pid" => "4550",
+              "comm" => "postgres",
+              "user" => "postgres",
+              "unit" => "postgresql.service"
+            },
+            value: 2.0
+          },
+          %{
+            labels: %{
+              "host" => "web-01",
+              "proc" => "sshd[812]",
+              "pid" => "812",
+              "comm" => "sshd",
+              "user" => "root",
+              "unit" => "sshd.service"
+            },
+            value: 1.0
+          }
+        ])
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      # host is what the element selects by; pid and comm are in proc; user
+      # is in unit for one row and not for the others, so it is kept.
+      assert row_names(view) == [
+               "postgres[4548]  postgresql.service  postgres",
+               "postgres[4550]  postgresql.service  postgres",
+               "sshd[812]  sshd.service  root"
+             ]
+    end
+
+    test "leave out what is the same in every row", %{conn: conn, user: user} do
+      record =
+        ungrouped(user, [
+          %{labels: %{"host" => "web-01", "dev" => "nvme0n1", "kind" => "disk"}, value: 3.0},
+          %{labels: %{"host" => "web-01", "dev" => "nvme1n1", "kind" => "disk"}, value: 2.0}
+        ])
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      assert row_names(view) == ["nvme0n1", "nvme1n1"]
+    end
+
+    test "a single row keeps what the element does not select by", %{conn: conn, user: user} do
+      record =
+        ungrouped(user, [%{labels: %{"host" => "web-01", "cpu" => "all"}, value: 3.0}])
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      assert row_names(view) == ["all"]
+    end
+
+    test "a row with nothing to be named by is all of them", %{conn: conn, user: user} do
+      record = ungrouped(user, [%{labels: %{"host" => "web-01"}, value: 3.0}])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      assert row_names(view) == ["(all)"]
+    end
+
+    test "a label filtered by more than one value still names the row", %{
+      conn: conn,
+      user: user
+    } do
+      record =
+        ungrouped(
+          user,
+          [
+            %{labels: %{"host" => "web-01", "comm" => "postgres"}, value: 3.0},
+            %{labels: %{"host" => "web-01", "comm" => "pgbouncer"}, value: 2.0}
+          ],
+          %{"label_filter" => "comm=postgres|pgbouncer"}
+        )
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      assert row_names(view) == ["postgres", "pgbouncer"]
+    end
+
+    test "labels that are equal in every row are written once", %{conn: conn, user: user} do
+      record =
+        ungrouped(user, [
+          %{labels: %{"host" => "h", "name" => "a", "alias" => "a"}, value: 3.0},
+          %{labels: %{"host" => "h", "name" => "b", "alias" => "b"}, value: 2.0}
+        ])
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      assert row_names(view) == ["a", "b"]
+    end
+
+    test "labels that are not text are written, and do not raise", %{conn: conn, user: user} do
+      record =
+        ungrouped(user, [
+          %{labels: %{"host" => "h", "pid" => 4548, :shard => :a}, value: 3.0},
+          %{labels: %{"host" => "h", "pid" => 812, :shard => :b}, value: 2.0}
+        ])
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_async(view)
+
+      assert [first, second] = row_names(view)
+      assert first =~ "4548"
+      assert second =~ "812"
+    end
+  end
+
   describe "placement" do
     test "is offered and places an element", %{conn: conn, user: user} do
       record = seed(user, [])

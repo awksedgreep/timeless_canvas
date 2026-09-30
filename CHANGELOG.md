@@ -60,6 +60,9 @@
   a graph it would watch each series on its own, and not the line drawn. The
   rules an element already has are still listed, so that they can be removed
   (#19).
+- The rows of a `top_n` element that ranks series, with nothing to group by,
+  were named by every label they had and cut off before they said which
+  series they were. They are named by what tells them apart (#22).
 - The popover of a log or a trace row read its timestamp as milliseconds,
   whatever it was in. It reads it as the row does.
 - A text series had no field for its metric name in the properties panel.
