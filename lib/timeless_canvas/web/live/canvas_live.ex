@@ -961,7 +961,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
             type="text"
             name="series_filter"
             value={@series_filter}
-            placeholder="Filter series..."
+            placeholder="Metric, or a label's value..."
             autocomplete="off"
             phx-keyup="series:filter"
             phx-debounce="200"

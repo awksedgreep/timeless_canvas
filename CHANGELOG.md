@@ -25,6 +25,14 @@
   that are not labels; a key missing from such a list silently narrows the
   query to nothing.
 
+### Changed
+- The series filter in the properties panel finds a series by the value of
+  any of its labels as well as by the name of its metric, and every word of
+  it has to be found: `proc_cpu postgres`. One series among the hundreds of a
+  metric could not be found before. `DataSource.filter_series/2` does the
+  matching for a backend that has the series in memory, and the behaviour says
+  what `list_series_for_host/3` is to match (#20).
+
 ### Fixed
 - A value that changed while an event was in flight changed back, and stayed
   so until it changed again: the value of a text series, the rows of a stream,

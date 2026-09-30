@@ -134,7 +134,7 @@ defmodule TimelessCanvas.DataSource.Random do
   def list_series_for_host(_state, host, opts) do
     @demo_metrics
     |> Enum.map(&{&1, %{"host" => host}})
-    |> DataSource.apply_query_opts(opts, fn {name, _labels} -> name end)
+    |> DataSource.filter_series(opts)
   end
 
   @impl true

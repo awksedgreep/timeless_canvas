@@ -18,11 +18,23 @@ defmodule TimelessCanvas.DataSource do
   can bound work at the source instead of materializing full universes:
 
     * `:filter` — `String.t()` or `nil`; case-insensitive substring match
-      against the host name, label value, or metric name respectively
+      against the host name or the label value. For a series, see below
     * `:limit` — `pos_integer()`; maximum number of results to return
 
   Backends should apply the filter first, then the limit.
   `apply_query_opts/3` is provided as a convenience for in-memory backends.
+
+  ### Filtering series
+
+  A series is found by the name of its metric **or by the value of any of its
+  labels**. Where a metric has a series for each of many things, as
+  `proc_cpu_pct` has for each process, the name of the metric finds all of
+  them and no one of them; it is a label's value that says which.
+
+  The filter is words. A series matches when every word is in its metric's
+  name or in one of its labels' values, in any case: `proc_cpu postgres` is
+  the postgres series of the metrics named for `proc_cpu`. `filter_series/2`
+  does this for a backend that has the series in memory.
 
   ## Batch status queries
 
@@ -222,6 +234,39 @@ defmodule TimelessCanvas.DataSource do
     |> filter_by(filter, name_fun)
     |> take_limit(limit)
   end
+
+  @doc """
+  Applies `:filter` and `:limit` to a list of `{metric_name, labels}`, as
+  `list_series_for_host/3` is to: every word of the filter has to be in the
+  metric's name or in one of the labels' values.
+  """
+  @spec filter_series([{String.t(), map()}], query_opts()) :: [{String.t(), map()}]
+  def filter_series(series, opts) when is_list(series) do
+    words =
+      opts
+      |> Keyword.get(:filter)
+      |> to_string()
+      |> String.downcase()
+      |> String.split()
+
+    series
+    |> Enum.filter(&series_matches?(&1, words))
+    |> take_limit(Keyword.get(opts, :limit))
+  end
+
+  defp series_matches?(_series, []), do: true
+
+  defp series_matches?({name, labels}, words) do
+    labels = if is_map(labels), do: labels, else: %{}
+
+    texts =
+      [name | Map.values(labels)]
+      |> Enum.map(&(&1 |> to_string() |> String.downcase()))
+
+    Enum.all?(words, fn word -> Enum.any?(texts, &String.contains?(&1, word)) end)
+  end
+
+  defp series_matches?(_series, _words), do: false
 
   defp filter_by(list, nil, _name_fun), do: list
   defp filter_by(list, "", _name_fun), do: list

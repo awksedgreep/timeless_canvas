@@ -387,6 +387,36 @@ defmodule TimelessCanvas.Web.CanvasLiveTopNTest do
     end
   end
 
+  describe "series filter" do
+    test "finds one series among many by a label's value", %{conn: conn, user: user} do
+      series =
+        for n <- 1..300 do
+          {"proc_cpu_pct", %{"host" => "web-01", "proc" => "worker[#{n}]", "comm" => "worker"}}
+        end ++
+          [
+            {"proc_cpu_pct",
+             %{"host" => "web-01", "proc" => "postgres[4548]", "comm" => "postgres"}}
+          ]
+
+      FakeDataSource.put(:list_series_for_host, series)
+      record = seed(user, [graph(%{"metric_name" => "proc_cpu_pct"})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      # The list is cut at 200, and the one wanted is the 301st.
+      html = render_hook(view, "element:select", %{"id" => "el-1"})
+      assert html =~ "showing first 200 series"
+      refute html =~ "postgres[4548]"
+
+      html = render_hook(view, "series:filter", %{"value" => "postgres"})
+      assert html =~ "postgres[4548]"
+      refute html =~ "showing first 200 series"
+
+      html = render_hook(view, "series:filter", %{"value" => "proc_cpu 4548"})
+      assert html =~ "postgres[4548]"
+      refute html =~ "worker[1]"
+    end
+  end
+
   describe "row click" do
     @variables %{
       "comm" => %{"type" => "label", "label_key" => "comm", "current" => ""},

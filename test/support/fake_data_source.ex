@@ -163,8 +163,7 @@ defmodule TimelessCanvas.Test.FakeDataSource do
 
   @impl true
   def list_series_for_host(_state, _host, opts) do
-    get(:list_series_for_host, [])
-    |> DataSource.apply_query_opts(opts, fn {name, _labels} -> name end)
+    get(:list_series_for_host, []) |> DataSource.filter_series(opts)
   end
 
   @impl true
