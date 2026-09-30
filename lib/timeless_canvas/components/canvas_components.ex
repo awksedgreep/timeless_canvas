@@ -426,7 +426,12 @@ defmodule TimelessCanvas.Components.CanvasComponents do
             label -> "#{label} | #{metric_name}"
           end
 
-        graph_title = if unit, do: "#{base_title} (#{unit})", else: base_title
+        # A unit that was read from the metric's name is in the title already.
+        graph_title =
+          if unit && MetricFormatter.unit_from_name(metric_name) != unit,
+            do: "#{base_title} (#{unit})",
+            else: base_title
+
         graph_icon = IconCatalog.graph_icon_name(assigns.element)
 
         # The pushed current-value text is right-aligned at x + width - 18;

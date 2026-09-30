@@ -334,6 +334,36 @@ defmodule TimelessCanvas.Web.CanvasLiveTopNTest do
     end
   end
 
+  describe "a graph's title" do
+    test "names a unit that the backend gave, as it did", %{conn: conn, user: user} do
+      FakeDataSource.put(:metric_metadata, {:ok, %{type: :gauge, unit: "bytes"}})
+      record = seed(user, [graph(%{"metric_name" => "memory_used"})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      assert render_async(view) =~ "cpu | memory_used (bytes)"
+    end
+
+    test "does not say again a unit that is in the metric's name", %{conn: conn, user: user} do
+      record = seed(user, [graph(%{"metric_name" => "sys_io_write_bytes_per_sec"})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      html = render_async(view)
+
+      assert html =~ "cpu | sys_io_write_bytes_per_sec"
+      refute html =~ "(bytes_per_second)"
+    end
+
+    test "names a unit the backend gave that is not the one in the name", %{
+      conn: conn,
+      user: user
+    } do
+      FakeDataSource.put(:metric_metadata, {:ok, %{type: :gauge, unit: "kilobytes"}})
+      record = seed(user, [graph(%{"metric_name" => "proc_rss_bytes"})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      assert render_async(view) =~ "cpu | proc_rss_bytes (kilobytes)"
+    end
+  end
+
   describe "placement" do
     test "is offered and places an element", %{conn: conn, user: user} do
       record = seed(user, [])
