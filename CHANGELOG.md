@@ -63,6 +63,11 @@
 - The rows of a `top_n` element that ranks series, with nothing to group by,
   were named by every label they had and cut off before they said which
   series they were. They are named by what tells them apart (#22).
+- A log stream knows the eight levels of syslog. It knew four, and `notice`,
+  which both Timeless collectors write, was not one: a stream could not be
+  filtered to it, and its rows were the grey of a level that is not known.
+  The level is chosen from a list. A level is the same colour as an atom and
+  as text, which is how a store asked over HTTP answers (#23).
 - The popover of a log or a trace row read its timestamp as milliseconds,
   whatever it was in. It reads it as the row does.
 - A text series had no field for its metric name in the properties panel.

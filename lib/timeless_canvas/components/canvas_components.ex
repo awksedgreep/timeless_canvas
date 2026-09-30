@@ -1265,11 +1265,26 @@ defmodule TimelessCanvas.Components.CanvasComponents do
 
   # --- Log/Trace stream helpers ---
 
-  defp log_level_color(:error), do: "#ef4444"
-  defp log_level_color(:warning), do: "#f59e0b"
-  defp log_level_color(:info), do: "#22c55e"
-  defp log_level_color(:debug), do: "#94a3b8"
-  defp log_level_color(_), do: "#94a3b8"
+  @doc """
+  The colour a log level is written in. The levels are the eight of syslog,
+  as an atom or as text, in any case: a store that is asked over HTTP
+  answers in text. A level that is not one of them is the grey of `debug`.
+  """
+  def log_level_color(level) when is_atom(level) and not is_nil(level),
+    do: level |> Atom.to_string() |> log_level_color()
+
+  def log_level_color(level) when is_binary(level) do
+    case String.downcase(level) do
+      worst when worst in ~w(emergency alert critical) -> "#dc2626"
+      "error" -> "#ef4444"
+      warning when warning in ~w(warning warn) -> "#f59e0b"
+      "notice" -> "#38bdf8"
+      "info" -> "#22c55e"
+      _ -> "#94a3b8"
+    end
+  end
+
+  def log_level_color(_level), do: "#94a3b8"
 
   defp format_log_entry(entry, tz) do
     ts = format_stream_timestamp(entry.timestamp, tz)

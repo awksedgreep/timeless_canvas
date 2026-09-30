@@ -20,6 +20,9 @@ defmodule TimelessCanvas.DataQueries do
   @max_top_limit 50
   @max_window 86_400
   @aggregates ~w(sum avg max min)
+  # The eight levels of syslog, and `all`. As atoms, so that each exists to
+  # be found by the text a level is typed or chosen as.
+  @log_levels ~w(all debug info notice warning error critical alert emergency)a
   # Per-element queries run in the caller process; fan them out with
   # bounded concurrency so backend I/O overlaps.
   @element_query_concurrency 8
@@ -320,6 +323,9 @@ defmodule TimelessCanvas.DataQueries do
     )
   end
 
+  @doc "The levels a log stream can be filtered to, as text: `all`, and the eight of syslog."
+  def log_levels, do: Enum.map(@log_levels, &Atom.to_string/1)
+
   @doc "Build stream-backend query opts from a log_stream element's meta."
   def build_log_opts(meta) do
     meta = if is_map(meta), do: meta, else: %{}
@@ -336,7 +342,7 @@ defmodule TimelessCanvas.DataQueries do
       case Map.get(meta, "level") do
         nil -> opts
         "" -> opts
-        level -> maybe_put_known_atom(opts, :level, level, ~w(all debug info warning error))
+        level -> maybe_put_known_atom(opts, :level, level, Enum.map(@log_levels, &to_string/1))
       end
 
     case Map.get(meta, "metadata_filter") do

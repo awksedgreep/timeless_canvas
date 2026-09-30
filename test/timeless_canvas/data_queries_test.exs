@@ -45,6 +45,14 @@ defmodule TimelessCanvas.DataQueriesTest do
     assert DataQueries.build_log_opts(%{"level" => "error"})[:level] == :error
     refute Keyword.has_key?(DataQueries.build_log_opts(%{"level" => "not-a-level"}), :level)
 
+    for level <- ~w(debug info notice warning error critical alert emergency all) do
+      assert DataQueries.build_log_opts(%{"level" => level})[:level] ==
+               String.to_existing_atom(level)
+    end
+
+    refute Keyword.has_key?(DataQueries.build_log_opts(%{"level" => "NOTICE"}), :level)
+    refute Keyword.has_key?(DataQueries.build_log_opts(%{"level" => "Elixir.System"}), :level)
+
     assert DataQueries.build_trace_opts(%{"kind" => "server"})[:kind] == :server
     refute Keyword.has_key?(DataQueries.build_trace_opts(%{"kind" => "Elixir.System"}), :kind)
   end

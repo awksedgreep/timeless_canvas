@@ -1030,6 +1030,15 @@ defmodule TimelessCanvas.Web.CanvasLive do
                 {label}
               </option>
             </select>
+            <select :if={@selected.type == :log_stream && field == "level"} name={field}>
+              <option
+                :for={{value, label} <- log_level_options(@selected.meta[field])}
+                value={value}
+                selected={value == (@selected.meta[field] || "")}
+              >
+                {label}
+              </option>
+            </select>
             <select :if={@selected.type == :top_n && field == "order"} name={field}>
               <option
                 :for={{value, label} <- [{"desc", "highest first"}, {"asc", "lowest first"}]}
@@ -1294,7 +1303,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
         meta_rows: meta_rows,
         ts: ts,
         level: level,
-        level_atom: entry[:level]
+        level_atom: entry[:level],
+        # As wide as it was for the levels it was made for, and wider for
+        # CRITICAL and EMERGENCY.
+        badge_w: max(32, Float.round(String.length(level) * 4.2 + 2, 1))
       )
 
     ~H"""
@@ -1302,9 +1314,9 @@ defmodule TimelessCanvas.Web.CanvasLive do
       <rect x={@x} y={@y} width={@box_w} height={@box_h} rx="4" fill="#0f172a" stroke="#334155" stroke-width="0.5" />
       <rect x={@x} y={@y} width={@box_w} height={@header_h} rx="4" fill="#1e293b" />
       <rect x={@x} y={@y + @header_h - 4} width={@box_w} height="4" fill="#1e293b" />
-      <rect x={@x + 8} y={@y + 6} width="32" height="12" rx="2" fill={log_level_color(@level_atom)} opacity="0.2" />
-      <text x={@x + 24} y={@y + 15} text-anchor="middle" fill={log_level_color(@level_atom)} font-size="7" font-weight="bold" font-family="monospace">{@level}</text>
-      <text x={@x + 48} y={@y + 15} fill="#94a3b8" font-size="7" font-family="monospace">{@ts}</text>
+      <rect x={@x + 8} y={@y + 6} width={@badge_w} height="12" rx="2" fill={log_level_color(@level_atom)} opacity="0.2" />
+      <text x={@x + 8 + @badge_w / 2} y={@y + 15} text-anchor="middle" fill={log_level_color(@level_atom)} font-size="7" font-weight="bold" font-family="monospace">{@level}</text>
+      <text x={@x + 16 + @badge_w} y={@y + 15} fill="#94a3b8" font-size="7" font-family="monospace">{@ts}</text>
       <text x={@x + @box_w - 14} y={@y + 15} fill="#64748b" font-size="9" cursor="pointer">x</text>
       <text
         :for={{line, i} <- Enum.with_index(@msg_lines)}
@@ -1440,11 +1452,6 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end)
     |> Enum.take(15)
   end
-
-  defp log_level_color(:error), do: "#ef4444"
-  defp log_level_color(:warning), do: "#f59e0b"
-  defp log_level_color(:info), do: "#22c55e"
-  defp log_level_color(_), do: "#94a3b8"
 
   # Scalable replacement for option-list dropdowns: the full option
   # universe never leaves the data source; opening a typeahead or typing
@@ -2018,9 +2025,22 @@ defmodule TimelessCanvas.Web.CanvasLive do
   # from the host's series; every other type names it directly.
   defp text_meta_field?(type, "metric_name"), do: type != :graph
   defp text_meta_field?(:top_n, "order"), do: false
+  defp text_meta_field?(:log_stream, "level"), do: false
 
   defp text_meta_field?(_type, field),
     do: field not in ["icon", "os_icon", "host", "graph_series", "aggregate"]
+
+  # What a log stream can be filtered to. A level an element has that is
+  # none of them is offered as it is, so that opening the panel does not
+  # change it: it filters nothing, which is what it did.
+  defp log_level_options(current) do
+    levels = DataQueries.log_levels() -- ["all"]
+    known = [{"", "every level"} | Enum.map(levels, &{&1, &1})]
+
+    if current in [nil, ""] or current in levels,
+      do: known,
+      else: known ++ [{current, "#{current} (every level)"}]
+  end
 
   defp default_meta_value(:top_n, "aggregate"), do: "sum"
   defp default_meta_value(_type, _field), do: ""
