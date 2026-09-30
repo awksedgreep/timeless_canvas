@@ -25,6 +25,11 @@
   that are not labels; a key missing from such a list silently narrows the
   query to nothing.
 
+- The properties panel lists the labels the series of a `top_n` element's
+  metric have, under `group_by`, and says so when a key in `group_by` or in a
+  `label_filter` is one that none of them has. A key that was misspelt
+  grouped by nothing, and the element showed one row named `(none)` (#24).
+
 ### Changed
 - The series filter in the properties panel finds a series by the value of
   any of its labels as well as by the name of its metric, and every word of

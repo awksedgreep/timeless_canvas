@@ -179,6 +179,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
           series_truncated: false,
           series_loading: false,
           series_host: nil,
+          metric_label_keys: [],
           alert_rules: [],
           alert_element_id: nil,
           alert_form: nil,
@@ -729,6 +730,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
         series_filter={@series_filter}
         series_truncated={@series_truncated}
         series_loading={@series_loading}
+        metric_label_keys={@metric_label_keys}
         alert_rules={@alert_rules}
         alert_form={@alert_form}
         alert_error={@alert_error}
@@ -1056,6 +1058,18 @@ defmodule TimelessCanvas.Web.CanvasLive do
               placeholder={meta_placeholder(@selected.type, field)}
               phx-debounce="300"
             />
+            <span
+              :if={field == "group_by" and @metric_label_keys != []}
+              class="properties-panel__hint"
+            >
+              Labels: {Enum.join(@metric_label_keys, ", ")}
+            </span>
+            <span
+              :for={key <- unknown_label_keys(@selected, field, @metric_label_keys)}
+              class="properties-panel__hint properties-panel__hint--warning"
+            >
+              No series of this metric has a label named {key}.
+            </span>
           </div>
         </form>
         <div
@@ -2041,6 +2055,23 @@ defmodule TimelessCanvas.Web.CanvasLive do
       do: known,
       else: known ++ [{current, "#{current} (every level)"}]
   end
+
+  # The keys an element asks for by name, in `group_by` or `label_filter`,
+  # that none of its metric's series has. Nothing where the series' keys are
+  # not known: a key cannot be said to be wrong against nothing.
+  defp unknown_label_keys(_element, _field, []), do: []
+
+  defp unknown_label_keys(%Element{meta: meta}, "group_by", known),
+    do: DataQueries.build_top_opts(meta)[:group_by] -- known
+
+  defp unknown_label_keys(%Element{} = element, "label_filter", known) do
+    for {key, _op, _values} <- Element.label_filter(element),
+        key not in known,
+        uniq: true,
+        do: key
+  end
+
+  defp unknown_label_keys(_element, _field, _known), do: []
 
   defp default_meta_value(:top_n, "aggregate"), do: "sum"
   defp default_meta_value(_type, _field), do: ""
@@ -3717,10 +3748,10 @@ defmodule TimelessCanvas.Web.CanvasLive do
   end
 
   defp maybe_refresh_selected_series(socket, id, old_meta, new_meta) do
-    if new_meta["host"] != old_meta["host"] do
-      fetch_series_for_selected(socket, id)
-    else
-      socket
+    cond do
+      new_meta["host"] != old_meta["host"] -> fetch_series_for_selected(socket, id)
+      new_meta["metric_name"] != old_meta["metric_name"] -> assign_metric_label_keys(socket, id)
+      true -> socket
     end
   end
 
@@ -5090,6 +5121,7 @@ defmodule TimelessCanvas.Web.CanvasLive do
             series_loading: grouped == [] and not StatusManager.series_loaded?(host),
             series_host: host
           )
+          |> assign_metric_label_keys(element_id)
           |> manage_series_subscription(grouped == [] and not StatusManager.series_loaded?(host))
         else
           reset_available_series(socket)
@@ -5100,9 +5132,48 @@ defmodule TimelessCanvas.Web.CanvasLive do
     end
   end
 
+  # The label keys of the series of the element's metric, for an element that
+  # asks for labels by name: `group_by`, `label_filter`. Empty where they are
+  # not known, which is not the same as there being none.
+  #
+  # They are read from the series the panel already has. Where the metric is
+  # not among those, because the list was filtered or cut off, the backend is
+  # asked for that metric's, once, with the same bound.
+  defp assign_metric_label_keys(socket, element_id) do
+    keys =
+      case Map.get(socket.assigns.resolved_elements, element_id) do
+        %Element{type: type, meta: %{"metric_name" => metric} = meta}
+        when type in [:top_n, :graph] and is_binary(metric) and metric != "" ->
+          host = meta["host"] || meta["service_name"]
+
+          case series_for_metric(socket.assigns.available_series, metric) do
+            [] when is_binary(host) and host != "" ->
+              host
+              |> StatusManager.list_series_for_host(filter: metric, limit: @series_limit)
+              |> Enum.flat_map(fn
+                {^metric, labels} when is_map(labels) -> [labels]
+                _other -> []
+              end)
+
+            labels_list ->
+              labels_list
+          end
+          |> Enum.flat_map(&Map.keys/1)
+          |> Enum.map(&to_string/1)
+          |> Enum.uniq()
+          |> Enum.sort()
+
+        _ ->
+          []
+      end
+
+    assign(socket, metric_label_keys: keys)
+  end
+
   defp reset_available_series(socket) do
     socket
     |> assign(
+      metric_label_keys: [],
       available_series: [],
       series_filter: "",
       series_truncated: false,

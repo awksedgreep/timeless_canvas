@@ -537,6 +537,143 @@ defmodule TimelessCanvas.Web.CanvasLiveTopNTest do
     end
   end
 
+  describe "labels asked for by name" do
+    @unit_series [
+      {"unit_memory_bytes", %{"host" => "web-01", "unit" => "pg.service", "kind" => "service"}},
+      {"unit_memory_bytes", %{"host" => "web-01", "unit" => "user.slice", "kind" => "slice"}},
+      {"sys_load1", %{"host" => "web-01"}}
+    ]
+
+    defp units(meta) do
+      top_n(Map.merge(%{"metric_name" => "unit_memory_bytes", "group_by" => "unit"}, meta))
+    end
+
+    test "the labels the metric's series have are offered", %{conn: conn, user: user} do
+      FakeDataSource.put(:list_series_for_host, @unit_series)
+      record = seed(user, [units(%{})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = render_hook(view, "element:select", %{"id" => "el-1"})
+
+      assert html =~ "Labels: host, kind, unit"
+      refute html =~ "No series of this metric has a label"
+    end
+
+    test "a key in group_by that no series has is said to be one", %{conn: conn, user: user} do
+      FakeDataSource.put(:list_series_for_host, @unit_series)
+      record = seed(user, [units(%{"group_by" => "unit, knid"})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = render_hook(view, "element:select", %{"id" => "el-1"})
+
+      assert html =~ "No series of this metric has a label named knid."
+      refute html =~ "named unit."
+
+      html =
+        render_hook(view, "property:update_meta", %{"element_id" => "el-1", "group_by" => "kind"})
+
+      refute html =~ "No series of this metric has a label"
+    end
+
+    test "a key in label_filter that no series has is said to be one", %{conn: conn, user: user} do
+      FakeDataSource.put(:list_series_for_host, @unit_series)
+      record = seed(user, [units(%{"label_filter" => "kind!=slice, knid=service, knid!=x"})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = render_hook(view, "element:select", %{"id" => "el-1"})
+
+      assert html =~ "No series of this metric has a label named knid."
+      # Said once, for a key asked for twice.
+      assert length(String.split(html, "named knid.")) == 2
+      refute html =~ "named kind."
+    end
+
+    test "a graph's label_filter is checked as well", %{conn: conn, user: user} do
+      FakeDataSource.put(:list_series_for_host, @unit_series)
+
+      record =
+        seed(user, [
+          graph(%{"metric_name" => "unit_memory_bytes", "label_filter" => "sort!=slice"})
+        ])
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      html = render_hook(view, "element:select", %{"id" => "el-1"})
+
+      assert html =~ "No series of this metric has a label named sort."
+    end
+
+    test "nothing is said of a key where the series are not known", %{conn: conn, user: user} do
+      FakeDataSource.put(:list_series_for_host, [])
+      record = seed(user, [units(%{"group_by" => "anything"})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = render_hook(view, "element:select", %{"id" => "el-1"})
+
+      refute html =~ "Labels:"
+      refute html =~ "No series of this metric has a label"
+    end
+
+    test "changing the metric changes what is offered", %{conn: conn, user: user} do
+      FakeDataSource.put(:list_series_for_host, [
+        {"proc_cpu_pct", %{"host" => "web-01", "proc" => "a[1]", "comm" => "a"}} | @unit_series
+      ])
+
+      record = seed(user, [units(%{})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_hook(view, "element:select", %{"id" => "el-1"})
+
+      html =
+        render_hook(view, "property:update_meta", %{
+          "element_id" => "el-1",
+          "metric_name" => "proc_cpu_pct"
+        })
+
+      assert html =~ "Labels: comm, host, proc"
+      assert html =~ "No series of this metric has a label named unit."
+    end
+
+    test "a metric that the list was cut off before is asked for by name", %{
+      conn: conn,
+      user: user
+    } do
+      crowd =
+        for n <- 1..250, do: {"aaa_metric", %{"host" => "web-01", "n" => Integer.to_string(n)}}
+
+      FakeDataSource.put(:list_series_for_host, crowd ++ @unit_series)
+      record = seed(user, [units(%{})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+
+      html = render_hook(view, "element:select", %{"id" => "el-1"})
+
+      assert html =~ "showing first 200 series"
+      assert html =~ "Labels: host, kind, unit"
+    end
+
+    test "typing in the series filter does not change what is offered", %{conn: conn, user: user} do
+      FakeDataSource.put(:list_series_for_host, @unit_series)
+      record = seed(user, [units(%{})])
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      render_hook(view, "element:select", %{"id" => "el-1"})
+
+      html = render_hook(view, "series:filter", %{"value" => "sys_load"})
+
+      assert html =~ "Labels: host, kind, unit"
+    end
+
+    test "an element of another kind is offered nothing", %{conn: conn, user: user} do
+      FakeDataSource.put(:list_series_for_host, @unit_series)
+
+      record =
+        seed(user, [%{type: :text_series, meta: %{"host" => "web-01", "metric_name" => "m"}}])
+
+      {:ok, view, _html} = live(conn, "/canvas/#{record.id}")
+      html = render_hook(view, "element:select", %{"id" => "el-1"})
+
+      refute html =~ "Labels:"
+      assert :sys.get_state(view.pid).socket.assigns.metric_label_keys == []
+    end
+  end
+
   describe "series filter" do
     test "finds one series among many by a label's value", %{conn: conn, user: user} do
       series =

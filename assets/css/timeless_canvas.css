@@ -905,6 +905,10 @@ body.tc-canvas-open {
   fill: rgba(99, 102, 241, 0.15);
 }
 
+.properties-panel__hint--warning {
+  color: #f59e0b;
+}
+
 .canvas-top-row {
   cursor: pointer;
 }
